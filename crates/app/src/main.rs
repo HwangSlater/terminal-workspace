@@ -7,8 +7,10 @@ use common::Result;
 use config::AppConfig;
 use domain::{FailedEventRepository, NotificationRepository, PresenceRepository, PresenceStatus};
 use events::{EventBus, EventDispatcher, EventHandler, InProcessEventBus};
+use integration::{IntegrationAdapter, SlackAdapter, SlackConfig, SlackMessenger};
 use logging::{init_logger, spans::application_span};
 use registry::InMemoryUiRegistry;
+use secrets::SecretProviderChain;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
 use tracing::info;
@@ -33,17 +35,47 @@ async fn main() -> Result<()> {
     let storage = Arc::new(RedbStorageBackend::open(&storage::standard_db_path()).await?);
     info!("Storage backend ready.");
 
-    // 4. Wire the CQRS write path: Command -> WorkspaceCommandHandler ->
+    // 4. Construct the Slack adapter (Phase 6) if enabled, resolving its
+    //    credential via SecretProviderChain (ADR-0006) before anything else
+    //    needs it. `initialize()` never errors on a missing token — it just
+    //    reports Disconnected (docs/04-extensions/integration-contract.md §2.3).
+    let slack_adapter: Option<Arc<SlackAdapter>> = if config.integrations.slack.enabled {
+        let adapter = Arc::new(SlackAdapter::new(SlackConfig {
+            channel_ids: config.integrations.slack.channel_ids.clone(),
+            watched_user_ids: config.integrations.slack.watched_user_ids.clone(),
+            sync_interval_secs: config.integrations.slack.sync_interval_secs,
+        }));
+        let secret_chain = SecretProviderChain::default_chain();
+        adapter.initialize(&secret_chain).await?;
+        Some(adapter)
+    } else {
+        None
+    };
+    let slack_messenger: Option<Arc<dyn SlackMessenger>> = slack_adapter
+        .as_ref()
+        .map(|adapter| Arc::clone(adapter) as Arc<dyn SlackMessenger>);
+
+    // 5. Wire the CQRS write path: Command -> WorkspaceCommandHandler ->
     //    Storage + EventBus (see docs/06-development/decisions/0007-cqrs.md).
     let event_bus = Arc::new(InProcessEventBus::new(256));
     let handler = Arc::new(WorkspaceCommandHandler::new(
         Arc::clone(&storage) as Arc<dyn PresenceRepository>,
         Arc::clone(&storage) as Arc<dyn NotificationRepository>,
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
+        slack_messenger,
     ));
     let dispatcher = InMemoryCommandDispatcher::new(handler);
 
-    // 5. Wire the CQRS read path (Phase 5): Projector keeps a
+    // 6. Start the Slack adapter's poll loop now that the EventBus it
+    //    publishes to exists. No-ops internally if no credential was found.
+    if let Some(adapter) = &slack_adapter {
+        adapter
+            .start(Arc::clone(&event_bus) as Arc<dyn EventBus>)
+            .await?;
+        info!("Slack adapter started.");
+    }
+
+    // 7. Wire the CQRS read path (Phase 5): Projector keeps a
     //    DashboardReadModel current for the TUI to render from — closes
     //    the read path docs/06-development/decisions/0007-cqrs.md deferred
     //    until a real UI consumer existed.
@@ -51,7 +83,7 @@ async fn main() -> Result<()> {
     let notification_repo = Arc::clone(&storage) as Arc<dyn NotificationRepository>;
     let (projector, read_model) = Projector::new(&presence_repo, &notification_repo).await?;
 
-    // 6. Wire event reliability (retry/backoff + Dead Letter Queue — see
+    // 8. Wire event reliability (retry/backoff + Dead Letter Queue — see
     //    docs/06-development/decisions/0003-event-bus.md's Phase 3
     //    amendment) and register the Projector as a handler.
     let event_dispatcher = EventDispatcher::new(Arc::clone(&event_bus) as Arc<dyn EventBus>)
@@ -61,7 +93,7 @@ async fn main() -> Result<()> {
         .await;
     event_dispatcher.start();
 
-    // 7. Prove the write path end-to-end with a startup presence command.
+    // 9. Prove the write path end-to-end with a startup presence command.
     dispatcher
         .dispatch(Command::SetPresence {
             status: PresenceStatus::Active,
@@ -70,7 +102,7 @@ async fn main() -> Result<()> {
         .await?;
     info!("CQRS write path verified: startup SetPresence command dispatched.");
 
-    // 8. Enter the interactive TUI shell (Phase 5) — runs until Ctrl+Q.
+    // 10. Enter the interactive TUI shell (Phase 5) — runs until Ctrl+Q.
     let ui_registry = Arc::new(InMemoryUiRegistry::new());
     let renderer = TuiRenderer::new(ui_registry, read_model);
     renderer.run_loop().await?;

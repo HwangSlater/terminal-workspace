@@ -7,6 +7,7 @@ use domain::{
     PresenceStatus, UserId,
 };
 use events::{Event, EventBus, EventHandler};
+use integration::SlackMessenger;
 use logging::{spans::command_span, TraceContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -88,20 +89,27 @@ pub struct WorkspaceCommandHandler {
     presence_repo: Arc<dyn PresenceRepository>,
     notification_repo: Arc<dyn NotificationRepository>,
     event_bus: Arc<dyn EventBus>,
+    /// `None` when Slack isn't configured/enabled — `SendSlackMessage` then
+    /// returns the same honest "not available" error it always has,
+    /// instead of a fake success (`docs/04-extensions/integration-contract.md` §2.3).
+    slack_messenger: Option<Arc<dyn SlackMessenger>>,
 }
 
 impl WorkspaceCommandHandler {
     /// Construct a handler wired to the given repositories and event bus.
+    /// `slack_messenger` is `None` when Slack isn't configured/enabled.
     #[must_use]
     pub fn new(
         presence_repo: Arc<dyn PresenceRepository>,
         notification_repo: Arc<dyn NotificationRepository>,
         event_bus: Arc<dyn EventBus>,
+        slack_messenger: Option<Arc<dyn SlackMessenger>>,
     ) -> Self {
         Self {
             presence_repo,
             notification_repo,
             event_bus,
+            slack_messenger,
         }
     }
 }
@@ -138,9 +146,12 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                 // read," and there's no Projector subscriber yet to receive one.
                 self.notification_repo.mark_read(&id).await
             }
-            Command::SendSlackMessage { .. } => Err(WorkspaceError::Integration(
-                "Slack integration not yet implemented".into(),
-            )),
+            Command::SendSlackMessage { channel_id, text } => match &self.slack_messenger {
+                Some(messenger) => messenger.send_message(&channel_id, &text).await,
+                None => Err(WorkspaceError::Integration(
+                    "Slack integration not configured".into(),
+                )),
+            },
             Command::SyncAllAdapters => {
                 tracing::info!("SyncAllAdapters requested; no integration adapters registered yet");
                 Ok(())
@@ -324,6 +335,10 @@ mod tests {
     );
 
     fn make_handler() -> Fixture {
+        make_handler_with_slack(None)
+    }
+
+    fn make_handler_with_slack(slack_messenger: Option<Arc<dyn SlackMessenger>>) -> Fixture {
         let presence = Arc::new(MockPresenceRepo::default());
         let notifications = Arc::new(MockNotificationRepo::default());
         let bus = Arc::new(InProcessEventBus::new(10));
@@ -331,6 +346,7 @@ mod tests {
             Arc::clone(&presence) as Arc<dyn PresenceRepository>,
             Arc::clone(&notifications) as Arc<dyn NotificationRepository>,
             Arc::clone(&bus) as Arc<dyn EventBus>,
+            slack_messenger,
         ));
         (handler, presence, notifications, bus)
     }
@@ -378,6 +394,65 @@ mod tests {
     #[tokio::test]
     async fn send_slack_message_errors_without_integration() {
         let (handler, ..) = make_handler();
+        let result = handler
+            .handle(Command::SendSlackMessage {
+                channel_id: "C1".into(),
+                text: "hi".into(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    struct MockSlackMessenger {
+        sent: Mutex<Vec<(String, String)>>,
+        should_fail: bool,
+    }
+
+    #[async_trait]
+    impl SlackMessenger for MockSlackMessenger {
+        async fn send_message(&self, channel_id: &str, text: &str) -> Result<()> {
+            if self.should_fail {
+                return Err(common::WorkspaceError::Integration("boom".into()));
+            }
+            self.sent
+                .lock()
+                .await
+                .push((channel_id.to_string(), text.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_slack_message_delegates_to_the_configured_messenger() {
+        let messenger = Arc::new(MockSlackMessenger {
+            sent: Mutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let (handler, ..) =
+            make_handler_with_slack(Some(Arc::clone(&messenger) as Arc<dyn SlackMessenger>));
+
+        handler
+            .handle(Command::SendSlackMessage {
+                channel_id: "C1".into(),
+                text: "hi".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            messenger.sent.lock().await.as_slice(),
+            [("C1".to_string(), "hi".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_slack_message_propagates_messenger_errors() {
+        let messenger = Arc::new(MockSlackMessenger {
+            sent: Mutex::new(Vec::new()),
+            should_fail: true,
+        });
+        let (handler, ..) = make_handler_with_slack(Some(messenger));
+
         let result = handler
             .handle(Command::SendSlackMessage {
                 channel_id: "C1".into(),

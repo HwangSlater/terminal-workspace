@@ -1,7 +1,7 @@
 # Roadmap
 
-v0.1 Slack
-v0.2 Presence
+v0.1 Slack — done (Phase 6, `step6.md`): Bot Token auth, polling (messages + a configured presence watch-list), `SendSlackMessage`.
+v0.2 Presence — folded into v0.1 above (same adapter, same domain model; see `step6.md` Context for why splitting them would have meant building the same adapter twice).
 v0.3 GitHub
 v0.4 Calendar
 v0.5 Plugins

@@ -1,59 +1,79 @@
 # Integration Adapter Contract Specification
 
-All external platform integrations (Slack, GitHub, Calendar, Jira) must implement the lifecycle, connection, and formatting contract defined in this document.
+All external platform integrations (Slack, GitHub, Calendar, Jira) must implement the lifecycle and behavior contract defined in this document.
+
+> **Implementation Status (Phase 6)**: this document was revised alongside the first real adapter (`SlackAdapter`, `crates/integration`) — see `step6.md` for the decisions behind the changes below. It previously specified a WebSocket-shaped reconnect policy and an "OfflineMode with fake demo data" fallback; both were replaced (§2.1, §2.3) once the actual sync mechanism (polling, not a persistent connection) and the project's established no-fake-data principle (`step5.md`) were factored in.
 
 ---
 
 ## 1. The Integration Adapter Interface
 
-Integrations act strictly as **Infrastructure Adapters** (translating external APIs to internal Domain Entities). They are driven by the Application layer.
+Integrations act strictly as **Infrastructure Adapters** (translating external APIs to internal Domain Entities). They are driven by the Application layer. This trait is **not** part of Architecture Freeze v1 (`docs/06-development/development.md` §3) — it may evolve via ordinary review, no ADR required.
 
 ```rust
 use async_trait::async_trait;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionStatus {
+    /// Never configured, or the last sync attempt failed and no earlier
+    /// success exists to fall back on. Not an error state by itself.
     Disconnected,
-    OfflineMode, // Active fallback when configuration or tokens are missing
+    /// Currently establishing (only meaningful for adapters that hold a
+    /// persistent connection, e.g. a future Socket Mode upgrade).
     Connecting,
+    /// Last sync cycle succeeded.
     Connected,
+    /// Attempting to recover after failures (see §2.1).
     Reconnecting,
+    /// Exceeded the consecutive-failure threshold; a `SystemAlert` was raised.
     Failed(String),
 }
 
 #[async_trait]
 pub trait IntegrationAdapter: Send + Sync {
-    /// Initialize credentials, establish initial handshakes (e.g. WebSocket or HTTPS start).
-    async fn initialize(&self, secret_provider: &dyn SecretProvider) -> Result<(), AdapterError>;
-    
-    /// Starts the background sync worker loop. Should spawn tokio tasks internally.
-    async fn start(&self, event_publisher: Box<dyn EventBus>) -> Result<(), AdapterError>;
-    
-    /// Checks connection health and returns active stats.
-    async fn health_check(&self) -> Result<ConnectionStatus, AdapterError>;
-    
-    /// Closes network sockets and flushes local logs.
-    async fn shutdown(&self) -> Result<(), AdapterError>;
+    /// Resolve credentials via the `SecretProviderChain` (ADR-0006). Must
+    /// not fail when no credential is found — see §2.3.
+    async fn initialize(&self, secret_provider: &dyn SecretProvider) -> common::Result<()>;
+
+    /// Starts the background sync loop. Spawns its own `tokio` task(s)
+    /// internally; returns once the loop is running, not once it exits.
+    async fn start(&self, event_bus: Arc<dyn EventBus>) -> common::Result<()>;
+
+    /// Returns the adapter's current status.
+    async fn health_check(&self) -> common::Result<ConnectionStatus>;
+
+    /// Stops the sync loop and releases any resources.
+    async fn shutdown(&self) -> common::Result<()>;
 }
 ```
+
+`common::Result` (i.e. `Result<T, WorkspaceError>`) is used here rather than a bespoke `AdapterError`, matching every other trait in this codebase (`NotificationRepository`, `SecretProvider`, etc.) — a per-adapter error type would be one more thing call sites need to convert, for no benefit `WorkspaceError::Integration(String)` doesn't already provide.
 
 ---
 
 ## 2. Standard Behaviors
 
-### 1. Reconnection & Backoff Policy
-Adapters must not panic on connection drop. They must transition to `Reconnecting` and attempt automatic reconnection.
-- **Initial Delay**: 5 seconds.
-- **Backoff factor**: Exponential 1.5x up to a maximum of 5 minutes.
-- **Fail Boundary**: If reconnection fails 10 times consecutively, the adapter transitions to `Failed` and raises a high-priority `SystemAlert` Event.
+### 1. Failure Handling (Polling Model)
+
+`SlackAdapter` (and any future adapter built the same way) polls on an interval rather than holding a persistent connection, so there is no "drop" to reconnect from — only a poll cycle that succeeds or fails.
+
+- A single failed poll (network error, non-2xx response) is logged and skipped; the next cycle tries again at the normal interval. This does **not** change `ConnectionStatus`.
+- After **5 consecutive** failed cycles, status moves to `Reconnecting` and a `SystemAlert` Event is *not* yet raised (still recoverable).
+- After **10 consecutive** failed cycles, status moves to `Failed(reason)` and a high-priority `SystemAlert` Event is raised.
+- Any subsequent successful cycle resets the counter and returns status to `Connected`.
+
+(A future adapter built on a persistent connection — e.g. Slack Socket Mode — would need real exponential backoff on reconnect attempts; that policy is deferred until such an adapter exists, rather than specified speculatively here.)
 
 ### 2. Rate Limiting Protection
-Adapters must respect HTTP header rate limits (e.g., `Retry-After` headers on Slack/GitHub):
-- Outgoing requests must pass through an internal adaptive rate limiter.
-- If a `429 Too Many Requests` is received, the adapter must pause all outbound calls for the designated duration and queue outgoing Commands in-memory.
 
-### 3. Zero-Config Fallback (Offline Mode)
-If `initialize()` cannot locate any token or credential via the `SecretProvider` chain:
-- The adapter **must not return an error or abort the thread**.
-- It transitions to `ConnectionStatus::OfflineMode`.
-- In `OfflineMode`, it periodically pushes static mock data (e.g., "Offline Workspace Demo", "GitHub Connection Offline") to the Event Bus. This ensures a **Zero-Config portable execution** where the user can test the UI interface without configuring tokens.
+Adapters must respect HTTP header rate limits (e.g. Slack's `Retry-After` on a `429`):
+- On a `429`, the adapter pauses outbound calls for the header's duration and skips the current poll cycle rather than treating it as a failure under §2.1's counter.
+- This is not optional politeness — hammering a rate limit only makes the outage longer for a locally-run, single-user tool with no request queue to smooth things out.
+
+### 3. No-Credential Behavior (Zero-Config, Honest-Empty)
+
+If `initialize()` cannot locate a token via the `SecretProviderChain`:
+- The adapter **must not return an error or abort**. Returning an error here would surface as a boot failure, which contradicts Zero Configuration (`product-requirements.md` §2.1) — using the app without Slack configured must work.
+- It reports `ConnectionStatus::Disconnected` and simply never starts a poll loop (or `start()` no-ops).
+- It does **not** publish synthetic/demo data to the Event Bus. The corresponding UI panels (`docs/02-architecture/ui.md`) render their existing, real "no data yet" empty state — an empty Team Panel or Notification Panel is the correct and honest representation of "not configured," not a placeholder to be papered over with fabricated content. This mirrors `Command::SendSlackMessage`'s deliberate "not yet implemented" error (`crates/commands/src/lib.rs`) rather than faking a success.

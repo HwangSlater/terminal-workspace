@@ -27,13 +27,36 @@ pub struct CoreSettings {
     pub log_level: String,
 }
 
-/// Toggles enabling individual third-party messaging sync services.
+/// Per-integration settings. `slack` is a real nested table (Phase 6); `github_enabled`
+/// stays a flat toggle since no GitHub adapter exists yet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationsToggle {
-    /// Sync Slack connection.
-    pub slack_enabled: bool,
+    /// Slack integration settings (`docs/04-extensions/integrations/slack.md`).
+    pub slack: SlackSettings,
     /// Sync GitHub updates.
     pub github_enabled: bool,
+}
+
+/// `[integrations.slack]` settings. The Bot Token itself is never here —
+/// it's resolved via `SecretProviderChain` (ADR-0006), never `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackSettings {
+    /// Whether the Slack adapter starts at all.
+    pub enabled: bool,
+    /// Seconds between poll cycles.
+    #[serde(default = "default_slack_sync_interval")]
+    pub sync_interval_secs: u64,
+    /// Channels polled for messages (`conversations.history`).
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
+    /// Teammates polled for presence (`users.getPresence`) — a configured
+    /// watch-list, not the whole workspace roster.
+    #[serde(default)]
+    pub watched_user_ids: Vec<String>,
+}
+
+fn default_slack_sync_interval() -> u64 {
+    30
 }
 
 impl Default for AppConfig {
@@ -45,7 +68,12 @@ impl Default for AppConfig {
                 log_level: "info".into(),
             },
             integrations: IntegrationsToggle {
-                slack_enabled: false,
+                slack: SlackSettings {
+                    enabled: false,
+                    sync_interval_secs: default_slack_sync_interval(),
+                    channel_ids: Vec::new(),
+                    watched_user_ids: Vec::new(),
+                },
                 github_enabled: false,
             },
         }
@@ -126,8 +154,13 @@ refresh_rate_ms = 100
 log_level = "info"
 
 [integrations]
-slack_enabled = false
 github_enabled = false
+
+[integrations.slack]
+enabled = false
+sync_interval_secs = 30
+channel_ids = []
+watched_user_ids = []
 "#;
 
 /// Builds an `AppConfig` by layering Default -> File -> Environment -> CLI,
@@ -194,7 +227,7 @@ impl ConfigBuilder {
                 }
                 "TERM_WS_INTEGRATIONS_SLACK_ENABLED" => {
                     if let Ok(b) = value.parse() {
-                        self.config.integrations.slack_enabled = b;
+                        self.config.integrations.slack.enabled = b;
                     } else {
                         tracing::warn!(
                             "Ignoring invalid TERM_WS_INTEGRATIONS_SLACK_ENABLED={value}"
@@ -283,7 +316,8 @@ mod tests {
             .expect("defaults must validate");
         assert_eq!(config.core.theme, "default-dark");
         assert_eq!(config.core.refresh_rate_ms, 100);
-        assert!(!config.integrations.slack_enabled);
+        assert!(!config.integrations.slack.enabled);
+        assert_eq!(config.integrations.slack.sync_interval_secs, 30);
     }
 
     #[test]
@@ -300,7 +334,7 @@ mod tests {
             .build()
             .expect("env overrides must validate");
         assert_eq!(config.core.theme, "solarized");
-        assert!(config.integrations.slack_enabled);
+        assert!(config.integrations.slack.enabled);
         // Untouched fields keep their default.
         assert_eq!(config.core.log_level, "info");
     }
@@ -341,5 +375,46 @@ mod tests {
     fn parse_empty_string_returns_defaults() {
         let config = AppConfig::parse("").expect("empty input should fall back to defaults");
         assert_eq!(config.core.theme, "default-dark");
+    }
+
+    #[test]
+    fn the_bootstrapped_default_toml_itself_parses_back_correctly() {
+        // Guards against the DEFAULT_TOML constant (written by hand, not
+        // generated from the struct) drifting out of sync with AppConfig's
+        // actual shape -- a first-run user gets exactly this file written
+        // to disk (docs/05-operations/configuration.md §4).
+        let config = AppConfig::parse(DEFAULT_TOML).expect("DEFAULT_TOML must parse");
+        assert!(!config.integrations.slack.enabled);
+        assert_eq!(config.integrations.slack.sync_interval_secs, 30);
+        assert!(config.integrations.slack.channel_ids.is_empty());
+        assert!(config.integrations.slack.watched_user_ids.is_empty());
+        assert!(!config.integrations.github_enabled);
+    }
+
+    #[test]
+    fn parses_real_slack_channel_and_watch_list_config() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations]
+            github_enabled = false
+
+            [integrations.slack]
+            enabled = true
+            sync_interval_secs = 45
+            channel_ids = ["C0123456789"]
+            watched_user_ids = ["U0123456789", "U0987654321"]
+        "#;
+        let config = AppConfig::parse(toml).expect("valid Slack config must parse");
+        assert!(config.integrations.slack.enabled);
+        assert_eq!(config.integrations.slack.sync_interval_secs, 45);
+        assert_eq!(config.integrations.slack.channel_ids, vec!["C0123456789"]);
+        assert_eq!(
+            config.integrations.slack.watched_user_ids,
+            vec!["U0123456789", "U0987654321"]
+        );
     }
 }

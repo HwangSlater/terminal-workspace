@@ -2,7 +2,7 @@
 
 The Terminal Workspace is configured via a single **TOML** file (`config.toml`) situated in the user's standard configuration directory. TOML was selected for its clean syntax, strong typing support, and seamless integration with Rust's `serde` framework.
 
-> **Implementation Status (Phase 2)**: `crates/config` currently implements only the `[core]` and a flat `[integrations]` (`slack_enabled`/`github_enabled`) section, built through the layered `ConfigBuilder` described in §3 below. The richer per-integration schema shown in §1 (`sync_interval_secs`, `repositories`, `[plugins]`, `[keybindings]`, etc.) is the target shape once the corresponding crates (integration adapters, plugin host) land in later phases — `config.toml` will grow to match as those consumers are implemented, not before, to avoid unused schema surface.
+> **Implementation Status (Phase 2, amended Phase 6)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), and a still-flat `github_enabled` toggle (no GitHub adapter exists yet). This was a breaking change to the on-disk schema (`[integrations] slack_enabled = ...` → `[integrations.slack] enabled = ...`) — acceptable pre-v1.0 with no public users yet (`step6.md`); a user with an old `config.toml` gets the new default file layout by deleting it and letting Zero-Config regenerate it. The richer schema shown in §1 beyond Slack (`repositories`, `[plugins]`, `[keybindings]`, etc.) remains the target shape for later phases, not built yet.
 
 ---
 
@@ -22,8 +22,10 @@ auto_away_timeout_mins = 15     # Auto-switch Slack status to Away after inactiv
 [integrations.slack]
 enabled = true
 sync_interval_secs = 30
-# Tokens are loaded via system keyring, but fallback environment variables are supported.
-# SLACK_BOT_TOKEN is read from environment if not present in keyring.
+channel_ids = ["C0123456789"]        # Channels polled for messages (conversations.history)
+watched_user_ids = ["U0123456789"]   # Teammates polled for presence (users.getPresence) --
+                                      # not the whole workspace roster; see docs/04-extensions/integrations/slack.md
+# SLACK_BOT_TOKEN is read from the environment (SecretProviderChain, ADR-0006). Never stored in this file.
 
 # GitHub Integration Settings
 [integrations.github]
@@ -125,7 +127,7 @@ AppConfig
   - `TERM_WS_CORE_THEME` → `core.theme`
   - `TERM_WS_CORE_REFRESH_RATE_MS` → `core.refresh_rate_ms`
   - `TERM_WS_CORE_LOG_LEVEL` → `core.log_level`
-  - `TERM_WS_INTEGRATIONS_SLACK_ENABLED` → `integrations.slack_enabled`
+  - `TERM_WS_INTEGRATIONS_SLACK_ENABLED` → `integrations.slack.enabled`
   - `TERM_WS_INTEGRATIONS_GITHUB_ENABLED` → `integrations.github_enabled`
 - **CLI Option** (`merge_cli`): highest precedence, for one-off overrides at invocation time: `--theme`, `--log-level`, `--refresh-rate-ms`, `--config <path>`. Implemented as a small hand-rolled `--key value` scan rather than a CLI-parsing dependency (e.g. `clap`) — the flag surface is intentionally tiny today (4 flags) and the project favors a minimal dependency graph until the CLI surface actually grows (e.g. plugin subcommands in a later phase). Revisit this choice via ADR if/when that happens.
 - `AppConfig::load_or_create_default()` is a convenience wrapper: `ConfigBuilder::new().merge_file(<standard path>).merge_env().merge_cli(std::env::args()).build()`.

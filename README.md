@@ -46,13 +46,21 @@ GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSand
 | `Esc` | 명령줄/도움말 닫고 Normal 모드로 복귀 |
 | `Ctrl+Q` | 종료 |
 
-현재는 팀·알림 패널까지만 실제 데이터(아직 연동이 없어 비어 있음)를 보여주고, 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](step5.md)를 참고하세요.
+Slack을 연동하면(아래 참고) 팀·알림 패널에 실제 메시지/프레즌스가 표시됩니다. 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](step5.md)를 참고하세요.
+
+### Slack 연동
+
+1. Slack 워크스페이스에 App을 하나 만들고(Slack "Create New App"), Bot Token 스코프로 `channels:history`, `channels:read`, `users:read`, `chat:write`를 추가한 뒤 워크스페이스에 설치해 Bot Token(`xoxb-...`)을 발급받으세요.
+2. `SLACK_BOT_TOKEN` 환경변수로 토큰을 설정하세요 (설정 파일에는 절대 넣지 않습니다).
+3. `config.toml`의 `[integrations.slack]`에서 `enabled = true`로 바꾸고, `channel_ids`(메시지를 받아올 채널)와 `watched_user_ids`(프레즌스를 볼 팀원)를 채워주세요.
+
+자세한 내용은 [`docs/04-extensions/integrations/slack.md`](docs/04-extensions/integrations/slack.md)를 참고하세요.
 
 ---
 
 ## 진행 현황
 
-이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`step2.md`](step2.md), [`step3.md`](step3.md), [`step4.md`](step4.md), [`step5.md`](step5.md)를 참고하세요.
+이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`step2.md`](step2.md), [`step3.md`](step3.md), [`step4.md`](step4.md), [`step5.md`](step5.md), [`step6.md`](step6.md)를 참고하세요.
 
 ## 문서
 

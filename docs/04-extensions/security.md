@@ -31,7 +31,7 @@ To prevent leaking API tokens or private user data into text log files (`app.log
 
 ## 3. Network Transport Security
 
-- **TLS Enforced**: All outgoing integration HTTP requests are encrypted using TLS 1.3. Older TLS versions (< 1.2) are explicitly disabled in the HTTP client backend (`reqwest` with `rustls`).
+- **TLS Enforced**: All outgoing integration HTTP requests are encrypted using TLS, via `reqwest`'s default `native-tls` backend — **not** `rustls` as originally specified here. `rustls`'s default crypto provider (`ring`) compiles C/assembly source at build time, reintroducing exactly the C-toolchain requirement ADR-0014 eliminated by switching storage to `redb`; discovered and corrected while building the first real HTTP-using adapter (`SlackAdapter`, Phase 6 — see `step6.md`). `native-tls` uses each OS's built-in TLS stack instead (SChannel on Windows, Secure Transport on macOS — neither needs a C compiler; Linux links system OpenSSL via `openssl-sys`, needing only pre-installed dev headers, not a compiler).
 - **Certificate Pinning**: (Optional) For high-security environments, the client can be configured to pin certificate authorities for Slack and GitHub API domains to prevent Man-in-the-Middle (MitM) inspection.
 
 ---

@@ -88,6 +88,24 @@ impl SecretProviderChain {
     }
 }
 
+/// The chain is itself a `SecretProvider` — anything written against the
+/// trait (e.g. `IntegrationAdapter::initialize`) can take a whole chain
+/// without knowing it's a chain. (Not delegating to the inherent
+/// `get_secret` above to avoid relying on inherent-vs-trait method
+/// resolution priority for the same name — the loop is 6 lines, just
+/// repeated verbatim.)
+#[async_trait]
+impl SecretProvider for SecretProviderChain {
+    async fn get_secret(&self, key: &str) -> Result<Option<SecretString>> {
+        for provider in &self.providers {
+            if let Ok(Some(secret)) = provider.get_secret(key).await {
+                return Ok(Some(secret));
+            }
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
