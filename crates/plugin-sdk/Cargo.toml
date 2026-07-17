@@ -1,0 +1,11 @@
+[package]
+name = "plugin-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+domain = { path = "../domain" }
+async-trait.workspace = true
+serde.workspace = true

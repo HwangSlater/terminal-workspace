@@ -1,0 +1,13 @@
+[package]
+name = "registry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+domain = { path = "../domain" }
+commands = { path = "../commands" }
+async-trait.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["sync"] }

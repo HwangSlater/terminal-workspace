@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/common",
+    "crates/domain",
+    "crates/events",
+    "crates/commands",
+    "crates/services",
+    "crates/registry",
+    "crates/storage",
+    "crates/config",
+    "crates/secrets",
+    "crates/logging",
+    "crates/ui",
+    "crates/plugin-host",
+    "crates/plugin-sdk",
+    "crates/integration",
+    "crates/scheduler",
+    "crates/assistant"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Terminal Workspace Team"]
+repository = "https://github.com/HwangSlater/terminal-workspace"
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1.77"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+ratatui = "0.26"
+crossterm = "0.27"
+secrecy = { version = "0.8", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+redb = "2"
+
+# Shared Workspace Lints
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = "warn"
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

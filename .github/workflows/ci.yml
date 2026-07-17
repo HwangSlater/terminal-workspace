@@ -1,0 +1,51 @@
+name: Terminal Workspace CI
+
+# Tier 1 platform matrix per docs/platform-support.md: Windows(MSVC),
+# Linux(GNU), macOS(Apple Clang). Each target's default host toolchain is
+# used automatically (windows-latest -> x86_64-pc-windows-msvc), so no
+# explicit `target:` override is needed.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows (MSVC)
+          - os: ubuntu-latest
+            label: Linux (GNU)
+          - os: macos-latest
+            label: macOS (Apple Clang)
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout Codebase
+      uses: actions/checkout@v4
+
+    - name: Setup Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache Cargo Dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Verify Code Formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run Cargo Check
+      run: cargo check --workspace --all-targets
+
+    - name: Run Clippy Linter
+      run: cargo clippy --workspace --all-targets -- -D warnings
+
+    - name: Run Unit & Integration Tests
+      run: cargo test --workspace

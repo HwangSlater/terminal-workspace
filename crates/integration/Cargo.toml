@@ -1,0 +1,13 @@
+[package]
+name = "integration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+domain = { path = "../domain" }
+events = { path = "../events" }
+secrets = { path = "../secrets" }
+async-trait.workspace = true
+serde.workspace = true

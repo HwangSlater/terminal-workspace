@@ -1,0 +1,43 @@
+[package]
+name = "app"
+description = "Terminal-first developer workspace: Slack, GitHub, Gmail, Calendar, and Jira in one place."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[package.metadata.wix]
+upgrade-guid = "40EEBD67-2D50-47E9-B66B-490E045F5A21"
+path-guid = "0D49B2EA-D96A-463D-A8E8-F69664E7CA47"
+license = false
+eula = false
+
+[[bin]]
+name = "terminal-workspace"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+domain = { path = "../domain" }
+events = { path = "../events" }
+commands = { path = "../commands" }
+services = { path = "../services" }
+registry = { path = "../registry" }
+secrets = { path = "../secrets" }
+storage = { path = "../storage" }
+config = { path = "../config" }
+logging = { path = "../logging" }
+ui = { path = "../ui" }
+plugin-host = { path = "../plugin-host" }
+plugin-sdk = { path = "../plugin-sdk" }
+integration = { path = "../integration" }
+scheduler = { path = "../scheduler" }
+assistant = { path = "../assistant" }
+
+async-trait.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+domain = { path = "../domain" }
+events = { path = "../events" }
+async-trait.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }

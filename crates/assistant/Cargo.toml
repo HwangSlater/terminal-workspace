@@ -1,0 +1,12 @@
+[package]
+name = "assistant"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+domain = { path = "../domain" }
+events = { path = "../events" }
+async-trait.workspace = true
+serde.workspace = true
