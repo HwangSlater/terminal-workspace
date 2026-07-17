@@ -3,14 +3,15 @@
 use async_trait::async_trait;
 use common::{Result, WorkspaceError};
 use domain::{
-    MemberPresence, NotificationId, NotificationRepository, PresenceRepository, PresenceStatus,
-    UserId,
+    MemberPresence, NotificationId, NotificationItem, NotificationRepository, PresenceRepository,
+    PresenceStatus, UserId,
 };
-use events::{Event, EventBus};
+use events::{Event, EventBus, EventHandler};
 use logging::{spans::command_span, TraceContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 use tracing::Instrument;
 
 /// Strongly-typed CQRS system write commands.
@@ -176,6 +177,93 @@ impl CommandDispatcher for InMemoryCommandDispatcher {
     }
 }
 
+/// Shared, lock-guarded handle to a [`DashboardReadModel`]. `crates/ui`
+/// reads through this directly on every render — never touches storage on
+/// a render tick (ADR-0007).
+pub type SharedReadModel = Arc<RwLock<DashboardReadModel>>;
+
+/// In-memory CQRS read model powering the TUI. Populated once from storage
+/// at startup by [`Projector::new`], then kept current by dispatched
+/// `Event`s — never re-queries storage after that.
+#[derive(Debug, Clone, Default)]
+pub struct DashboardReadModel {
+    /// Unread notifications, newest first.
+    pub unread_notifications: Vec<NotificationItem>,
+    /// All known team members' presence.
+    pub team_presence: Vec<MemberPresence>,
+}
+
+/// Subscribes to the `EventBus` (via `EventDispatcher::register_handler`,
+/// like any other `EventHandler`) and keeps a [`DashboardReadModel`]
+/// current. Closes the read path `docs/06-development/decisions/0007-cqrs.md`
+/// deferred until a real UI consumer existed.
+pub struct Projector {
+    model: SharedReadModel,
+}
+
+impl Projector {
+    /// Build a projector and its initial read model, populated once from
+    /// storage. Returns the projector (to register as an `EventHandler`)
+    /// and a cloneable handle to the model (for the TUI to read from).
+    pub async fn new(
+        presence_repo: &Arc<dyn PresenceRepository>,
+        notification_repo: &Arc<dyn NotificationRepository>,
+    ) -> Result<(Self, SharedReadModel)> {
+        let team_presence = presence_repo.fetch_all().await?;
+        let unread_notifications = notification_repo.fetch_unread().await?;
+        let model = Arc::new(RwLock::new(DashboardReadModel {
+            unread_notifications,
+            team_presence,
+        }));
+        Ok((
+            Self {
+                model: Arc::clone(&model),
+            },
+            model,
+        ))
+    }
+}
+
+#[async_trait]
+impl EventHandler for Projector {
+    async fn handle(&self, event: Event) -> Result<()> {
+        match event {
+            Event::SlackPresenceChanged(presence) => {
+                let mut model = self.model.write().await;
+                match model
+                    .team_presence
+                    .iter_mut()
+                    .find(|p| p.user_id == presence.user_id)
+                {
+                    Some(existing) => *existing = presence,
+                    None => model.team_presence.push(presence),
+                }
+            }
+            Event::SlackMessageReceived(item)
+            | Event::GitHubPRCreated(item)
+            | Event::CalendarReminderTriggered(item) => {
+                let mut model = self.model.write().await;
+                match model
+                    .unread_notifications
+                    .iter_mut()
+                    .find(|n| n.id == item.id)
+                {
+                    Some(existing) => *existing = item,
+                    None => model.unread_notifications.push(item),
+                }
+                model
+                    .unread_notifications
+                    .sort_by_key(|n| std::cmp::Reverse(n.timestamp_ms));
+            }
+            Event::SystemAlert(_) | Event::PluginCustomEvent { .. } => {
+                // Not surfaced in the read model yet — no panel renders
+                // system alerts or plugin events in Phase 5's scope.
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,12 +291,14 @@ mod tests {
 
     #[derive(Default)]
     struct MockNotificationRepo {
+        saved: Mutex<Vec<NotificationItem>>,
         marked_read: Mutex<Vec<NotificationId>>,
     }
 
     #[async_trait]
     impl NotificationRepository for MockNotificationRepo {
-        async fn save(&self, _item: &NotificationItem) -> Result<()> {
+        async fn save(&self, item: &NotificationItem) -> Result<()> {
+            self.saved.lock().await.push(item.clone());
             Ok(())
         }
 
@@ -217,7 +307,7 @@ mod tests {
         }
 
         async fn fetch_unread(&self) -> Result<Vec<NotificationItem>> {
-            Ok(Vec::new())
+            Ok(self.saved.lock().await.clone())
         }
 
         async fn mark_read(&self, id: &NotificationId) -> Result<()> {
@@ -317,5 +407,121 @@ mod tests {
             .unwrap();
 
         assert_eq!(presence.saved.lock().await.len(), 1);
+    }
+
+    fn sample_notification(title: &str, timestamp_ms: u64) -> NotificationItem {
+        NotificationItem {
+            id: NotificationId(Uuid::new_v4()),
+            source: domain::IntegrationSource::Slack,
+            title: title.into(),
+            body: String::new(),
+            timestamp_ms,
+            priority: domain::PriorityLevel::Medium,
+            is_read: false,
+            action_link: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn projector_populates_initial_model_from_storage() {
+        let presence_repo: Arc<dyn PresenceRepository> = Arc::new(MockPresenceRepo::default());
+        presence_repo
+            .save_presence(&MemberPresence {
+                user_id: UserId("u1".into()),
+                display_name: "Alice".into(),
+                status: PresenceStatus::Active,
+                custom_status_text: None,
+                last_updated_ms: 0,
+            })
+            .await
+            .unwrap();
+        let notification_repo: Arc<dyn NotificationRepository> =
+            Arc::new(MockNotificationRepo::default());
+        notification_repo
+            .save(&sample_notification("first", 100))
+            .await
+            .unwrap();
+
+        let (_projector, model) = Projector::new(&presence_repo, &notification_repo)
+            .await
+            .unwrap();
+
+        let snapshot = model.read().await;
+        assert_eq!(snapshot.team_presence.len(), 1);
+        assert_eq!(snapshot.unread_notifications.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn projector_upserts_presence_on_event() {
+        let presence_repo: Arc<dyn PresenceRepository> = Arc::new(MockPresenceRepo::default());
+        let notification_repo: Arc<dyn NotificationRepository> =
+            Arc::new(MockNotificationRepo::default());
+        let (projector, model) = Projector::new(&presence_repo, &notification_repo)
+            .await
+            .unwrap();
+
+        let presence = MemberPresence {
+            user_id: UserId("u1".into()),
+            display_name: "Alice".into(),
+            status: PresenceStatus::Active,
+            custom_status_text: None,
+            last_updated_ms: 1,
+        };
+        projector
+            .handle(Event::SlackPresenceChanged(presence.clone()))
+            .await
+            .unwrap();
+        assert_eq!(model.read().await.team_presence.len(), 1);
+
+        // Same user_id again must update in place, not duplicate.
+        projector
+            .handle(Event::SlackPresenceChanged(MemberPresence {
+                status: PresenceStatus::Away,
+                ..presence
+            }))
+            .await
+            .unwrap();
+        let snapshot = model.read().await;
+        assert_eq!(snapshot.team_presence.len(), 1);
+        assert_eq!(snapshot.team_presence[0].status, PresenceStatus::Away);
+    }
+
+    #[tokio::test]
+    async fn projector_upserts_and_sorts_notifications_on_event() {
+        let presence_repo: Arc<dyn PresenceRepository> = Arc::new(MockPresenceRepo::default());
+        let notification_repo: Arc<dyn NotificationRepository> =
+            Arc::new(MockNotificationRepo::default());
+        let (projector, model) = Projector::new(&presence_repo, &notification_repo)
+            .await
+            .unwrap();
+
+        let older = sample_notification("older", 100);
+        let newer = sample_notification("newer", 200);
+        projector
+            .handle(Event::SlackMessageReceived(older.clone()))
+            .await
+            .unwrap();
+        projector
+            .handle(Event::GitHubPRCreated(newer.clone()))
+            .await
+            .unwrap();
+
+        let snapshot = model.read().await;
+        assert_eq!(snapshot.unread_notifications.len(), 2);
+        // Newest first.
+        assert_eq!(snapshot.unread_notifications[0].title, "newer");
+
+        drop(snapshot);
+
+        // Re-delivering the same id must update in place, not duplicate.
+        let mut updated = newer;
+        updated.title = "newer-updated".into();
+        projector
+            .handle(Event::GitHubPRCreated(updated))
+            .await
+            .unwrap();
+        let snapshot = model.read().await;
+        assert_eq!(snapshot.unread_notifications.len(), 2);
+        assert_eq!(snapshot.unread_notifications[0].title, "newer-updated");
     }
 }

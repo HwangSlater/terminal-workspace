@@ -2,6 +2,8 @@
 
 The presentation layer of the Workspace is designed as a dynamic, non-blocking **Terminal User Interface (TUI)** built on `Ratatui` and `crossterm`. It uses a layout system split into functional panes and leverages incremental rendering to ensure smooth operation at 60 FPS under minimal resource footprint.
 
+> **Implementation Status (Phase 5)**: `crates/ui` implements the docking shell, Header Bar, Command Line Input Bar, Status Footer, Team Panel, and Notification Panel described below, rendering real (currently empty, pending integrations) data from `PresenceRepository`/`NotificationRepository` via the new `DashboardReadModel` (`crates/commands`, closing ADR-0007's deferred read path). The Active Detail Pane's Calendar view, the CI/CD Panel, and the AI Assistant Panel are **not yet implemented** — each needs an integration or domain crate (`integration`, `assistant`) that's still a stub; see `step5.md` for the scoping rationale.
+
 ## Visual Grid Layout
 
 The terminal viewport is partitioned using a rectangular grid system. Below is the layout blueprint:

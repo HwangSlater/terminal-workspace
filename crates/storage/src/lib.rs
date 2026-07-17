@@ -113,13 +113,25 @@ fn write_entry(
     write_txn.commit().storage_err()
 }
 
+/// A table that has never been written to doesn't exist yet in redb —
+/// that's not an error, it's "no data". This matters for real first-run
+/// behavior, not just tests: a fresh `workspace.redb` has no tables until
+/// the first write, and every read path must tolerate that.
+fn is_missing_table(e: &redb::TableError) -> bool {
+    matches!(e, redb::TableError::TableDoesNotExist(_))
+}
+
 fn read_entry(
     db: &Database,
     table: TableDefinition<&str, &[u8]>,
     key: &str,
 ) -> Result<Option<Vec<u8>>> {
     let read_txn = db.begin_read().storage_err()?;
-    let t = read_txn.open_table(table).storage_err()?;
+    let t = match read_txn.open_table(table) {
+        Ok(t) => t,
+        Err(e) if is_missing_table(&e) => return Ok(None),
+        Err(e) => return Err(e).storage_err(),
+    };
     Ok(t.get(key)
         .storage_err()?
         .map(|guard| guard.value().to_vec()))
@@ -130,7 +142,11 @@ fn scan_entries(
     table: TableDefinition<&str, &[u8]>,
 ) -> Result<Vec<(String, Vec<u8>)>> {
     let read_txn = db.begin_read().storage_err()?;
-    let t = read_txn.open_table(table).storage_err()?;
+    let t = match read_txn.open_table(table) {
+        Ok(t) => t,
+        Err(e) if is_missing_table(&e) => return Ok(Vec::new()),
+        Err(e) => return Err(e).storage_err(),
+    };
     let mut out = Vec::new();
     for entry in t.iter().storage_err()? {
         let (k, v) = entry.storage_err()?;

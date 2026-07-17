@@ -2,6 +2,8 @@
 
 This document defines the layout grids, ASCII mockups, and layout slots for the Terminal UI (TUI) windows.
 
+> **Implementation Status (Phase 5)**: The Docking Slot Layout Rules (§1) and the responsive rules (§3) are implemented in `crates/ui`. Screen 1's Team Status and Notification Center regions render real data; the Main Detail Pane, Calendar region, and CI/CD Status region are placeholder text pending their respective integrations. Screens 2 (Command Palette) and 3 (AI Assistant) are not yet implemented — see `step5.md`.
+
 ---
 
 ## 1. Docking Slot Layout Rules

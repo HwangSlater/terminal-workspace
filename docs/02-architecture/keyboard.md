@@ -2,6 +2,8 @@
 
 The Terminal Workspace utilizes a **Modal Input System** (inspired by Vim) to allow developers to perform rapid navigation, command dispatch, and content viewing without leaving the home row.
 
+> **Implementation Status (Phase 5)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Team Panel and Notification Panel (the two panels that exist so far); Detail Pane/CI panel navigation will follow when those panels do.
+
 ## Input Modes
 
 The system operates in one of three modes:

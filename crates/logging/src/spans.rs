@@ -48,6 +48,11 @@ mod tests {
 
     #[test]
     fn span_constructors_produce_named_spans() {
+        // Without an active subscriber, tracing creates disabled spans and
+        // `.metadata()` returns `None` — a minimal subscriber is required
+        // for this test to observe span names at all, not just to see output.
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
         let ctx = TraceContext::new();
         assert_eq!(application_span().metadata().unwrap().name(), "application");
         assert_eq!(

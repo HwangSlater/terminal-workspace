@@ -2,6 +2,8 @@
 
 This document details the UI state context governing active viewports, split panels, focal nodes, and custom terminal buffers.
 
+> **Implementation Status (Phase 5)**: Implemented in `crates/ui`. One deviation from the sketch below: `DockSlot` is not a new enum — it reuses `registry::UiDockSlot` (already `Left`/`Center`/`Right`/`Bottom` per ADR-0012) rather than duplicating the same four variants under a different name. `docking_registry`/`active_panel_focus` key off that shared type.
+
 ---
 
 ## 1. UI Focus & Layout State

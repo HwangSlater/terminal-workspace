@@ -23,3 +23,9 @@ We select a **Docking System Layout** rather than a dynamic custom layout engine
 ## Consequences
 - **Plugin Friendliness**: Plugins call `register_panel("pomodoro", DockSlot::Bottom)` and the host handles layout grids calculation.
 - **Predictability**: Fixed docks keep the workspace layout clean and consistent.
+
+---
+
+## Amendment (Phase 5 Implementation Note)
+
+Implemented in `crates/ui` (`step5.md`). The four dock slots did not get a second enum: `docs/03-domain/workspace-state.md`'s `DockSlot` reuses `registry::UiDockSlot` (already `Left`/`Center`/`Right`/`Bottom`, defined for `UiRegistry` back in Phase 2), so the docking *registry* (which panels are registered where) and the docking *renderer* (how slots lay out on screen) agree on one type instead of two that happen to have matching variants.

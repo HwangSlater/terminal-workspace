@@ -1,14 +1,18 @@
 //! Main entry point for the Terminal-first Developer Workspace.
 
-use commands::{Command, CommandDispatcher, InMemoryCommandDispatcher, WorkspaceCommandHandler};
+use commands::{
+    Command, CommandDispatcher, InMemoryCommandDispatcher, Projector, WorkspaceCommandHandler,
+};
 use common::Result;
 use config::AppConfig;
 use domain::{FailedEventRepository, NotificationRepository, PresenceRepository, PresenceStatus};
-use events::{EventBus, EventDispatcher, InProcessEventBus};
+use events::{EventBus, EventDispatcher, EventHandler, InProcessEventBus};
 use logging::{init_logger, spans::application_span};
+use registry::InMemoryUiRegistry;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
 use tracing::info;
+use ui::TuiRenderer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,13 +43,25 @@ async fn main() -> Result<()> {
     ));
     let dispatcher = InMemoryCommandDispatcher::new(handler);
 
-    // 5. Wire event reliability: retry/backoff + Dead Letter Queue (see
-    //    docs/06-development/decisions/0003-event-bus.md's Phase 3 amendment).
+    // 5. Wire the CQRS read path (Phase 5): Projector keeps a
+    //    DashboardReadModel current for the TUI to render from — closes
+    //    the read path docs/06-development/decisions/0007-cqrs.md deferred
+    //    until a real UI consumer existed.
+    let presence_repo = Arc::clone(&storage) as Arc<dyn PresenceRepository>;
+    let notification_repo = Arc::clone(&storage) as Arc<dyn NotificationRepository>;
+    let (projector, read_model) = Projector::new(&presence_repo, &notification_repo).await?;
+
+    // 6. Wire event reliability (retry/backoff + Dead Letter Queue — see
+    //    docs/06-development/decisions/0003-event-bus.md's Phase 3
+    //    amendment) and register the Projector as a handler.
     let event_dispatcher = EventDispatcher::new(Arc::clone(&event_bus) as Arc<dyn EventBus>)
         .with_dlq(Arc::clone(&storage) as Arc<dyn FailedEventRepository>);
+    event_dispatcher
+        .register_handler(Arc::new(projector) as Arc<dyn EventHandler>)
+        .await;
     event_dispatcher.start();
 
-    // 6. Prove the write path end-to-end with a startup presence command.
+    // 7. Prove the write path end-to-end with a startup presence command.
     dispatcher
         .dispatch(Command::SetPresence {
             status: PresenceStatus::Active,
@@ -54,7 +70,11 @@ async fn main() -> Result<()> {
         .await?;
     info!("CQRS write path verified: startup SetPresence command dispatched.");
 
-    // 7. Stub main exit
-    info!("Skeleton execution finished successfully.");
+    // 8. Enter the interactive TUI shell (Phase 5) — runs until Ctrl+Q.
+    let ui_registry = Arc::new(InMemoryUiRegistry::new());
+    let renderer = TuiRenderer::new(ui_registry, read_model);
+    renderer.run_loop().await?;
+
+    info!("Terminal Workspace exited cleanly.");
     Ok(())
 }
