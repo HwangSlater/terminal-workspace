@@ -7,7 +7,7 @@ use domain::{IntegrationSource, PresenceStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use registry::UiDockSlot;
 
@@ -79,7 +79,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         .title("도움말")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
-    frame.render_widget(Paragraph::new(text).block(block), popup);
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 /// Standard ratatui centered-popup idiom: `percent_x`/`percent_y` of `area`,
@@ -105,7 +108,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 fn render_too_small(frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new("터미널 크기가 너무 작습니다. 화면을 넓혀주세요.")
-        .style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(Color::Red))
+        .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
 }
 
@@ -163,7 +167,9 @@ fn render_team_panel(
 ) {
     let block = dock_block("팀", UiDockSlot::Left, state);
     if model.team_presence.is_empty() {
-        let empty = Paragraph::new("(아직 팀원이 없습니다)").block(block);
+        let empty = Paragraph::new("(아직 팀원이 없습니다)")
+            .block(block)
+            .wrap(Wrap { trim: true });
         frame.render_widget(empty, area);
         return;
     }
@@ -197,7 +203,9 @@ fn render_notification_panel(
 ) {
     let block = dock_block("알림", UiDockSlot::Center, state);
     if model.unread_notifications.is_empty() {
-        let empty = Paragraph::new("(아직 알림이 없습니다)").block(block);
+        let empty = Paragraph::new("(아직 알림이 없습니다)")
+            .block(block)
+            .wrap(Wrap { trim: true });
         frame.render_widget(empty, area);
         return;
     }
@@ -221,13 +229,17 @@ fn render_notification_panel(
 
 fn render_right_dock_placeholder(frame: &mut Frame, area: Rect) {
     let block = Block::default().title("캘린더").borders(Borders::ALL);
-    let placeholder = Paragraph::new("(캘린더 연동이 아직 구현되지 않았습니다)").block(block);
+    let placeholder = Paragraph::new("(캘린더 연동이 아직 구현되지 않았습니다)")
+        .block(block)
+        .wrap(Wrap { trim: true });
     frame.render_widget(placeholder, area);
 }
 
 fn render_bottom_dock_placeholder(frame: &mut Frame, area: Rect) {
     let block = Block::default().title("로그").borders(Borders::ALL);
-    let placeholder = Paragraph::new("(로그 스트림이 아직 연결되지 않았습니다)").block(block);
+    let placeholder = Paragraph::new("(로그 스트림이 아직 연결되지 않았습니다)")
+        .block(block)
+        .wrap(Wrap { trim: true });
     frame.render_widget(placeholder, area);
 }
 
@@ -336,6 +348,61 @@ mod tests {
         );
         assert!(!contains_ignoring_whitespace(&text, "아직 팀원이 없습니다"));
         assert!(contains_ignoring_whitespace(&text, "알림"));
+    }
+
+    #[test]
+    fn calendar_placeholder_text_is_not_truncated() {
+        // The right dock (32 cols minus borders) is narrower than this
+        // sentence needs, so it wraps onto a second line. Without
+        // `.wrap(...)`, Paragraph fills up to the panel's width and
+        // silently drops the rest -- this tail fragment is exactly what
+        // would vanish if that ever regresses. (Not checked as one
+        // contiguous string: with three panels side by side, a wrapped
+        // panel's second line sits after its neighbors' first-line border
+        // characters in raw buffer order, so a whitespace-stripped
+        // contiguous match would be a false negative even when both lines
+        // render correctly -- see the neighboring dock's `┌`/`│` borders in
+        // between.)
+        let text = draw(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+        );
+        assert!(contains_ignoring_whitespace(&text, "구현되지"));
+        assert!(contains_ignoring_whitespace(&text, "않았습니다"));
+    }
+
+    #[test]
+    fn log_placeholder_text_is_not_truncated() {
+        let text = draw(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+        );
+        assert!(contains_ignoring_whitespace(
+            &text,
+            "로그 스트림이 아직 연결되지 않았습니다"
+        ));
+    }
+
+    #[test]
+    fn layout_adapts_across_a_range_of_terminal_sizes() {
+        // The layout is recomputed from `frame.size()` on every draw, so
+        // resizing the real terminal (not just the app's own math) is what
+        // makes this actually responsive — this test sweeps sizes above
+        // the documented minimum to confirm none of them panic or produce
+        // an empty frame.
+        for (width, height) in [(80, 24), (100, 30), (119, 30), (120, 30), (200, 50)] {
+            let text = draw(
+                width,
+                height,
+                &WorkspaceState::default(),
+                &DashboardReadModel::default(),
+            );
+            assert!(!text.trim().is_empty(), "blank frame at {width}x{height}");
+        }
     }
 
     #[test]

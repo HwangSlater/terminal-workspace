@@ -66,18 +66,24 @@ impl TuiRenderer {
         &self,
         terminal: &mut Terminal<Backend>,
         state: &mut WorkspaceState,
-        rx: &mut mpsc::UnboundedReceiver<crossterm::event::KeyEvent>,
+        rx: &mut mpsc::UnboundedReceiver<InputEvent>,
     ) -> Result<()> {
         self.draw(terminal, state).await?;
 
-        while let Some(key) = rx.recv().await {
-            let outcome = handle_key(state, key);
-            if let KeyOutcome::DispatchToPane(action) = outcome {
-                self.apply_pane_action(state, action).await;
+        while let Some(event) = rx.recv().await {
+            if let InputEvent::Key(key) = event {
+                let outcome = handle_key(state, key);
+                if let KeyOutcome::DispatchToPane(action) = outcome {
+                    self.apply_pane_action(state, action).await;
+                }
+                if state.should_quit {
+                    break;
+                }
             }
-            if state.should_quit {
-                break;
-            }
+            // `InputEvent::Resize` carries no data to apply to `state` —
+            // `ratatui::Terminal::draw` re-queries the backend's current
+            // size on every call (`Terminal::autoresize`), so simply
+            // redrawing is enough to pick up the new dimensions.
             self.draw(terminal, state).await?;
         }
         Ok(())
@@ -139,6 +145,14 @@ fn install_panic_hook() {
     }));
 }
 
+/// Everything the input reader thread hands to the render loop: either a
+/// key press to interpret, or a terminal resize to redraw against (no
+/// payload needed — see `event_loop`'s handling of this variant).
+enum InputEvent {
+    Key(crossterm::event::KeyEvent),
+    Resize,
+}
+
 /// `crossterm::event::read()` blocks indefinitely until the next key press
 /// — there is no way to cancel or time out a call already in progress. That
 /// makes it unsafe to run on `tokio::task::spawn_blocking`: dropping the
@@ -151,11 +165,16 @@ fn install_panic_hook() {
 /// is synchronous and works from any thread, tokio or not, so nothing else
 /// about the non-blocking-input design (`docs/02-architecture/ui.md`)
 /// changes.
-fn spawn_input_reader(tx: mpsc::UnboundedSender<crossterm::event::KeyEvent>) {
+fn spawn_input_reader(tx: mpsc::UnboundedSender<InputEvent>) {
     std::thread::spawn(move || loop {
         match crossterm::event::read() {
             Ok(CrosstermEvent::Key(key)) if key.kind == KeyEventKind::Press => {
-                if tx.send(key).is_err() {
+                if tx.send(InputEvent::Key(key)).is_err() {
+                    break;
+                }
+            }
+            Ok(CrosstermEvent::Resize(_, _)) => {
+                if tx.send(InputEvent::Resize).is_err() {
                     break;
                 }
             }
