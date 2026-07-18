@@ -19,6 +19,7 @@ use crossterm::terminal::{
 use domain::IntegrationSource;
 use events::{Event as DomainEvent, EventBus, IntegrationConnectionStatus};
 use integration::{Picker, SlackPicker};
+use logging::LogBuffer;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use registry::UiRegistry;
@@ -74,6 +75,9 @@ pub struct TuiRenderer {
     initial_github_status: IntegrationConnectionStatus,
     /// Calendar's equivalent of `initial_slack_status` (`step12.md`).
     initial_calendar_status: IntegrationConnectionStatus,
+    /// Backs the bottom "로그" dock (`step17.md`) — snapshotted fresh each
+    /// frame in `draw()`, the same way `read_model` already is.
+    log_buffer: Arc<LogBuffer>,
 }
 
 impl TuiRenderer {
@@ -90,6 +94,7 @@ impl TuiRenderer {
         initial_slack_status: IntegrationConnectionStatus,
         initial_github_status: IntegrationConnectionStatus,
         initial_calendar_status: IntegrationConnectionStatus,
+        log_buffer: Arc<LogBuffer>,
     ) -> Self {
         Self {
             ui_registry,
@@ -101,6 +106,7 @@ impl TuiRenderer {
             initial_slack_status,
             initial_github_status,
             initial_calendar_status,
+            log_buffer,
         }
     }
 
@@ -458,8 +464,9 @@ impl TuiRenderer {
 
     async fn draw(&self, terminal: &mut Terminal<Backend>, state: &WorkspaceState) -> Result<()> {
         let model = self.read_model.read().await;
+        let log_lines = self.log_buffer.snapshot();
         terminal
-            .draw(|frame| render::render(frame, state, &model))
+            .draw(|frame| render::render(frame, state, &model, &log_lines))
             .map_err(io_err)?;
         Ok(())
     }

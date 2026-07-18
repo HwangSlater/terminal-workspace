@@ -328,7 +328,9 @@ async fn main() -> Result<()> {
 
     // 2. Initialize logging using the resolved log level, then enter the
     //    root Application span (see docs/05-operations/logging.md §0).
-    init_logger(&config.core.log_level)?;
+    //    `init_logger` also returns a `LogBuffer` (`step17.md`) feeding the
+    //    TUI's live log panel -- threaded into `TuiRenderer::new` below.
+    let log_buffer = init_logger(&config.core.log_level)?;
     let _application_span = application_span().entered();
     info!("Starting Terminal Workspace Core Daemon...");
     info!("Workspace settings loaded successfully.");
@@ -584,6 +586,7 @@ async fn main() -> Result<()> {
         initial_slack_status,
         initial_github_status,
         initial_calendar_status,
+        log_buffer,
     );
     renderer.run_loop().await?;
 

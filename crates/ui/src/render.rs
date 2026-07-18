@@ -23,8 +23,14 @@ const RIGHT_DOCK_WIDTH: u16 = 32;
 
 /// Entry point: draws the whole frame per `state`/`model`, or the
 /// too-small placeholder if the terminal is below `docs/01-product/screen-spec.md`'s
-/// minimum grid size.
-pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadModel) {
+/// minimum grid size. `log_lines` backs the bottom "로그" dock
+/// (`step17.md`) -- the most recent buffered lines, oldest first.
+pub fn render(
+    frame: &mut Frame,
+    state: &WorkspaceState,
+    model: &DashboardReadModel,
+    log_lines: &[String],
+) {
     let area = frame.size();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         render_too_small(frame, area);
@@ -78,7 +84,7 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
         render_calendar_panel(frame, body[2], state, model);
     }
 
-    render_bottom_dock_placeholder(frame, rows[2]);
+    render_log_panel(frame, rows[2], log_lines);
     render_command_bar(frame, rows[3], state);
     render_footer(frame, rows[4]);
 
@@ -686,12 +692,27 @@ fn render_calendar_panel(
     frame.render_widget(List::new(list_items).block(block), area);
 }
 
-fn render_bottom_dock_placeholder(frame: &mut Frame, area: Rect) {
+/// Live tail of the app's own `tracing` output (`step17.md`) -- the most
+/// recent lines that fit `area.height`, oldest at the top like a
+/// scrolling `tail -f`. Not scrollable yet (`step17.md` Decision 2 defers
+/// that); always shows whatever's most recent.
+fn render_log_panel(frame: &mut Frame, area: Rect, log_lines: &[String]) {
     let block = Block::default().title("로그").borders(Borders::ALL);
-    let placeholder = Paragraph::new("(로그 스트림이 아직 연결되지 않았습니다)")
-        .block(block)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(placeholder, area);
+
+    if log_lines.is_empty() {
+        let placeholder = Paragraph::new("(아직 로그가 없습니다)")
+            .block(block)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(placeholder, area);
+        return;
+    }
+
+    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+    let start = log_lines.len().saturating_sub(visible_rows);
+    let text = log_lines[start..].join("\n");
+
+    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
 }
 
 fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
@@ -810,9 +831,25 @@ mod tests {
     }
 
     fn draw(width: u16, height: u16, state: &WorkspaceState, model: &DashboardReadModel) -> String {
+        draw_with_logs(width, height, state, model, &[])
+    }
+
+    /// Like [`draw`], but with real log panel content (`step17.md`) --
+    /// kept separate rather than adding a `log_lines` parameter to every
+    /// one of `draw`'s 37 existing call sites, almost none of which care
+    /// about log panel content.
+    fn draw_with_logs(
+        width: u16,
+        height: u16,
+        state: &WorkspaceState,
+        model: &DashboardReadModel,
+        log_lines: &[String],
+    ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, state, model)).unwrap();
+        terminal
+            .draw(|frame| render(frame, state, model, log_lines))
+            .unwrap();
         buffer_text(&terminal)
     }
 
@@ -963,17 +1000,52 @@ mod tests {
     }
 
     #[test]
-    fn log_placeholder_text_is_not_truncated() {
+    fn log_panel_shows_empty_state_text_when_no_lines_buffered_yet() {
         let text = draw(
             140,
             30,
             &WorkspaceState::default(),
             &DashboardReadModel::default(),
         );
+        assert!(contains_ignoring_whitespace(&text, "아직 로그가 없습니다"));
+    }
+
+    #[test]
+    fn log_panel_shows_real_buffered_lines() {
+        let log_lines = vec!["Slack adapter started.".to_string()];
+        let text = draw_with_logs(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+            &log_lines,
+        );
         assert!(contains_ignoring_whitespace(
             &text,
-            "로그 스트림이 아직 연결되지 않았습니다"
+            "Slack adapter started."
         ));
+        assert!(!contains_ignoring_whitespace(&text, "아직 로그가 없습니다"));
+    }
+
+    #[test]
+    fn log_panel_shows_only_the_most_recent_lines_that_fit() {
+        // The bottom dock is a fixed Constraint::Length(3) row -- 1 content
+        // row after borders -- regardless of terminal height, so only the
+        // single most recent line should ever be visible no matter how
+        // many are buffered.
+        let log_lines: Vec<String> = (1..=10).map(|n| format!("log line {n}")).collect();
+        let text = draw_with_logs(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+            &log_lines,
+        );
+        assert!(contains_ignoring_whitespace(&text, "log line 10"));
+        // "log line 9", not "log line 1" -- avoids a false negative from
+        // "log line 1" being a literal prefix substring of "log line 10"
+        // once `contains_ignoring_whitespace` strips the separating space.
+        assert!(!contains_ignoring_whitespace(&text, "log line 9"));
     }
 
     #[test]
