@@ -16,10 +16,11 @@ use crossterm::event::{Event as CrosstermEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use integration::SlackPicker;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use registry::UiRegistry;
-use state::SlackSetupStatus;
+use state::{PickerRow, SlackPickerStatus, SlackSetupStatus};
 use std::io::Stdout;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -40,6 +41,12 @@ pub struct TuiRenderer {
     /// this phase, `TuiRenderer` was pure CQRS *read* side with no way to
     /// dispatch anything.
     command_dispatcher: Arc<dyn CommandDispatcher>,
+    /// Direct read-only port for the picker overlay (`Ctrl+P`, `step8.md`)
+    /// to list channels/users. Held separately from `command_dispatcher`
+    /// deliberately — listing is a query, not a mutation, so it doesn't go
+    /// through `Command`/`CommandHandler` (see `SlackSelectionApplier`'s
+    /// doc comment in `crates/commands` for the full reasoning).
+    slack_picker: Arc<dyn SlackPicker>,
 }
 
 impl TuiRenderer {
@@ -49,11 +56,13 @@ impl TuiRenderer {
         ui_registry: Arc<dyn UiRegistry>,
         read_model: SharedReadModel,
         command_dispatcher: Arc<dyn CommandDispatcher>,
+        slack_picker: Arc<dyn SlackPicker>,
     ) -> Self {
         Self {
             ui_registry,
             read_model,
             command_dispatcher,
+            slack_picker,
         }
     }
 
@@ -89,6 +98,13 @@ impl TuiRenderer {
                     }
                     KeyOutcome::SubmitSlackToken(token) => {
                         self.submit_slack_token(terminal, state, token).await?;
+                    }
+                    KeyOutcome::OpenSlackPicker => {
+                        self.open_slack_picker(terminal, state).await?;
+                    }
+                    KeyOutcome::SubmitSlackSelection(channel_ids, watched_user_ids) => {
+                        self.submit_slack_selection(terminal, state, channel_ids, watched_user_ids)
+                            .await?;
                     }
                     KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
@@ -144,6 +160,74 @@ impl TuiRenderer {
         state.slack_setup.status = match result {
             Ok(()) => SlackSetupStatus::Connected,
             Err(e) => SlackSetupStatus::Failed(e.to_string()),
+        };
+        Ok(())
+    }
+
+    /// Fetches channel/user lists for the picker overlay (`step8.md`),
+    /// redrawing first so "불러오는 중..." shows immediately rather than the
+    /// UI appearing frozen during the network calls.
+    async fn open_slack_picker(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+
+        let channels = self.slack_picker.list_channels().await;
+        let users = match &channels {
+            Ok(_) => self.slack_picker.list_users().await,
+            Err(_) => Ok(Vec::new()), // don't bother with a second call if the first already failed
+        };
+
+        match (channels, users) {
+            (Ok(channels), Ok(users)) => {
+                state.slack_picker.channels = channels
+                    .into_iter()
+                    .map(|c| PickerRow {
+                        id: c.id,
+                        label: c.name,
+                        selected: false,
+                    })
+                    .collect();
+                state.slack_picker.users = users
+                    .into_iter()
+                    .map(|u| PickerRow {
+                        id: u.id,
+                        label: u.display_name,
+                        selected: false,
+                    })
+                    .collect();
+                state.slack_picker.cursor = 0;
+                state.slack_picker.status = SlackPickerStatus::Loaded;
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                state.slack_picker.status = SlackPickerStatus::Failed(e.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatches `Command::ApplySlackSelection` for a selection confirmed
+    /// in the picker overlay (`step8.md`).
+    async fn submit_slack_selection(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+        channel_ids: Vec<String>,
+        watched_user_ids: Vec<String>,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+        let result = self
+            .command_dispatcher
+            .dispatch(Command::ApplySlackSelection {
+                channel_ids,
+                watched_user_ids,
+            })
+            .await;
+        state.slack_picker.status = match result {
+            Ok(()) => SlackPickerStatus::Saved,
+            Err(e) => SlackPickerStatus::Failed(e.to_string()),
         };
         Ok(())
     }

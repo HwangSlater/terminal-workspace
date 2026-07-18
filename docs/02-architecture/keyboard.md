@@ -2,7 +2,7 @@
 
 The Terminal Workspace utilizes a **Modal Input System** (inspired by Vim) to allow developers to perform rapid navigation, command dispatch, and content viewing without leaving the home row.
 
-> **Implementation Status (Phase 5, amended Phase 7)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Team Panel and Notification Panel (the two panels that exist so far); Detail Pane/CI panel navigation will follow when those panels do. `Ctrl+S` (Phase 7, `step7.md`) is the first real Overlay/Dialog Mode dialog with actual input fields — the Slack credential setup screen; line 12's "connection setup" example was written before any adapter existed to connect, and this is what filled it in.
+> **Implementation Status (Phase 5, amended Phase 7/8)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Team Panel and Notification Panel (the two panels that exist so far); Detail Pane/CI panel navigation will follow when those panels do. `Ctrl+S` (Phase 7, `step7.md`) is the first real Overlay/Dialog Mode dialog with actual input fields — the Slack credential setup screen; line 12's "connection setup" example was written before any adapter existed to connect, and this is what filled it in. `Ctrl+P` (Phase 8, `step8.md`) is the second — a checkbox-list picker for `channel_ids`/`watched_user_ids`, using `j`/`k`/`Space`/`Enter` rather than Tab/arrows (a flat list has no separate "fields" to tab between).
 
 ## Input Modes
 
@@ -24,6 +24,7 @@ The system operates in one of three modes:
 | `Shift + Tab`| Focus Prev Pane | Global | Cycles focus counter-clockwise through visible layout panes. |
 | `?` | Show Help Dialog | Global | Renders an overlay listing all context-aware shortcuts. |
 | `Ctrl + s` | Slack Setup | Global | Opens the Slack Bot Token entry overlay (`step7.md`) — masked input, connects immediately on submit. |
+| `Ctrl + p` | Slack Channel/User Picker | Global | Opens the channel/watched-user picker (`step8.md`) — `j`/`k` move, `Space` toggles, `Enter` saves and restarts polling. |
 
 ---
 

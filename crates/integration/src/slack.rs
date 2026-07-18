@@ -82,7 +82,7 @@ struct AdapterState {
 /// Slack Web API adapter. Polls on an interval rather than holding a
 /// persistent connection — see `step6.md` for why.
 pub struct SlackAdapter {
-    config: SlackConfig,
+    config: Arc<RwLock<SlackConfig>>,
     http: reqwest::Client,
     state: Arc<RwLock<AdapterState>>,
     display_name_cache: Arc<Mutex<HashMap<String, String>>>,
@@ -99,7 +99,7 @@ impl SlackAdapter {
     #[must_use]
     pub fn new(config: SlackConfig, secret_writer: Arc<dyn SecretWriter>) -> Self {
         Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             http: reqwest::Client::new(),
             state: Arc::new(RwLock::new(AdapterState {
                 status: ConnectionStatus::Disconnected,
@@ -143,7 +143,7 @@ impl IntegrationAdapter for SlackAdapter {
 
         let poller = SlackPoller {
             http: self.http.clone(),
-            config: self.config.clone(),
+            config: self.config.read().await.clone(),
             state: Arc::clone(&self.state),
             display_name_cache: Arc::clone(&self.display_name_cache),
             channel_cursor: Arc::clone(&self.channel_cursor),
@@ -193,6 +193,83 @@ impl SlackConnector for SlackAdapter {
         // never leaves two loops racing against the same shared state.
         self.shutdown().await?;
         self.start(event_bus).await
+    }
+}
+
+impl SlackAdapter {
+    /// Replace the polled channel/watched-user lists (`step8.md`'s picker)
+    /// and restart the poll loop with them. Deliberately not part of any
+    /// trait — this only touches Integration-context state (the adapter's
+    /// own config + poll loop), not `config.toml` persistence, which is a
+    /// separate cross-context concern wired at the composition root
+    /// (`crates/app/src/main.rs`), not something this crate knows about.
+    pub async fn update_selection(
+        &self,
+        event_bus: Arc<dyn EventBus>,
+        channel_ids: Vec<String>,
+        watched_user_ids: Vec<String>,
+    ) -> Result<()> {
+        {
+            let mut config = self.config.write().await;
+            config.channel_ids = channel_ids;
+            config.watched_user_ids = watched_user_ids;
+        }
+        // Stale cursors for channels no longer selected are dead weight;
+        // a newly-added channel has no prior cursor anyway.
+        self.channel_cursor.lock().await.clear();
+        self.shutdown().await?;
+        self.start(event_bus).await
+    }
+}
+
+/// A Slack channel/user available to pick from, resolved via
+/// [`SlackPicker`] (`step8.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerChannel {
+    /// Slack channel id (`C...`).
+    pub id: String,
+    /// Channel name without the leading `#`.
+    pub name: String,
+}
+
+/// See [`PickerChannel`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerUser {
+    /// Slack user id (`U...`).
+    pub id: String,
+    /// Display name (falls back to real name — same rule as message
+    /// author resolution).
+    pub display_name: String,
+}
+
+/// Narrow read-only port listing what's available to select for
+/// `SlackConfig.channel_ids`/`watched_user_ids` (`step8.md`). Deliberately
+/// not routed through `Command`/`CommandHandler` — listing is a read, and
+/// CQRS's own split (commands mutate, queries read) means it doesn't
+/// belong on the write path; `crates/ui` holds this port directly.
+#[async_trait]
+pub trait SlackPicker: Send + Sync {
+    /// Public channels the bot has already been invited to (`step8.md`
+    /// Decision 3 — channels it hasn't joined would fail if selected).
+    async fn list_channels(&self) -> Result<Vec<PickerChannel>>;
+    /// Non-bot, non-deleted workspace members.
+    async fn list_users(&self) -> Result<Vec<PickerUser>>;
+}
+
+#[async_trait]
+impl SlackPicker for SlackAdapter {
+    async fn list_channels(&self) -> Result<Vec<PickerChannel>> {
+        let token = self.state.read().await.token.clone().ok_or_else(|| {
+            WorkspaceError::Integration("Slack is not configured (no token found)".into())
+        })?;
+        fetch_channel_list(&self.http, &token).await
+    }
+
+    async fn list_users(&self) -> Result<Vec<PickerUser>> {
+        let token = self.state.read().await.token.clone().ok_or_else(|| {
+            WorkspaceError::Integration("Slack is not configured (no token found)".into())
+        })?;
+        fetch_user_list(&self.http, &token).await
     }
 }
 
@@ -633,6 +710,175 @@ async fn post_message(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct RawChannel {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    is_member: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseMetadata {
+    #[serde(default)]
+    next_cursor: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConversationsListResponse {
+    ok: bool,
+    #[serde(default)]
+    channels: Vec<RawChannel>,
+    #[serde(default)]
+    response_metadata: Option<ResponseMetadata>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Pure page-processing step, split out from the network call so pagination
+/// (Slack's "empty string means no more pages" convention, easy to get
+/// backwards) is unit-testable against fixture JSON without live network —
+/// same pattern as the message/presence mapping functions above.
+fn extract_channel_page(
+    body: ConversationsListResponse,
+) -> Result<(Vec<PickerChannel>, Option<String>)> {
+    if !body.ok {
+        return Err(WorkspaceError::Integration(
+            body.error
+                .unwrap_or_else(|| "unknown Slack API error".into()),
+        ));
+    }
+    let channels = body
+        .channels
+        .into_iter()
+        .filter(|c| c.is_member)
+        .map(|c| PickerChannel {
+            id: c.id,
+            name: c.name,
+        })
+        .collect();
+    let next_cursor = body
+        .response_metadata
+        .map(|m| m.next_cursor)
+        .filter(|c| !c.is_empty());
+    Ok((channels, next_cursor))
+}
+
+async fn fetch_channel_list(http: &reqwest::Client, token: &str) -> Result<Vec<PickerChannel>> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut query = vec![
+            ("types", "public_channel".to_string()),
+            ("limit", "200".to_string()),
+        ];
+        if let Some(c) = &cursor {
+            query.push(("cursor", c.clone()));
+        }
+        let response = http
+            .get(format!("{SLACK_API_BASE}/conversations.list"))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|e| WorkspaceError::Integration(format!("Slack request failed: {e}")))?;
+        let body: ConversationsListResponse = response.json().await.map_err(|e| {
+            WorkspaceError::Integration(format!("Slack response parse failed: {e}"))
+        })?;
+        let (mut page, next_cursor) = extract_channel_page(body)?;
+        all.append(&mut page);
+        match next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(all)
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUser {
+    id: String,
+    #[serde(default)]
+    is_bot: bool,
+    #[serde(default)]
+    deleted: bool,
+    #[serde(default)]
+    real_name: String,
+    #[serde(default)]
+    profile: Option<SlackProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsersListResponse {
+    ok: bool,
+    #[serde(default)]
+    members: Vec<RawUser>,
+    #[serde(default)]
+    response_metadata: Option<ResponseMetadata>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Same role as [`extract_channel_page`], for `users.list`.
+fn extract_user_page(body: UsersListResponse) -> Result<(Vec<PickerUser>, Option<String>)> {
+    if !body.ok {
+        return Err(WorkspaceError::Integration(
+            body.error
+                .unwrap_or_else(|| "unknown Slack API error".into()),
+        ));
+    }
+    let users = body
+        .members
+        .into_iter()
+        .filter(|u| !u.is_bot && !u.deleted)
+        .map(|u| {
+            let display_name = u
+                .profile
+                .map(|p| p.display_name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(u.real_name);
+            PickerUser {
+                id: u.id,
+                display_name,
+            }
+        })
+        .collect();
+    let next_cursor = body
+        .response_metadata
+        .map(|m| m.next_cursor)
+        .filter(|c| !c.is_empty());
+    Ok((users, next_cursor))
+}
+
+async fn fetch_user_list(http: &reqwest::Client, token: &str) -> Result<Vec<PickerUser>> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut query = vec![("limit", "200".to_string())];
+        if let Some(c) = &cursor {
+            query.push(("cursor", c.clone()));
+        }
+        let response = http
+            .get(format!("{SLACK_API_BASE}/users.list"))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|e| WorkspaceError::Integration(format!("Slack request failed: {e}")))?;
+        let body: UsersListResponse = response.json().await.map_err(|e| {
+            WorkspaceError::Integration(format!("Slack response parse failed: {e}"))
+        })?;
+        let (mut page, next_cursor) = extract_user_page(body)?;
+        all.append(&mut page);
+        match next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(all)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,5 +1146,115 @@ mod tests {
     fn missing_retry_after_header_is_none() {
         let headers = reqwest::header::HeaderMap::new();
         assert_eq!(retry_after_seconds(&headers), None);
+    }
+
+    #[test]
+    fn extract_channel_page_filters_to_member_channels_only() {
+        let body: ConversationsListResponse = serde_json::from_str(
+            r#"{
+                "ok": true,
+                "channels": [
+                    {"id": "C1", "name": "general", "is_member": true},
+                    {"id": "C2", "name": "not-joined", "is_member": false}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let (channels, cursor) = extract_channel_page(body).unwrap();
+        assert_eq!(
+            channels,
+            vec![PickerChannel {
+                id: "C1".into(),
+                name: "general".into()
+            }]
+        );
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn extract_channel_page_reports_the_next_cursor_when_present() {
+        let body: ConversationsListResponse = serde_json::from_str(
+            r#"{
+                "ok": true,
+                "channels": [],
+                "response_metadata": {"next_cursor": "abc123"}
+            }"#,
+        )
+        .unwrap();
+        let (_channels, cursor) = extract_channel_page(body).unwrap();
+        assert_eq!(cursor, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn extract_channel_page_treats_empty_cursor_string_as_no_more_pages() {
+        // Slack's actual "last page" convention: response_metadata is
+        // present but next_cursor is "" -- easy to get backwards (treating
+        // presence of the field as "more pages" instead of its content).
+        let body: ConversationsListResponse = serde_json::from_str(
+            r#"{
+                "ok": true,
+                "channels": [],
+                "response_metadata": {"next_cursor": ""}
+            }"#,
+        )
+        .unwrap();
+        let (_channels, cursor) = extract_channel_page(body).unwrap();
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn extract_user_page_filters_out_bots_and_deleted_users() {
+        let body: UsersListResponse = serde_json::from_str(
+            r#"{
+                "ok": true,
+                "members": [
+                    {"id": "U1", "real_name": "Alice", "is_bot": false, "deleted": false},
+                    {"id": "U2", "real_name": "SlackBot", "is_bot": true, "deleted": false},
+                    {"id": "U3", "real_name": "Gone", "is_bot": false, "deleted": true}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let (users, _cursor) = extract_user_page(body).unwrap();
+        assert_eq!(
+            users,
+            vec![PickerUser {
+                id: "U1".into(),
+                display_name: "Alice".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn extract_page_errors_on_slack_api_error() {
+        let body: ConversationsListResponse =
+            serde_json::from_str(r#"{"ok": false, "channels": [], "error": "invalid_auth"}"#)
+                .unwrap();
+        let result = extract_channel_page(body);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn update_selection_replaces_the_config_and_restarts_polling() {
+        let (adapter, _writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+        adapter
+            .connect(Arc::clone(&event_bus), "xoxb-test".to_string())
+            .await
+            .unwrap();
+
+        adapter
+            .update_selection(
+                Arc::clone(&event_bus),
+                vec!["C-new".to_string()],
+                vec!["U-new".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter.health_check().await.unwrap(),
+            ConnectionStatus::Connecting
+        );
     }
 }

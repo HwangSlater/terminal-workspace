@@ -107,7 +107,7 @@ impl AppConfig {
     /// Hierarchy: Default -> `config.toml` -> Environment -> CLI Option (see `ConfigBuilder`).
     pub fn load_or_create_default() -> Result<Self> {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let path = cli_config_path_override(&args).unwrap_or_else(standard_config_path);
+        let path = resolve_config_path();
 
         ConfigBuilder::new()
             .merge_file(&path)?
@@ -125,6 +125,23 @@ impl AppConfig {
             toml::from_str(toml_str).map_err(|e| WorkspaceError::Configuration(e.to_string()))?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Overwrite `path` with this config, serialized as TOML. Used by the
+    /// Slack channel/user picker (`step8.md`) to persist a selection —
+    /// **not** part of the normal boot path, which stays read-only.
+    ///
+    /// Round-trips through `serde`, so hand-added comments/formatting in an
+    /// existing file are lost on save. Accepted limitation, same category
+    /// as `EncryptedFileProvider`'s honest tradeoff (`crates/secrets`) —
+    /// pre-v1.0 with no public users yet, not hidden.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        let toml_str = toml::to_string_pretty(self)
+            .map_err(|e| WorkspaceError::Configuration(e.to_string()))?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| WorkspaceError::Configuration(e.to_string()))?;
+        }
+        fs::write(path, toml_str).map_err(|e| WorkspaceError::Configuration(e.to_string()))
     }
 
     /// Perform configurations validation constraints.
@@ -167,6 +184,16 @@ fn cli_config_path_override(args: &[String]) -> Option<PathBuf> {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
+}
+
+/// The exact path `load_or_create_default` reads from (a `--config`
+/// override if given, else the OS-standard location) — exposed separately
+/// so a caller that needs to write back later (`AppConfig::save_to`, the
+/// picker in `step8.md`) targets the identical file rather than guessing.
+#[must_use]
+pub fn resolve_config_path() -> PathBuf {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    cli_config_path_override(&args).unwrap_or_else(standard_config_path)
 }
 
 const DEFAULT_TOML: &str = r#"# Terminal Workspace Core Settings
@@ -462,5 +489,29 @@ mod tests {
             config.integrations.slack.watched_user_ids,
             vec!["U0123456789", "U0987654321"]
         );
+    }
+
+    #[test]
+    fn save_to_then_parse_round_trips_a_picker_selection() {
+        let dir = std::env::temp_dir().join(format!("tw_config_test_{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.toml");
+
+        let mut config = AppConfig::default();
+        config.integrations.slack.enabled = true;
+        config.integrations.slack.channel_ids = vec!["C123".to_string()];
+        config.integrations.slack.watched_user_ids = vec!["U123".to_string(), "U456".to_string()];
+        config.save_to(&path).expect("save_to must succeed");
+
+        let reloaded_toml = std::fs::read_to_string(&path).unwrap();
+        let reloaded = AppConfig::parse(&reloaded_toml).expect("saved config must parse back");
+
+        assert!(reloaded.integrations.slack.enabled);
+        assert_eq!(reloaded.integrations.slack.channel_ids, vec!["C123"]);
+        assert_eq!(
+            reloaded.integrations.slack.watched_user_ids,
+            vec!["U123", "U456"]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

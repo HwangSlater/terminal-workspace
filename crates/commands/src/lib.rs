@@ -44,6 +44,16 @@ pub enum Command {
         token: String,
     },
 
+    /// Persist a channel/watched-user selection made through the picker
+    /// overlay (`step8.md`, `Ctrl+P`) to `config.toml` and restart the
+    /// Slack poll loop with it.
+    ApplySlackSelection {
+        /// Channels to poll for messages (`conversations.history`).
+        channel_ids: Vec<String>,
+        /// Teammates to poll for presence (`users.getPresence`).
+        watched_user_ids: Vec<String>,
+    },
+
     /// Mark notification as read.
     MarkNotificationRead {
         /// Unique identifier.
@@ -52,6 +62,27 @@ pub enum Command {
 
     /// Force synchronization check on all active integration adapters.
     SyncAllAdapters,
+}
+
+/// Narrow port for `Command::ApplySlackSelection`: persist a channel/user
+/// selection somewhere durable and apply it live. Defined here rather than
+/// alongside `SlackConnector`/`SlackMessenger` in `crates/integration`
+/// because applying a selection is inherently cross-context — it touches
+/// both `config.toml` (Config/Workspace concern) and the adapter's live
+/// poll loop (Integration concern) — so `crates/integration` itself has no
+/// business knowing about `config.toml`. The concrete implementation is
+/// wired at the composition root (`crates/app/src/main.rs`), which is
+/// where both halves are already available.
+#[async_trait]
+pub trait SlackSelectionApplier: Send + Sync {
+    /// Persist `channel_ids`/`watched_user_ids` and restart Slack polling
+    /// with them.
+    async fn apply(
+        &self,
+        event_bus: Arc<dyn EventBus>,
+        channel_ids: Vec<String>,
+        watched_user_ids: Vec<String>,
+    ) -> Result<()>;
 }
 
 /// Abstract Command Handler executing state mutations.
@@ -88,6 +119,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::SetPresence { .. } => "SetPresence",
         Command::SendSlackMessage { .. } => "SendSlackMessage",
         Command::ConnectSlack { .. } => "ConnectSlack",
+        Command::ApplySlackSelection { .. } => "ApplySlackSelection",
         Command::MarkNotificationRead { .. } => "MarkNotificationRead",
         Command::SyncAllAdapters => "SyncAllAdapters",
     }
@@ -110,12 +142,14 @@ pub struct WorkspaceCommandHandler {
     /// token to even before the user has configured anything (see
     /// `crates/app/src/main.rs`).
     slack_connector: Option<Arc<dyn SlackConnector>>,
+    /// `None` under the same condition as `slack_connector` above.
+    slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
 }
 
 impl WorkspaceCommandHandler {
     /// Construct a handler wired to the given repositories and event bus.
-    /// `slack_messenger`/`slack_connector` are `None` when no Slack adapter
-    /// was constructed at all.
+    /// `slack_messenger`/`slack_connector`/`slack_selection_applier` are
+    /// `None` when no Slack adapter was constructed at all.
     #[must_use]
     pub fn new(
         presence_repo: Arc<dyn PresenceRepository>,
@@ -123,6 +157,7 @@ impl WorkspaceCommandHandler {
         event_bus: Arc<dyn EventBus>,
         slack_messenger: Option<Arc<dyn SlackMessenger>>,
         slack_connector: Option<Arc<dyn SlackConnector>>,
+        slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
     ) -> Self {
         Self {
             presence_repo,
@@ -130,6 +165,7 @@ impl WorkspaceCommandHandler {
             event_bus,
             slack_messenger,
             slack_connector,
+            slack_selection_applier,
         }
     }
 }
@@ -174,6 +210,19 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
             },
             Command::ConnectSlack { token } => match &self.slack_connector {
                 Some(connector) => connector.connect(Arc::clone(&self.event_bus), token).await,
+                None => Err(WorkspaceError::Integration(
+                    "Slack adapter not available".into(),
+                )),
+            },
+            Command::ApplySlackSelection {
+                channel_ids,
+                watched_user_ids,
+            } => match &self.slack_selection_applier {
+                Some(applier) => {
+                    applier
+                        .apply(Arc::clone(&self.event_bus), channel_ids, watched_user_ids)
+                        .await
+                }
                 None => Err(WorkspaceError::Integration(
                     "Slack adapter not available".into(),
                 )),
@@ -361,12 +410,13 @@ mod tests {
     );
 
     fn make_handler() -> Fixture {
-        make_handler_with_slack(None, None)
+        make_handler_with_slack(None, None, None)
     }
 
     fn make_handler_with_slack(
         slack_messenger: Option<Arc<dyn SlackMessenger>>,
         slack_connector: Option<Arc<dyn SlackConnector>>,
+        slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
     ) -> Fixture {
         let presence = Arc::new(MockPresenceRepo::default());
         let notifications = Arc::new(MockNotificationRepo::default());
@@ -377,6 +427,7 @@ mod tests {
             Arc::clone(&bus) as Arc<dyn EventBus>,
             slack_messenger,
             slack_connector,
+            slack_selection_applier,
         ));
         (handler, presence, notifications, bus)
     }
@@ -461,6 +512,7 @@ mod tests {
         let (handler, ..) = make_handler_with_slack(
             Some(Arc::clone(&messenger) as Arc<dyn SlackMessenger>),
             None,
+            None,
         );
 
         handler
@@ -483,7 +535,7 @@ mod tests {
             sent: Mutex::new(Vec::new()),
             should_fail: true,
         });
-        let (handler, ..) = make_handler_with_slack(Some(messenger), None);
+        let (handler, ..) = make_handler_with_slack(Some(messenger), None, None);
 
         let result = handler
             .handle(Command::SendSlackMessage {
@@ -530,6 +582,7 @@ mod tests {
         let (handler, ..) = make_handler_with_slack(
             None,
             Some(Arc::clone(&connector) as Arc<dyn SlackConnector>),
+            None,
         );
 
         handler
@@ -551,11 +604,90 @@ mod tests {
             connected: Mutex::new(Vec::new()),
             should_fail: true,
         });
-        let (handler, ..) = make_handler_with_slack(None, Some(connector));
+        let (handler, ..) = make_handler_with_slack(None, Some(connector), None);
 
         let result = handler
             .handle(Command::ConnectSlack {
                 token: "xoxb-test".into(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    struct MockSlackSelectionApplier {
+        applied: Mutex<Vec<(Vec<String>, Vec<String>)>>,
+        should_fail: bool,
+    }
+
+    #[async_trait]
+    impl SlackSelectionApplier for MockSlackSelectionApplier {
+        async fn apply(
+            &self,
+            _event_bus: Arc<dyn EventBus>,
+            channel_ids: Vec<String>,
+            watched_user_ids: Vec<String>,
+        ) -> Result<()> {
+            if self.should_fail {
+                return Err(common::WorkspaceError::Integration("boom".into()));
+            }
+            self.applied
+                .lock()
+                .await
+                .push((channel_ids, watched_user_ids));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_slack_selection_errors_without_an_adapter() {
+        let (handler, ..) = make_handler();
+        let result = handler
+            .handle(Command::ApplySlackSelection {
+                channel_ids: vec!["C1".into()],
+                watched_user_ids: vec!["U1".into()],
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_slack_selection_delegates_to_the_configured_applier() {
+        let applier = Arc::new(MockSlackSelectionApplier {
+            applied: Mutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let (handler, ..) = make_handler_with_slack(
+            None,
+            None,
+            Some(Arc::clone(&applier) as Arc<dyn SlackSelectionApplier>),
+        );
+
+        handler
+            .handle(Command::ApplySlackSelection {
+                channel_ids: vec!["C1".into()],
+                watched_user_ids: vec!["U1".into()],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            applier.applied.lock().await.as_slice(),
+            [(vec!["C1".to_string()], vec!["U1".to_string()])]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_slack_selection_propagates_applier_errors() {
+        let applier = Arc::new(MockSlackSelectionApplier {
+            applied: Mutex::new(Vec::new()),
+            should_fail: true,
+        });
+        let (handler, ..) = make_handler_with_slack(None, None, Some(applier));
+
+        let result = handler
+            .handle(Command::ApplySlackSelection {
+                channel_ids: vec![],
+                watched_user_ids: vec![],
             })
             .await;
         assert!(result.is_err());

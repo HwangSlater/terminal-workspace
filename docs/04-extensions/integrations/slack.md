@@ -45,6 +45,10 @@ On a Slack `429`, read the `Retry-After` header, pause outbound calls for that d
 - Non-2xx / network error / malformed JSON on a poll: log at `warn`, skip this cycle's update for that resource, continue the loop. Counts toward the consecutive-failure threshold (`integration-contract.md` §2.1).
 - `chat.postMessage` failure (from `Command::SendSlackMessage`): surfaced synchronously as `Err(WorkspaceError::Integration(..))` to the command caller — sending is a direct user action, not a background sync, so silent skipping would be the wrong failure mode here.
 
+## Picking channels/users (`step8.md`, `Ctrl+P`)
+
+`channel_ids`/`watched_user_ids` no longer need hand-editing `config.toml` — the `Ctrl+P` overlay fetches live lists via `conversations.list` (`types=public_channel`, filtered to `is_member: true` — only channels the bot has already been invited to, since `conversations.history` fails otherwise) and `users.list` (filtered to exclude bots and deleted accounts), both cursor-paginated. No new scopes needed: `channels:read`/`users:read` above already cover them. Selecting rows and pressing `Enter` dispatches `Command::ApplySlackSelection`, which overwrites `config.toml`'s `channel_ids`/`watched_user_ids` (see Configuration below) and restarts the poll loop with them immediately — no restart required. Manually editing `config.toml` still works too; the picker is a convenience, not the only way in.
+
 ## Configuration
 
 ```toml
@@ -55,11 +59,12 @@ channel_ids = ["C0123456789"]
 watched_user_ids = ["U0123456789", "U0987654321"]
 ```
 
-Token is **not** in this file — see Authentication above.
+Token is **not** in this file — see Authentication above. `AppConfig::save_to` (used by the `Ctrl+P` picker) round-trips through `serde`, so hand-added comments/formatting elsewhere in this file are lost if the picker writes it — an accepted, documented limitation (`step8.md`), not a silent one.
 
 ## Testing
 
 - Pure mapping functions (Slack JSON → `NotificationItem`/`MemberPresence`) unit-tested against fixture JSON, no network required.
 - Rate-limit handling: mock a `429` + `Retry-After`, assert the cycle is skipped, not counted as a failure.
 - No-token behavior: `initialize()` with an empty `SecretProviderChain` asserts `ConnectionStatus::Disconnected`, not an error and not synthetic data.
+- Picker pagination/filtering (`conversations.list`/`users.list` cursor handling, `is_member`/`is_bot`/`deleted` filtering) unit-tested against fixture JSON, same pattern as the mapping functions above.
 - No live-network integration test exists (no test Slack workspace / CI secret) — manual verification with a real `SLACK_BOT_TOKEN` is the acceptance check for this phase.

@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 pub mod slack;
 
-pub use slack::{SlackAdapter, SlackConfig, SlackConnector, SlackMessenger};
+pub use slack::{
+    PickerChannel, PickerUser, SlackAdapter, SlackConfig, SlackConnector, SlackMessenger,
+    SlackPicker,
+};
 
 /// Operational connection health status. See
 /// `docs/04-extensions/state-machine.md` for the transition rules of a

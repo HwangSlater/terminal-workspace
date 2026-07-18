@@ -21,7 +21,7 @@ pub enum FocusMode {
 }
 
 /// Which dialog is showing while `focus_mode == FocusMode::Overlay`
-/// (`step7.md`).
+/// (`step7.md`, `step8.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum OverlayKind {
     /// Static keybinding reference.
@@ -29,6 +29,51 @@ pub enum OverlayKind {
     Help,
     /// In-app Slack Bot Token entry (`Ctrl+S`).
     SlackSetup,
+    /// Channel/watched-user picker (`Ctrl+P`, `step8.md`).
+    SlackPicker,
+}
+
+/// One selectable row in the Slack channel/user picker (`step8.md`) — a
+/// channel or a user, the picker doesn't care which once rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerRow {
+    /// Slack channel or user id.
+    pub id: String,
+    /// Display label (channel name or person's display name).
+    pub label: String,
+    /// Whether this row is checked for inclusion in the selection.
+    pub selected: bool,
+}
+
+/// Outcome of the picker's data fetch / apply flow.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SlackPickerStatus {
+    /// Overlay not open, or open but not yet fetched.
+    #[default]
+    Idle,
+    /// `SlackPicker::list_channels`/`list_users` in flight.
+    Loading,
+    /// Lists fetched successfully; rows are ready to select.
+    Loaded,
+    /// `Command::ApplySlackSelection` dispatched, awaiting the result.
+    Saving,
+    /// Selection applied successfully.
+    Saved,
+    /// A fetch or apply failed; the message is shown to the user.
+    Failed(String),
+}
+
+/// State for the Slack channel/user picker overlay (`step8.md`).
+#[derive(Debug, Clone, Default)]
+pub struct SlackPickerState {
+    /// Fetched channels the bot has already been invited to.
+    pub channels: Vec<PickerRow>,
+    /// Fetched non-bot, non-deleted workspace members.
+    pub users: Vec<PickerRow>,
+    /// Index into the combined `channels` then `users` list.
+    pub cursor: usize,
+    /// Current fetch/apply outcome.
+    pub status: SlackPickerStatus,
 }
 
 /// Outcome of the last `Command::ConnectSlack` dispatch, shown inline in
@@ -107,6 +152,8 @@ pub struct WorkspaceState {
     pub active_overlay: OverlayKind,
     /// Slack setup overlay's text input and last connection outcome.
     pub slack_setup: SlackSetupState,
+    /// Slack channel/user picker overlay's fetched rows and selection.
+    pub slack_picker: SlackPickerState,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
     /// Selected index within the focused pane's list (Team/Notification).
@@ -126,6 +173,7 @@ impl Default for WorkspaceState {
             cmd_buffer: CommandBufferState::default(),
             active_overlay: OverlayKind::default(),
             slack_setup: SlackSetupState::default(),
+            slack_picker: SlackPickerState::default(),
             active_theme: "default-dark".to_string(),
             selected_index: 0,
             should_quit: false,

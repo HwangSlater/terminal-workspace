@@ -1,7 +1,7 @@
 //! Ratatui drawing functions. See `docs/01-product/screen-spec.md` for the
 //! layout this implements (Phase 5 subset — see `step5.md`).
 
-use crate::state::{FocusMode, OverlayKind, SlackSetupStatus, WorkspaceState};
+use crate::state::{FocusMode, OverlayKind, SlackPickerStatus, SlackSetupStatus, WorkspaceState};
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, PresenceStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -65,6 +65,7 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
         match state.active_overlay {
             OverlayKind::Help => render_help_overlay(frame, area),
             OverlayKind::SlackSetup => render_slack_setup_overlay(frame, area, state),
+            OverlayKind::SlackPicker => render_slack_picker_overlay(frame, area, state),
         }
     }
 }
@@ -77,6 +78,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 j/k, ↑/↓             선택한 패널 안에서 위아래 이동\n\
                 :                    명령줄 입력\n\
                 Ctrl+S               Slack 연결 설정\n\
+                Ctrl+P               Slack 채널/사용자 선택\n\
                 Esc                  닫기 / Normal 모드로 복귀\n\
                 Ctrl+Q               종료";
     let block = Block::default()
@@ -113,6 +115,93 @@ fn render_slack_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceSt
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
+    );
+}
+
+/// Slack channel/watched-user picker (`step8.md`). `cursor` indexes into
+/// the combined channel-then-user list; the section headers ("채널"/"사용자")
+/// aren't part of that index, they're just labels.
+fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let picker = &state.slack_picker;
+    let block = Block::default()
+        .title("Slack 채널/사용자 선택")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    match &picker.status {
+        SlackPickerStatus::Loading => {
+            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            return;
+        }
+        SlackPickerStatus::Failed(reason) => {
+            frame.render_widget(
+                Paragraph::new(format!("불러오기 실패: {reason}\n\nEsc: 닫기"))
+                    .block(block)
+                    .wrap(Wrap { trim: true }),
+                popup,
+            );
+            return;
+        }
+        SlackPickerStatus::Idle
+        | SlackPickerStatus::Loaded
+        | SlackPickerStatus::Saving
+        | SlackPickerStatus::Saved => {}
+    }
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    items.push(ListItem::new(Span::styled(
+        "채널 (봇이 초대된 채널만 표시)",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if picker.channels.is_empty() {
+        items.push(ListItem::new(
+            "  (없음 — 채널에 봇을 초대해야 여기 나타납니다)",
+        ));
+    }
+    for (i, row) in picker.channels.iter().enumerate() {
+        let checkbox = if row.selected { "[x]" } else { "[ ]" };
+        let style = if picker.cursor == i {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("  {checkbox} #{}", row.label)).style(style));
+    }
+    items.push(ListItem::new(Span::styled(
+        "사용자",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    for (i, row) in picker.users.iter().enumerate() {
+        let checkbox = if row.selected { "[x]" } else { "[ ]" };
+        let index = picker.channels.len() + i;
+        let style = if picker.cursor == index {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
+    }
+    frame.render_widget(List::new(items), layout[0]);
+
+    let status_line = match &picker.status {
+        SlackPickerStatus::Saving => "저장 중...",
+        SlackPickerStatus::Saved => "저장됨!",
+        _ => "j/k: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+    };
+    frame.render_widget(
+        Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
+        layout[1],
     );
 }
 
@@ -292,7 +381,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::SlackSetupState;
+    use crate::state::{PickerRow, SlackPickerState, SlackSetupState};
     use commands::DashboardReadModel;
     use domain::{MemberPresence, PresenceStatus, UserId};
     use ratatui::backend::TestBackend;
@@ -537,5 +626,64 @@ mod tests {
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(!contains_ignoring_whitespace(&text, OVERLAY_ONLY_TEXT));
+    }
+
+    #[test]
+    fn slack_picker_overlay_shows_loading_state() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: SlackPickerState {
+                status: SlackPickerStatus::Loading,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "불러오는 중"));
+    }
+
+    #[test]
+    fn slack_picker_overlay_renders_checkboxes_reflecting_selection() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: SlackPickerState {
+                channels: vec![
+                    PickerRow {
+                        id: "C1".into(),
+                        label: "general".into(),
+                        selected: true,
+                    },
+                    PickerRow {
+                        id: "C2".into(),
+                        label: "random".into(),
+                        selected: false,
+                    },
+                ],
+                users: vec![],
+                cursor: 0,
+                status: SlackPickerStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(text.contains("[x] #general"));
+        assert!(text.contains("[ ] #random"));
+    }
+
+    #[test]
+    fn slack_picker_overlay_shows_the_failure_reason() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: SlackPickerState {
+                status: SlackPickerStatus::Failed("invalid_auth".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "invalid_auth"));
     }
 }

@@ -1,22 +1,61 @@
 //! Main entry point for the Terminal-first Developer Workspace.
 
+use async_trait::async_trait;
 use commands::{
-    Command, CommandDispatcher, InMemoryCommandDispatcher, Projector, WorkspaceCommandHandler,
+    Command, CommandDispatcher, InMemoryCommandDispatcher, Projector, SlackSelectionApplier,
+    WorkspaceCommandHandler,
 };
 use common::Result;
 use config::AppConfig;
 use domain::{FailedEventRepository, NotificationRepository, PresenceRepository, PresenceStatus};
 use events::{EventBus, EventDispatcher, EventHandler, InProcessEventBus};
 use integration::{
-    ConnectionStatus, IntegrationAdapter, SlackAdapter, SlackConfig, SlackConnector, SlackMessenger,
+    ConnectionStatus, IntegrationAdapter, SlackAdapter, SlackConfig, SlackConnector,
+    SlackMessenger, SlackPicker,
 };
 use logging::{init_logger, spans::application_span};
 use registry::InMemoryUiRegistry;
 use secrets::{SecretProviderChain, SecretWriter};
+use std::path::PathBuf;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
+use tokio::sync::Mutex;
 use tracing::info;
 use ui::TuiRenderer;
+
+/// Composition-root glue for `Command::ApplySlackSelection` (`step8.md`):
+/// combines writing `config.toml` (a Config/Workspace concern) with
+/// restarting the Slack adapter's poll loop (an Integration concern).
+/// Neither `crates/config` nor `crates/integration` should know about the
+/// other, so this bridging type lives here instead of in either crate —
+/// see `SlackSelectionApplier`'s doc comment in `crates/commands` for why
+/// it isn't just a method on `SlackAdapter`.
+struct ConfigFileSlackSelectionApplier {
+    slack_adapter: Arc<SlackAdapter>,
+    config_path: PathBuf,
+    base_config: Mutex<AppConfig>,
+}
+
+#[async_trait]
+impl SlackSelectionApplier for ConfigFileSlackSelectionApplier {
+    async fn apply(
+        &self,
+        event_bus: Arc<dyn EventBus>,
+        channel_ids: Vec<String>,
+        watched_user_ids: Vec<String>,
+    ) -> Result<()> {
+        {
+            let mut cfg = self.base_config.lock().await;
+            cfg.integrations.slack.channel_ids = channel_ids.clone();
+            cfg.integrations.slack.watched_user_ids = watched_user_ids.clone();
+            cfg.integrations.slack.enabled = true;
+            cfg.save_to(&self.config_path)?;
+        }
+        self.slack_adapter
+            .update_selection(event_bus, channel_ids, watched_user_ids)
+            .await
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,6 +96,16 @@ async fn main() -> Result<()> {
     slack_adapter.initialize(secret_chain.as_ref()).await?;
     let slack_messenger = Arc::clone(&slack_adapter) as Arc<dyn SlackMessenger>;
     let slack_connector = Arc::clone(&slack_adapter) as Arc<dyn SlackConnector>;
+    let slack_picker = Arc::clone(&slack_adapter) as Arc<dyn SlackPicker>;
+    // Bridges config.toml persistence + the adapter's live poll loop for
+    // Command::ApplySlackSelection (step8.md's channel/user picker,
+    // Ctrl+P) — see ConfigFileSlackSelectionApplier's doc comment above.
+    let slack_selection_applier: Arc<dyn SlackSelectionApplier> =
+        Arc::new(ConfigFileSlackSelectionApplier {
+            slack_adapter: Arc::clone(&slack_adapter),
+            config_path: config::resolve_config_path(),
+            base_config: Mutex::new(config.clone()),
+        });
 
     // 5. Wire the CQRS write path: Command -> WorkspaceCommandHandler ->
     //    Storage + EventBus (see docs/06-development/decisions/0007-cqrs.md).
@@ -67,6 +116,7 @@ async fn main() -> Result<()> {
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
         Some(slack_messenger),
         Some(slack_connector),
+        Some(slack_selection_applier),
     ));
     let dispatcher: Arc<dyn CommandDispatcher> = Arc::new(InMemoryCommandDispatcher::new(handler));
 
@@ -119,7 +169,12 @@ async fn main() -> Result<()> {
     //     `Ctrl+S` actually mutate anything — before this the TUI was pure
     //     CQRS read side with no write path of its own.
     let ui_registry = Arc::new(InMemoryUiRegistry::new());
-    let renderer = TuiRenderer::new(ui_registry, read_model, Arc::clone(&dispatcher));
+    let renderer = TuiRenderer::new(
+        ui_registry,
+        read_model,
+        Arc::clone(&dispatcher),
+        slack_picker,
+    );
     renderer.run_loop().await?;
 
     info!("Terminal Workspace exited cleanly.");

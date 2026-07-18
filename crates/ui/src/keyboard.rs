@@ -2,7 +2,7 @@
 //! this is a direct implementation of that document's capture pipeline
 //! diagram, not a new design.
 
-use crate::state::{FocusMode, OverlayKind, SlackSetupStatus, WorkspaceState};
+use crate::state::{FocusMode, OverlayKind, SlackPickerStatus, SlackSetupStatus, WorkspaceState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use registry::UiDockSlot;
 
@@ -43,6 +43,14 @@ pub enum KeyOutcome {
     /// `Command::ConnectSlack` with this value; `handle_key` itself stays
     /// synchronous and can't perform that I/O.
     SubmitSlackToken(String),
+    /// `Ctrl+P` pressed — the caller opens the picker overlay and fetches
+    /// channel/user lists (`SlackPicker::list_channels`/`list_users`, both
+    /// network I/O `handle_key` can't perform synchronously).
+    OpenSlackPicker,
+    /// `Enter` pressed in the picker overlay — `(channel_ids, watched_user_ids)`
+    /// of the currently checked rows; the caller dispatches
+    /// `Command::ApplySlackSelection` with them.
+    SubmitSlackSelection(Vec<String>, Vec<String>),
     /// Recognized as "nothing to do" in the current context.
     Ignored,
 }
@@ -66,6 +74,7 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
         FocusMode::Overlay => match state.active_overlay {
             OverlayKind::Help => KeyOutcome::Handled,
             OverlayKind::SlackSetup => capture_slack_setup_input(state, key),
+            OverlayKind::SlackPicker => capture_slack_picker_input(state, key),
         },
         FocusMode::Normal => {
             if let Some(outcome) = try_global_shortcut(state, key) {
@@ -96,6 +105,12 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.active_overlay = OverlayKind::SlackSetup;
             state.slack_setup.status = SlackSetupStatus::Idle;
             Some(KeyOutcome::Handled)
+        }
+        (KeyCode::Char('p'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::SlackPicker;
+            state.slack_picker.status = SlackPickerStatus::Loading;
+            Some(KeyOutcome::OpenSlackPicker)
         }
         (KeyCode::Tab, _) => {
             focus_dock(state, 1);
@@ -176,6 +191,54 @@ fn capture_slack_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOu
     }
 }
 
+/// Navigation + selection for the picker overlay (`step8.md`). `cursor`
+/// indexes into the combined `channels` then `users` list — `j`/`k` move
+/// it, `Space` toggles the row it's on, `Enter` confirms.
+fn capture_slack_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let picker = &mut state.slack_picker;
+    let total = picker.channels.len() + picker.users.len();
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if total > 0 {
+                picker.cursor = (picker.cursor + 1).min(total - 1);
+            }
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            picker.cursor = picker.cursor.saturating_sub(1);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char(' ') => {
+            let cursor = picker.cursor;
+            if cursor < picker.channels.len() {
+                if let Some(row) = picker.channels.get_mut(cursor) {
+                    row.selected = !row.selected;
+                }
+            } else if let Some(row) = picker.users.get_mut(cursor - picker.channels.len()) {
+                row.selected = !row.selected;
+            }
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter => {
+            let channel_ids = picker
+                .channels
+                .iter()
+                .filter(|r| r.selected)
+                .map(|r| r.id.clone())
+                .collect();
+            let watched_user_ids = picker
+                .users
+                .iter()
+                .filter(|r| r.selected)
+                .map(|r| r.id.clone())
+                .collect();
+            picker.status = SlackPickerStatus::Saving;
+            KeyOutcome::SubmitSlackSelection(channel_ids, watched_user_ids)
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
 fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) {
     let buf = &mut state.cmd_buffer;
     match key.code {
@@ -208,6 +271,7 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{PickerRow, SlackPickerState};
     use crossterm::event::KeyEventKind;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -389,5 +453,89 @@ mod tests {
         };
         handle_key(&mut state, key(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(state.focus_mode, FocusMode::Normal);
+    }
+
+    #[test]
+    fn ctrl_p_opens_the_slack_picker_overlay() {
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::OpenSlackPicker);
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::SlackPicker);
+    }
+
+    fn picker_state_with_two_channels_one_user() -> SlackPickerState {
+        SlackPickerState {
+            channels: vec![
+                PickerRow {
+                    id: "C1".into(),
+                    label: "general".into(),
+                    selected: false,
+                },
+                PickerRow {
+                    id: "C2".into(),
+                    label: "random".into(),
+                    selected: false,
+                },
+            ],
+            users: vec![PickerRow {
+                id: "U1".into(),
+                label: "Alice".into(),
+                selected: false,
+            }],
+            cursor: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn slack_picker_space_toggles_the_row_under_the_cursor() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker_state_with_two_channels_one_user(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(state.slack_picker.channels[0].selected);
+        assert!(!state.slack_picker.channels[1].selected);
+    }
+
+    #[test]
+    fn slack_picker_j_moves_the_cursor_into_the_user_section() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker_state_with_two_channels_one_user(),
+            ..Default::default()
+        };
+        // 3 rows total (2 channels + 1 user), cursor starts at 0.
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.slack_picker.cursor, 2);
+        // One more 'j' must not run past the last row.
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.slack_picker.cursor, 2);
+
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(state.slack_picker.users[0].selected);
+    }
+
+    #[test]
+    fn slack_picker_enter_submits_only_the_selected_ids() {
+        let mut picker = picker_state_with_two_channels_one_user();
+        picker.channels[1].selected = true; // "random", not "general"
+        picker.users[0].selected = true; // "Alice"
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitSlackSelection(vec!["C2".to_string()], vec!["U1".to_string()])
+        );
     }
 }

@@ -9,6 +9,7 @@ common = { path = "../common" }
 domain = { path = "../domain" }
 commands = { path = "../commands" }
 registry = { path = "../registry" }
+integration = { path = "../integration" }
 ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true

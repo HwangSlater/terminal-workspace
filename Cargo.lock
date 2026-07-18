@@ -460,6 +460,7 @@ dependencies = [
  "serde",
  "toml",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2475,6 +2476,7 @@ dependencies = [
  "common",
  "crossterm",
  "domain",
+ "integration",
  "ratatui",
  "registry",
  "tokio",
