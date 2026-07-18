@@ -4,7 +4,9 @@ The Terminal Workspace is a **Local First, Terminal First** platform with an exp
 
 > **Scope note**: everything below is about the **Contributor Experience** (building from source) — see `product-requirements.md` §2.2. It has no bearing on the **User Experience** (§2.1, "Zero Setup") — an end user running a prebuilt release binary never installs any of this.
 
-> **Update (ADR-0014)**: earlier revisions of this document spent most of their length on why Windows contributors specifically needed to install Visual Studio Build Tools (a multi-GB, occasionally flaky install — see ADR-0014's Context for exactly how flaky). That requirement came entirely from `rusqlite`'s `bundled` SQLite needing a C compiler to build. Since the storage engine moved to `redb` (pure Rust, no C compiler, no build script), **no crate in this workspace needs a C toolchain to build, on any OS.** `rustup` alone is sufficient everywhere. The toolchain-installation content below is kept as reference for if/when a future dependency reintroduces a native build requirement — it is not something a contributor needs to act on today.
+> **Update (ADR-0014)**: earlier revisions of this document spent most of their length on why Windows contributors specifically needed to install Visual Studio Build Tools (a multi-GB, occasionally flaky install — see ADR-0014's Context for exactly how flaky). That requirement came entirely from `rusqlite`'s `bundled` SQLite needing a C compiler to build. Since the storage engine moved to `redb` (pure Rust, no C compiler, no build script), **no crate in this workspace needs a C *compiler* to build, on any OS.** The toolchain-installation content below is kept as reference for if/when a future dependency reintroduces a native build requirement.
+>
+> **Update (Phase 6/7, `step6.md`/`step7.md`)**: "no C compiler" is not quite the same as "nothing extra needed everywhere." Two later additions (`reqwest` for Slack's HTTP calls, `keyring` for OS credential storage) mean a bare `rustup` install is still sufficient on **Windows and macOS**, but **Linux** needs a linker plus the system's existing OpenSSL library + headers present for `reqwest`'s default `native-tls` backend to link against (it links the system's OpenSSL, it does not compile one — no C source of ours or a dependency's gets compiled either way). See the README's "Linux" section for exact package names per distro. `keyring`'s Linux backend (`zbus-secret-service-keyring-store`) is a pure-Rust DBus client and needs nothing extra to *build*; at *runtime* it needs a DBus Secret Service (gnome-keyring/kwallet) to actually store a credential, and falls back automatically to an encrypted local file when none is running (headless/server Linux) — not a build-time concern either way.
 
 ---
 
@@ -40,7 +42,7 @@ Running all three on every push/PR exists specifically to catch platform-specifi
 
 ## 3. Local Development Setup
 
-Since no crate needs a C toolchain, setup is just: install Rust, clone, build.
+Since no crate needs a C *compiler*, setup is close to just "install Rust, clone, build" everywhere — Linux is the one exception, needing OpenSSL dev headers + `pkg-config` already present (see the Phase 6/7 update note above and the README's "Linux" section).
 
 ```sh
 # any OS
@@ -60,10 +62,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ./scripts/setup.sh
 ```
 
-### (Dormant) C toolchain installation reference
+### (Dormant) C *compiler* installation reference
 
-Kept for if a future dependency needs a native build step again — not required today (see the ADR-0014 update note at the top of this document).
+Kept for if a future dependency needs to actually compile C/C++ source again — not required today, on any OS (see the ADR-0014 update note at the top of this document). This is distinct from the Linux linker + system OpenSSL requirement noted in the Phase 6/7 update above — that's *linking against* something already present, not compiling anything.
 
 - **Windows**: [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/), "Desktop development with C++" workload, then `rustup default stable-x86_64-pc-windows-msvc`.
-- **Linux**: your distro's package manager (e.g. `build-essential` on Debian/Ubuntu).
-- **macOS**: `xcode-select --install` (Apple Clang).
+- **Linux**: your distro's package manager (e.g. `build-essential` on Debian/Ubuntu — this also happens to be one way to satisfy the linker half of the Phase 6/7 Linux requirement above, since it bundles `gcc`, but installing it for that reason alone is overkill; a linker alone plus `libssl-dev`/`pkg-config` is enough).
+- **macOS**: `xcode-select --install` (Apple Clang) — same "Xcode Command Line Tools provide the system linker" baseline the README's macOS section describes; not specific to this project.

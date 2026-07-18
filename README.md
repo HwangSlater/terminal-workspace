@@ -30,6 +30,24 @@ error: error calling dlltool 'dlltool.exe': program not found
 
 GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSanders.WinLibs.POSIX.UCRT` — 설치 프로그램 없이 압축 해제만 하는 방식이라 가볍고 빠릅니다). LLVM 기반 MinGW은 Rust가 기대하는 `libgcc`/`libgcc_eh`가 없어 링크가 실패하니 피하세요. 설치 후 해당 `mingw64\bin` 폴더를 PATH에 추가하고 새 터미널에서 다시 시도하세요.
 
+### macOS
+
+1. Rust 설치: <https://rustup.rs>
+2. Xcode Command Line Tools가 필요합니다 (Rust가 아니라 macOS에서 뭘 빌드하든 필요한 최소 링커) — 이미 있는지 `xcode-select -p`로 확인, 없으면 `xcode-select --install`.
+3. `git clone` 후 `cargo run -p app` — 그 외 추가 설치는 없습니다. Slack 토큰은 macOS 키체인(Keychain Services)에 자동으로 저장됩니다.
+
+### Linux
+
+1. Rust 설치: <https://rustup.rs>
+2. 이 프로젝트는 HTTP 통신(`reqwest`)에 OS 기본 TLS를 씁니다 — Windows는 자체 내장 TLS, macOS는 Security.framework를 쓰지만, **Linux는 시스템 OpenSSL이 필요**합니다:
+   - Debian/Ubuntu: `sudo apt install build-essential libssl-dev pkg-config`
+   - Fedora/RHEL: `sudo dnf install gcc openssl-devel pkgconf-pkg-config`
+   - Arch: `sudo pacman -S base-devel openssl pkgconf`
+
+   (OpenSSL 소스를 직접 컴파일하는 게 아니라 시스템에 이미 있는 라이브러리를 찾아 연결하는 것뿐이라, 위 패키지들은 보통 데스크톱 배포판엔 이미 있습니다.)
+3. `git clone` 후 `cargo run -p app`.
+4. Slack 토큰 저장: 데스크톱 환경이면(GNOME/KDE 등) DBus Secret Service(gnome-keyring/kwallet)에 자동 저장됩니다 — **빌드 시점에 `libdbus` 같은 걸 따로 설치할 필요는 없습니다** (순수 Rust DBus 클라이언트를 씁니다). 헤드리스/서버 환경처럼 Secret Service가 아예 없는 경우엔 자동으로 로컬 암호화 파일(`~/.config/terminal-workspace/secrets.enc`)로 대체 저장되니 별도 조치가 필요 없습니다.
+
 ---
 
 ## 사용법
