@@ -765,6 +765,23 @@ fn extract_channel_page(
     Ok((channels, next_cursor))
 }
 
+/// Interactive fetches (the picker's) aren't a background loop with a
+/// consecutive-failure counter to absorb a `429` gracefully like the poll
+/// loop's `fetch_history`/`fetch_presence` — the user is watching, so a
+/// clear "rate limited, try again in Ns" error beats a silent retry or a
+/// confusing "response parse failed" (what trying to deserialize a 429
+/// body as the expected JSON shape would otherwise produce).
+fn rate_limit_error(headers: &reqwest::header::HeaderMap) -> WorkspaceError {
+    match retry_after_seconds(headers) {
+        Some(secs) => WorkspaceError::Integration(format!(
+            "Slack API 속도 제한에 걸렸습니다 — {secs}초 후 다시 시도해주세요."
+        )),
+        None => WorkspaceError::Integration(
+            "Slack API 속도 제한에 걸렸습니다 — 잠시 후 다시 시도해주세요.".into(),
+        ),
+    }
+}
+
 async fn fetch_channel_list(http: &reqwest::Client, token: &str) -> Result<Vec<PickerChannel>> {
     let mut all = Vec::new();
     let mut cursor: Option<String> = None;
@@ -783,6 +800,9 @@ async fn fetch_channel_list(http: &reqwest::Client, token: &str) -> Result<Vec<P
             .send()
             .await
             .map_err(|e| WorkspaceError::Integration(format!("Slack request failed: {e}")))?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(rate_limit_error(response.headers()));
+        }
         let body: ConversationsListResponse = response.json().await.map_err(|e| {
             WorkspaceError::Integration(format!("Slack response parse failed: {e}"))
         })?;
@@ -866,6 +886,9 @@ async fn fetch_user_list(http: &reqwest::Client, token: &str) -> Result<Vec<Pick
             .send()
             .await
             .map_err(|e| WorkspaceError::Integration(format!("Slack request failed: {e}")))?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(rate_limit_error(response.headers()));
+        }
         let body: UsersListResponse = response.json().await.map_err(|e| {
             WorkspaceError::Integration(format!("Slack response parse failed: {e}"))
         })?;
@@ -1146,6 +1169,21 @@ mod tests {
     fn missing_retry_after_header_is_none() {
         let headers = reqwest::header::HeaderMap::new();
         assert_eq!(retry_after_seconds(&headers), None);
+    }
+
+    #[test]
+    fn rate_limit_error_includes_the_wait_time_when_known() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
+        let err = rate_limit_error(&headers);
+        assert!(err.to_string().contains("30"));
+    }
+
+    #[test]
+    fn rate_limit_error_has_a_readable_fallback_when_wait_time_is_unknown() {
+        let headers = reqwest::header::HeaderMap::new();
+        let err = rate_limit_error(&headers);
+        assert!(err.to_string().contains("속도 제한"));
     }
 
     #[test]

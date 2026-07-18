@@ -57,6 +57,7 @@ impl EncryptedFileProvider {
             .map_err(|e| WorkspaceError::Security(format!("Failed to create secrets dir: {e}")))?;
         std::fs::write(self.key_path(), key.as_slice())
             .map_err(|e| WorkspaceError::Security(format!("Failed to write secrets key: {e}")))?;
+        restrict_permissions(&self.key_path())?;
         Ok(key)
     }
 
@@ -95,8 +96,31 @@ impl EncryptedFileProvider {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| WorkspaceError::Security(format!("Failed to create secrets dir: {e}")))?;
         std::fs::write(self.vault_path(), out)
-            .map_err(|e| WorkspaceError::Security(format!("Failed to write secrets vault: {e}")))
+            .map_err(|e| WorkspaceError::Security(format!("Failed to write secrets vault: {e}")))?;
+        restrict_permissions(&self.vault_path())
     }
+}
+
+/// Without this, `secrets.key`/`secrets.enc` are written with the process's
+/// default umask on Unix — typically group/world-readable, meaning any
+/// other local account could read the encryption key and decrypt the
+/// vault. This doesn't make the fallback storage equivalent to a real OS
+/// keyring (see this module's doc comment), but there's no reason to leave
+/// it weaker than a one-line `chmod` fixes.
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+        WorkspaceError::Security(format!("Failed to restrict secrets file permissions: {e}"))
+    })
+}
+
+/// Windows ACLs on a user's own profile directory already default to
+/// owner-only access, so there's no equivalent single-call tightening to
+/// apply here.
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
 
 #[async_trait]
@@ -182,5 +206,26 @@ mod tests {
                 .expose_secret(),
             "value-b"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vault_and_key_files_are_not_group_or_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("permissions");
+        let provider = EncryptedFileProvider::new(dir.clone());
+        provider.set_secret("KEY", "value").await.unwrap();
+
+        for file in [KEY_FILE, VAULT_FILE] {
+            let mode = std::fs::metadata(dir.join(file))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{file} must not be group/world readable (mode was {mode:o})"
+            );
+        }
     }
 }
