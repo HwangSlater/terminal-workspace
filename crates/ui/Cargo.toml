@@ -12,6 +12,7 @@ registry = { path = "../registry" }
 integration = { path = "../integration" }
 events = { path = "../events" }
 logging = { path = "../logging" }
+scheduler = { path = "../scheduler" }
 ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true

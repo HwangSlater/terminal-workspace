@@ -10,6 +10,7 @@ domain = { path = "../domain" }
 events = { path = "../events" }
 logging = { path = "../logging" }
 integration = { path = "../integration" }
+scheduler = { path = "../scheduler" }
 async-trait.workspace = true
 serde.workspace = true
 tracing.workspace = true

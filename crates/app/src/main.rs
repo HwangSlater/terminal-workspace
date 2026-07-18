@@ -23,6 +23,7 @@ use ipc::{IpcClient, IpcRequest, IpcResponse, IpcServer, IpcStatusProvider, IpcS
 use logging::{init_logger, spans::application_span};
 use plugin_host::{PermissionManager, PluginHostConfig, PluginHostManager, PluginPresenceProvider};
 use registry::InMemoryUiRegistry;
+use scheduler::AgendaScheduler;
 use secrets::{SecretProviderChain, SecretWriter};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -423,6 +424,14 @@ async fn main() -> Result<()> {
     selection_appliers.insert(IntegrationSource::GitHub, github_selection_applier);
 
     let event_bus = Arc::new(InProcessEventBus::new(256));
+
+    // 4d. The Pomodoro timer (`step18.md`) — always constructed (like the
+    //     adapters above), starts idle/never-started until a real
+    //     `/pomodoro start` command. `run_loop` is spawned once the
+    //     dispatcher exists (step 6d below), same lifecycle shape as the
+    //     integration adapters' poll loops.
+    let scheduler = AgendaScheduler::new(Arc::clone(&event_bus) as Arc<dyn EventBus>);
+
     let handler = Arc::new(WorkspaceCommandHandler::new(
         Arc::clone(&storage) as Arc<dyn PresenceRepository>,
         Arc::clone(&storage) as Arc<dyn NotificationRepository>,
@@ -431,6 +440,7 @@ async fn main() -> Result<()> {
         Some(slack_selection_applier),
         connectors,
         selection_appliers,
+        Arc::clone(&scheduler),
     ));
     let dispatcher: Arc<dyn CommandDispatcher> = Arc::new(InMemoryCommandDispatcher::new(handler));
 
@@ -474,6 +484,16 @@ async fn main() -> Result<()> {
             .await?;
         info!("Calendar adapter started.");
     }
+
+    // 6d. The Pomodoro timer's background loop (`step18.md`) -- unlike the
+    //     integration adapters above, always started (not gated behind an
+    //     `enabled` flag): it stays idle and does nothing until a
+    //     `/pomodoro start` command, at which point it needs to already be
+    //     running to catch the deadline.
+    let scheduler_for_loop = Arc::clone(&scheduler);
+    tokio::spawn(async move {
+        scheduler_for_loop.run_loop().await;
+    });
 
     // 7. Wire the CQRS read path (Phase 5): Projector keeps a
     //    DashboardReadModel current for the TUI to render from — closes
@@ -587,6 +607,7 @@ async fn main() -> Result<()> {
         initial_github_status,
         initial_calendar_status,
         log_buffer,
+        scheduler,
     );
     renderer.run_loop().await?;
 

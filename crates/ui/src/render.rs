@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use registry::UiDockSlot;
+use scheduler::{PomodoroMode, PomodoroSnapshot};
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
@@ -25,11 +26,13 @@ const RIGHT_DOCK_WIDTH: u16 = 32;
 /// too-small placeholder if the terminal is below `docs/01-product/screen-spec.md`'s
 /// minimum grid size. `log_lines` backs the bottom "로그" dock
 /// (`step17.md`) -- the most recent buffered lines, oldest first.
+/// `pomodoro` backs the header's Pomodoro segment (`step18.md`).
 pub fn render(
     frame: &mut Frame,
     state: &WorkspaceState,
     model: &DashboardReadModel,
     log_lines: &[String],
+    pomodoro: &PomodoroSnapshot,
 ) {
     let area = frame.size();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -48,7 +51,7 @@ pub fn render(
         ])
         .split(area);
 
-    render_header(frame, rows[0], state);
+    render_header(frame, rows[0], state, pomodoro);
 
     let collapse_sidebars = area.width < SIDEBAR_COLLAPSE_WIDTH;
     if collapse_sidebars {
@@ -525,14 +528,20 @@ fn dock_block<'a>(title: &'a str, slot: UiDockSlot, state: &WorkspaceState) -> B
         .border_style(style)
 }
 
-fn render_header(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    state: &WorkspaceState,
+    pomodoro: &PomodoroSnapshot,
+) {
     let (slack_text, slack_color) =
         connection_status_label("Slack", &state.slack_connection_status);
     let (github_text, github_color) =
         connection_status_label("GitHub", &state.github_connection_status);
     let (calendar_text, calendar_color) =
         connection_status_label("Calendar", &state.calendar_connection_status);
-    let header = Paragraph::new(Line::from(vec![
+
+    let mut spans = vec![
         Span::styled(
             "Terminal Workspace",
             Style::default().add_modifier(Modifier::BOLD),
@@ -543,9 +552,46 @@ fn render_header(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
         Span::styled(github_text, Style::default().fg(github_color)),
         Span::raw("  |  "),
         Span::styled(calendar_text, Style::default().fg(calendar_color)),
-        Span::raw("  |  도움말: ?   종료: Ctrl+Q"),
-    ]));
+    ];
+    // Nothing shown while idle (never started) -- `step18.md` Decision 5.
+    if let Some((pomodoro_text, pomodoro_color)) = pomodoro_label(pomodoro) {
+        spans.push(Span::raw("  |  "));
+        spans.push(Span::styled(
+            pomodoro_text,
+            Style::default().fg(pomodoro_color),
+        ));
+    }
+    spans.push(Span::raw("  |  도움말: ?   종료: Ctrl+Q"));
+
+    let header = Paragraph::new(Line::from(spans));
     frame.render_widget(header, area);
+}
+
+/// `🍅 24:35 (Work)` while running, `⏸` swapped in and dimmed while paused
+/// (`step18.md` Decision 5) -- `None` (nothing shown) if no session has
+/// ever been started, keeping the header uncluttered until the feature is
+/// actually in use.
+fn pomodoro_label(pomodoro: &PomodoroSnapshot) -> Option<(String, Color)> {
+    if !pomodoro.has_been_started {
+        return None;
+    }
+    let minutes = pomodoro.remaining_secs / 60;
+    let seconds = pomodoro.remaining_secs % 60;
+    let mode_label = match pomodoro.mode {
+        PomodoroMode::Work => "Work",
+        PomodoroMode::Break => "Break",
+    };
+    if pomodoro.is_running {
+        Some((
+            format!("🍅 {minutes:02}:{seconds:02} ({mode_label})"),
+            Color::Green,
+        ))
+    } else {
+        Some((
+            format!("⏸ {minutes:02}:{seconds:02} ({mode_label}, 일시정지)"),
+            Color::Yellow,
+        ))
+    }
 }
 
 /// Kept current purely by the `EventBus` subscription in `crates/ui/src/lib.rs`'s
@@ -845,10 +891,31 @@ mod tests {
         model: &DashboardReadModel,
         log_lines: &[String],
     ) -> String {
+        draw_with_logs_and_pomodoro(
+            width,
+            height,
+            state,
+            model,
+            log_lines,
+            &PomodoroSnapshot::default(),
+        )
+    }
+
+    /// Like [`draw_with_logs`], but with a real (non-idle) Pomodoro
+    /// snapshot (`step18.md`) -- same "keep the common helper's signature
+    /// small" reasoning as `draw_with_logs` itself.
+    fn draw_with_logs_and_pomodoro(
+        width: u16,
+        height: u16,
+        state: &WorkspaceState,
+        model: &DashboardReadModel,
+        log_lines: &[String],
+        pomodoro: &PomodoroSnapshot,
+    ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, state, model, log_lines))
+            .draw(|frame| render(frame, state, model, log_lines, pomodoro))
             .unwrap();
         buffer_text(&terminal)
     }
@@ -1287,6 +1354,58 @@ mod tests {
             &DashboardReadModel::default(),
         );
         assert!(contains_ignoring_whitespace(&text, "연결 안"));
+    }
+
+    #[test]
+    fn pomodoro_label_is_none_when_never_started() {
+        // Not a whole-screen text scrape: "Terminal Workspace" (the header
+        // title, always present) contains "Work" as a literal substring
+        // once whitespace is stripped, which would make a scraped
+        // assertion for "Work" a false positive regardless of this
+        // function's actual behavior -- test the function directly.
+        assert!(pomodoro_label(&PomodoroSnapshot::default()).is_none());
+    }
+
+    #[test]
+    fn header_shows_a_running_pomodoro_countdown() {
+        let pomodoro = PomodoroSnapshot {
+            mode: PomodoroMode::Work,
+            session_count: 0,
+            is_running: true,
+            has_been_started: true,
+            remaining_secs: 24 * 60 + 35,
+        };
+        let text = draw_with_logs_and_pomodoro(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+            &[],
+            &pomodoro,
+        );
+        assert!(contains_ignoring_whitespace(&text, "24:35"));
+        assert!(contains_ignoring_whitespace(&text, "Work"));
+    }
+
+    #[test]
+    fn header_shows_a_paused_pomodoro_distinctly() {
+        let pomodoro = PomodoroSnapshot {
+            mode: PomodoroMode::Break,
+            session_count: 1,
+            is_running: false,
+            has_been_started: true,
+            remaining_secs: 90,
+        };
+        let text = draw_with_logs_and_pomodoro(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+            &[],
+            &pomodoro,
+        );
+        assert!(contains_ignoring_whitespace(&text, "01:30"));
+        assert!(contains_ignoring_whitespace(&text, "일시정지"));
     }
 
     #[test]

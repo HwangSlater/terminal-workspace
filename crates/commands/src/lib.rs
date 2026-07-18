@@ -9,6 +9,7 @@ use domain::{
 use events::{Event, EventBus, EventHandler};
 use integration::{IntegrationConnector, SlackMessenger};
 use logging::{spans::command_span, TraceContext};
+use scheduler::AgendaScheduler;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,6 +86,24 @@ pub enum Command {
 
     /// Force synchronization check on all active integration adapters.
     SyncAllAdapters,
+
+    /// Start (or restart) a Pomodoro work/break cycle (`step18.md`).
+    /// `0` in either field is treated as `1` minute by
+    /// `scheduler::AgendaScheduler` -- never a true no-op duration.
+    StartPomodoro {
+        /// Focus session length.
+        work_minutes: u32,
+        /// Rest session length.
+        break_minutes: u32,
+    },
+
+    /// Toggle a running Pomodoro timer to paused, or a paused one back to
+    /// running. Errors (via `AgendaScheduler::toggle_pause`) if no session
+    /// has ever been started (`step18.md` Decision 4).
+    PausePomodoro,
+
+    /// Stop and clear the Pomodoro timer entirely, back to never-started.
+    ResetPomodoro,
 }
 
 /// Narrow port for `Command::ApplySlackSelection`: persist a channel/user
@@ -158,6 +177,9 @@ fn command_name(command: &Command) -> &'static str {
         Command::ApplySelection { .. } => "ApplySelection",
         Command::MarkNotificationRead { .. } => "MarkNotificationRead",
         Command::SyncAllAdapters => "SyncAllAdapters",
+        Command::StartPomodoro { .. } => "StartPomodoro",
+        Command::PausePomodoro => "PausePomodoro",
+        Command::ResetPomodoro => "ResetPomodoro",
     }
 }
 
@@ -188,6 +210,10 @@ pub struct WorkspaceCommandHandler {
     /// target, keyed by source. Slack's two-list selection is not here —
     /// see `slack_selection_applier` above (`step11.md`).
     selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
+    /// The single Pomodoro timer (`step18.md`) -- a plain `Arc`, not
+    /// `Option`, since it isn't gated behind "configured or not" the way
+    /// integrations are; it's always available.
+    scheduler: Arc<AgendaScheduler>,
 }
 
 /// Looks up `source` in a connector/applier registry, or returns the same
@@ -207,6 +233,7 @@ impl WorkspaceCommandHandler {
     /// adapter was constructed at all; `connectors`/`selection_appliers`
     /// simply omit a key for any integration that wasn't constructed.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         presence_repo: Arc<dyn PresenceRepository>,
         notification_repo: Arc<dyn NotificationRepository>,
@@ -215,6 +242,7 @@ impl WorkspaceCommandHandler {
         slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
         connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>>,
         selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
+        scheduler: Arc<AgendaScheduler>,
     ) -> Self {
         Self {
             presence_repo,
@@ -224,6 +252,7 @@ impl WorkspaceCommandHandler {
             slack_selection_applier,
             connectors,
             selection_appliers,
+            scheduler,
         }
     }
 }
@@ -289,6 +318,18 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
             }
             Command::SyncAllAdapters => {
                 tracing::info!("SyncAllAdapters requested; no integration adapters registered yet");
+                Ok(())
+            }
+            Command::StartPomodoro {
+                work_minutes,
+                break_minutes,
+            } => {
+                self.scheduler.start(work_minutes, break_minutes).await;
+                Ok(())
+            }
+            Command::PausePomodoro => self.scheduler.toggle_pause().await,
+            Command::ResetPomodoro => {
+                self.scheduler.reset().await;
                 Ok(())
             }
         }
@@ -513,8 +554,31 @@ mod tests {
             slack_selection_applier,
             connectors,
             selection_appliers,
+            AgendaScheduler::new(Arc::clone(&bus) as Arc<dyn EventBus>),
         ));
         (handler, presence, notifications, bus)
+    }
+
+    /// Like [`make_handler`], but also hands back the `AgendaScheduler`
+    /// instance the handler dispatches Pomodoro commands to -- the other
+    /// fixtures don't expose it, since nothing but the Pomodoro tests
+    /// needs to inspect scheduler state directly (`step18.md`).
+    fn make_handler_with_scheduler() -> (Arc<WorkspaceCommandHandler>, Arc<AgendaScheduler>) {
+        let presence = Arc::new(MockPresenceRepo::default());
+        let notifications = Arc::new(MockNotificationRepo::default());
+        let bus = Arc::new(InProcessEventBus::new(10));
+        let scheduler = AgendaScheduler::new(Arc::clone(&bus) as Arc<dyn EventBus>);
+        let handler = Arc::new(WorkspaceCommandHandler::new(
+            presence as Arc<dyn PresenceRepository>,
+            notifications as Arc<dyn NotificationRepository>,
+            bus as Arc<dyn EventBus>,
+            None,
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            Arc::clone(&scheduler),
+        ));
+        (handler, scheduler)
     }
 
     #[tokio::test]
@@ -1053,5 +1117,61 @@ mod tests {
         let snapshot = model.read().await;
         assert_eq!(snapshot.unread_notifications.len(), 2);
         assert_eq!(snapshot.unread_notifications[0].title, "newer-updated");
+    }
+
+    #[tokio::test]
+    async fn start_pomodoro_command_actually_starts_the_scheduler() {
+        let (handler, scheduler) = make_handler_with_scheduler();
+
+        handler
+            .handle(Command::StartPomodoro {
+                work_minutes: 10,
+                break_minutes: 2,
+            })
+            .await
+            .unwrap();
+
+        let snapshot = scheduler.snapshot().await;
+        assert!(snapshot.has_been_started);
+        assert!(snapshot.is_running);
+        assert_eq!(snapshot.remaining_secs, 10 * 60);
+    }
+
+    #[tokio::test]
+    async fn pause_pomodoro_command_actually_pauses_the_scheduler() {
+        let (handler, scheduler) = make_handler_with_scheduler();
+        handler
+            .handle(Command::StartPomodoro {
+                work_minutes: 10,
+                break_minutes: 2,
+            })
+            .await
+            .unwrap();
+
+        handler.handle(Command::PausePomodoro).await.unwrap();
+
+        assert!(!scheduler.snapshot().await.is_running);
+    }
+
+    #[tokio::test]
+    async fn pause_pomodoro_command_on_a_never_started_scheduler_returns_a_real_error() {
+        let (handler, _scheduler) = make_handler_with_scheduler();
+        assert!(handler.handle(Command::PausePomodoro).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reset_pomodoro_command_actually_clears_the_scheduler() {
+        let (handler, scheduler) = make_handler_with_scheduler();
+        handler
+            .handle(Command::StartPomodoro {
+                work_minutes: 10,
+                break_minutes: 2,
+            })
+            .await
+            .unwrap();
+
+        handler.handle(Command::ResetPomodoro).await.unwrap();
+
+        assert!(!scheduler.snapshot().await.has_been_started);
     }
 }

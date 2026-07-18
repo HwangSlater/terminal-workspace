@@ -474,6 +474,7 @@ dependencies = [
  "events",
  "integration",
  "logging",
+ "scheduler",
  "serde",
  "tokio",
  "tracing",
@@ -2364,9 +2365,7 @@ dependencies = [
 name = "scheduler"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "common",
- "domain",
  "events",
  "tokio",
  "tracing",
@@ -3071,6 +3070,7 @@ dependencies = [
  "logging",
  "ratatui",
  "registry",
+ "scheduler",
  "tokio",
  "tracing",
  "uuid",

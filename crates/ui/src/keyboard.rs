@@ -10,12 +10,19 @@ use commands::Command;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::{IntegrationSource, PresenceStatus};
 use registry::UiDockSlot;
+use scheduler::{DEFAULT_BREAK_MINUTES, DEFAULT_WORK_MINUTES};
 
 /// Every recognized command head, in the same order `parse_command`
 /// matches them — the single source of truth `compute_suggestions`
 /// (`step13.md`) filters against, so the two can't drift apart.
 const COMMAND_HEADS: &[&str] = &[
-    "/send", "/away", "/active", "/offline", "/meeting", "/lunch",
+    "/send",
+    "/away",
+    "/active",
+    "/offline",
+    "/meeting",
+    "/lunch",
+    "/pomodoro",
 ];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
@@ -555,7 +562,48 @@ fn parse_command(text: &str, picker: &SlackPickerState) -> Result<Option<Command
         "/offline" => Ok(Some(presence_command(PresenceStatus::Offline, rest))),
         "/meeting" => Ok(Some(presence_command(PresenceStatus::Meeting, rest))),
         "/lunch" => Ok(Some(presence_command(PresenceStatus::Lunch, rest))),
+        "/pomodoro" => parse_pomodoro_command(rest),
         _ => Ok(None),
+    }
+}
+
+/// `/pomodoro start [work_min] [break_min]` (defaults if omitted),
+/// `/pomodoro pause` (toggles running/paused), `/pomodoro reset`
+/// (`step18.md` Decision 4).
+fn parse_pomodoro_command(rest: &str) -> Result<Option<Command>, String> {
+    let mut args = rest.split_whitespace();
+    match args.next().unwrap_or("") {
+        "start" => {
+            let work_minutes = args
+                .next()
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| format!("'{s}'은(는) 유효한 분(minute) 값이 아닙니다."))
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_WORK_MINUTES);
+            let break_minutes = args
+                .next()
+                .map(|s| {
+                    s.parse()
+                        .map_err(|_| format!("'{s}'은(는) 유효한 분(minute) 값이 아닙니다."))
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_BREAK_MINUTES);
+            Ok(Some(Command::StartPomodoro {
+                work_minutes,
+                break_minutes,
+            }))
+        }
+        "pause" => Ok(Some(Command::PausePomodoro)),
+        "reset" => Ok(Some(Command::ResetPomodoro)),
+        "" => Err(
+            "사용법: /pomodoro start [작업분] [휴식분] | /pomodoro pause | /pomodoro reset"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "알 수 없는 pomodoro 하위 명령어: '{other}' (start|pause|reset 중 하나)"
+        )),
     }
 }
 
@@ -778,6 +826,91 @@ mod tests {
                 custom_text: Some("brb 10 min".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn pomodoro_start_with_no_args_uses_the_default_durations() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro start");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::StartPomodoro {
+                work_minutes: DEFAULT_WORK_MINUTES,
+                break_minutes: DEFAULT_BREAK_MINUTES,
+            })
+        );
+    }
+
+    #[test]
+    fn pomodoro_start_with_explicit_durations_uses_them() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro start 10 2");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::StartPomodoro {
+                work_minutes: 10,
+                break_minutes: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn pomodoro_start_with_a_non_numeric_duration_is_a_real_error_not_a_fallthrough() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro start abc");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn pomodoro_pause_parses_to_pause_pomodoro() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro pause");
+        assert_eq!(outcome, KeyOutcome::SubmitCommand(Command::PausePomodoro));
+    }
+
+    #[test]
+    fn pomodoro_reset_parses_to_reset_pomodoro() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro reset");
+        assert_eq!(outcome, KeyOutcome::SubmitCommand(Command::ResetPomodoro));
+    }
+
+    #[test]
+    fn pomodoro_with_no_subcommand_is_a_usage_error() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn pomodoro_with_an_unknown_subcommand_is_a_real_error() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/pomodoro bogus");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
     }
 
     #[test]
