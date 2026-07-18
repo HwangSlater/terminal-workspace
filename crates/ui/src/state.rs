@@ -41,6 +41,12 @@ pub enum OverlayKind {
     /// discovery call under the secret-URL auth model (`step12.md`
     /// Decision 1's consequence).
     CalendarSetup,
+    /// Full scrollback view of the app's own log buffer (`Ctrl+4`,
+    /// `step19.md`) — opened directly, the same way `Ctrl+S`/`Ctrl+G`/
+    /// `Ctrl+L` open their setup overlays, rather than a "focus a dock,
+    /// then Enter" two-step. Replaced a permanently-visible 1-line-tall
+    /// bottom dock row that never showed enough to be useful.
+    LogViewer,
 }
 
 /// One selectable row in the Slack channel/user picker (`step8.md`) — a

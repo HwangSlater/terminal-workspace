@@ -2,7 +2,7 @@
 
 This document details the UI state context governing active viewports, split panels, focal nodes, and custom terminal buffers.
 
-> **Implementation Status (Phase 5, amended Phase 7/8/9/10/12)**: Implemented in `crates/ui`. One deviation from the original sketch: `DockSlot` is not a new enum — it reuses `registry::UiDockSlot` (already `Left`/`Center`/`Right`/`Bottom` per ADR-0012) rather than duplicating the same four variants under a different name. `docking_registry`/`active_panel_focus` key off that shared type. Fields added since the original Phase 5 sketch: `selected_index`/`should_quit` (Phase 5, omitted from the first draft below but present from the start of the real implementation); `active_overlay`/`slack_setup`/`slack_picker` (Phase 7/8 — the `Ctrl+S` token-entry and `Ctrl+P` channel/user-picker overlays; `step7.md`, `step8.md`); `slack_connection_status` (Phase 9, `step9.md`); `github_setup`/`github_picker`/`github_connection_status` (Phase 10, `step10.md` — `Ctrl+G`/`Ctrl+R`, structurally identical to their Slack counterparts); `calendar_setup`/`calendar_connection_status` (Phase 12, `step12.md` — `Ctrl+L` only, no picker overlay since Calendar's secret-URL auth model has no "list my calendars" discovery call). The sketch below is kept current, not historical.
+> **Implementation Status (Phase 5, amended Phase 7/8/9/10/12/19)**: Implemented in `crates/ui`. One deviation from the original sketch: `DockSlot` is not a new enum — it reuses `registry::UiDockSlot` (already `Left`/`Center`/`Right`/`Bottom` per ADR-0012) rather than duplicating the same four variants under a different name. `docking_registry`/`active_panel_focus` key off that shared type. Fields added since the original Phase 5 sketch: `selected_index`/`should_quit` (Phase 5, omitted from the first draft below but present from the start of the real implementation); `active_overlay`/`slack_setup`/`slack_picker` (Phase 7/8 — the `Ctrl+S` token-entry and `Ctrl+P` channel/user-picker overlays; `step7.md`, `step8.md`); `slack_connection_status` (Phase 9, `step9.md`); `github_setup`/`github_picker`/`github_connection_status` (Phase 10, `step10.md` — `Ctrl+G`/`Ctrl+R`, structurally identical to their Slack counterparts); `calendar_setup`/`calendar_connection_status` (Phase 12, `step12.md` — `Ctrl+L` only, no picker overlay since Calendar's secret-URL auth model has no "list my calendars" discovery call). Phase 19 (`step19.md`) added the `LogViewer` overlay (`Ctrl+4`) and, separately, removed `Bottom` from the dock-focus cycle `Tab`/`Shift+Tab`/`Ctrl+1~3` walk — `focused_dock: UiDockSlot` can still technically hold `Bottom` (the field's type didn't change) but nothing in `crates/ui` sets it there anymore. The sketch below is kept current, not historical.
 
 ---
 
@@ -73,7 +73,7 @@ pub struct CommandBufferState {
 
 ---
 
-## 3. Overlay State (Phase 7/8/10/12)
+## 3. Overlay State (Phase 7/8/10/12/19)
 
 Which dialog `FocusMode::Overlay` is currently showing, and each dialog's own state:
 
@@ -85,6 +85,7 @@ pub enum OverlayKind {
     GitHubSetup,    // Ctrl+G — step10.md
     GitHubPicker,   // Ctrl+R — step10.md
     CalendarSetup,  // Ctrl+L — step12.md (no picker variant — see below)
+    LogViewer,      // Ctrl+4 — step19.md (replaced a permanently-visible bottom dock row)
 }
 
 pub struct SlackSetupState {

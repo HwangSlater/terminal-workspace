@@ -26,13 +26,12 @@ const COMMAND_HEADS: &[&str] = &[
 ];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
-/// focus clockwise/counter-clockwise through visible layout panes").
-const DOCK_CYCLE: [UiDockSlot; 4] = [
-    UiDockSlot::Left,
-    UiDockSlot::Center,
-    UiDockSlot::Right,
-    UiDockSlot::Bottom,
-];
+/// focus clockwise/counter-clockwise through visible layout panes"). Only
+/// the three panels with an actual visible body panel participate --
+/// `UiDockSlot::Bottom` (Log) dropped out in `step19.md`: it's no longer a
+/// focusable dock at all, `Ctrl+4` opens the Log Viewer overlay directly
+/// instead.
+const DOCK_CYCLE: [UiDockSlot; 3] = [UiDockSlot::Left, UiDockSlot::Center, UiDockSlot::Right];
 
 /// A pane-specific navigation action, once a key has fallen through the
 /// global-shortcut checks in Normal mode.
@@ -109,7 +108,9 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
             None => KeyOutcome::Handled,
         },
         FocusMode::Overlay => match state.active_overlay {
-            OverlayKind::Help => KeyOutcome::Handled,
+            // Pure view, no input fields -- same as Help. Closed via Esc
+            // (handled unconditionally above this match), not any key here.
+            OverlayKind::Help | OverlayKind::LogViewer => KeyOutcome::Handled,
             OverlayKind::SlackSetup => capture_slack_setup_input(state, key),
             OverlayKind::SlackPicker => capture_slack_picker_input(state, key),
             OverlayKind::GitHubSetup => capture_github_setup_input(state, key),
@@ -190,8 +191,14 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             set_focused_dock(state, UiDockSlot::Right);
             Some(KeyOutcome::Handled)
         }
+        // Opens the Log Viewer overlay directly (`step19.md`) -- unlike
+        // Ctrl+1~3, this isn't a "focus a dock" shortcut anymore. The
+        // Bottom dock's persistent 1-line strip showed too little to be
+        // useful; a full scrollback overlay (mirroring Ctrl+S/Ctrl+G/
+        // Ctrl+L's "open directly" pattern) replaced it.
         (KeyCode::Char('4' | 'c'), m) if m.contains(KeyModifiers::CONTROL) => {
-            set_focused_dock(state, UiDockSlot::Bottom);
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::LogViewer;
             Some(KeyOutcome::Handled)
         }
         _ => None,
@@ -668,15 +675,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_focus_through_all_four_docks_and_wraps() {
+    fn tab_cycles_focus_through_all_three_docks_and_wraps() {
+        // Bottom (Log) dropped out of the cycle in step19.md -- it's no
+        // longer a focusable dock, Ctrl+4 opens the Log Viewer overlay
+        // directly instead.
         let mut state = WorkspaceState::default();
         assert_eq!(state.focused_dock, UiDockSlot::Left);
         handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(state.focused_dock, UiDockSlot::Center);
         handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(state.focused_dock, UiDockSlot::Right);
-        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(state.focused_dock, UiDockSlot::Bottom);
         handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(state.focused_dock, UiDockSlot::Left);
     }
@@ -685,7 +693,31 @@ mod tests {
     fn shift_tab_cycles_backward() {
         let mut state = WorkspaceState::default();
         handle_key(&mut state, key(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(state.focused_dock, UiDockSlot::Bottom);
+        assert_eq!(state.focused_dock, UiDockSlot::Right);
+    }
+
+    #[test]
+    fn ctrl_4_opens_the_log_viewer_overlay_directly_without_touching_focused_dock() {
+        // Not a "focus a dock" shortcut like Ctrl+1~3 -- step19.md replaced
+        // the old "focus Bottom dock" behavior with opening the overlay
+        // straight away, so `focused_dock` must be untouched.
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('4'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::LogViewer);
+        assert_eq!(state.focused_dock, UiDockSlot::Left);
+    }
+
+    #[test]
+    fn esc_closes_the_log_viewer_overlay_like_any_other_overlay() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::LogViewer,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(state.focus_mode, FocusMode::Normal);
     }
 
     #[test]

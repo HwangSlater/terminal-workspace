@@ -6,7 +6,7 @@ use crate::state::{
     SlackPickerStatus, SlackSetupStatus, WorkspaceState,
 };
 use commands::DashboardReadModel;
-use domain::{IntegrationSource, NotificationItem, PresenceStatus};
+use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel};
 use events::IntegrationConnectionStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -24,9 +24,12 @@ const RIGHT_DOCK_WIDTH: u16 = 32;
 
 /// Entry point: draws the whole frame per `state`/`model`, or the
 /// too-small placeholder if the terminal is below `docs/01-product/screen-spec.md`'s
-/// minimum grid size. `log_lines` backs the bottom "로그" dock
-/// (`step17.md`) -- the most recent buffered lines, oldest first.
-/// `pomodoro` backs the header's Pomodoro segment (`step18.md`).
+/// minimum grid size. `log_lines` backs the Log Viewer overlay (`Ctrl+4`,
+/// `step19.md`) -- the most recent buffered lines, oldest first. There is
+/// no permanently-visible log dock anymore (`step17.md`'s 1-content-row
+/// bottom strip never showed enough to be useful); the body panels get
+/// that space back. `pomodoro` backs the header's Pomodoro segment
+/// (`step18.md`).
 pub fn render(
     frame: &mut Frame,
     state: &WorkspaceState,
@@ -45,7 +48,6 @@ pub fn render(
         .constraints([
             Constraint::Length(1), // Header
             Constraint::Min(5),    // Body (Left/Center/Right docks)
-            Constraint::Length(3), // Bottom dock
             Constraint::Length(1), // Command bar
             Constraint::Length(1), // Footer
         ])
@@ -57,7 +59,7 @@ pub fn render(
     if collapse_sidebars {
         // Below the width where all three body panels fit side by side,
         // only one is shown at a time -- which one follows `focused_dock`
-        // (already what `Tab`/`Shift+Tab`/`Ctrl+1~4` move) instead of
+        // (already what `Tab`/`Shift+Tab`/`Ctrl+1~3` move) instead of
         // being hardcoded to the Notification panel regardless of what the
         // user last focused. Team/Calendar were previously unreachable at
         // all on a narrow terminal; this was a real usability gap, not a
@@ -65,10 +67,10 @@ pub fn render(
         match state.focused_dock {
             UiDockSlot::Left => render_team_panel(frame, rows[1], state, model),
             UiDockSlot::Right => render_calendar_panel(frame, rows[1], state, model),
-            // Bottom (Log) already has its own always-visible row below
-            // the body -- there's nothing Log-specific to show in this
-            // swappable slot, so it falls back to Notification, same as
-            // the Center dock itself.
+            // Bottom is unreachable in practice since step19.md -- Log is
+            // now a Ctrl+4 overlay, not a focusable dock -- but the match
+            // stays exhaustive over `UiDockSlot`'s four variants, so it
+            // falls back to Notification defensively like Center does.
             UiDockSlot::Center | UiDockSlot::Bottom => {
                 render_notification_panel(frame, rows[1], state, model);
             }
@@ -87,9 +89,8 @@ pub fn render(
         render_calendar_panel(frame, body[2], state, model);
     }
 
-    render_log_panel(frame, rows[2], log_lines);
-    render_command_bar(frame, rows[3], state);
-    render_footer(frame, rows[4]);
+    render_command_bar(frame, rows[2], state);
+    render_footer(frame, rows[3]);
 
     if state.focus_mode == FocusMode::Overlay {
         match state.active_overlay {
@@ -98,6 +99,7 @@ pub fn render(
             OverlayKind::SlackPicker => render_slack_picker_overlay(frame, area, state),
             OverlayKind::GitHubSetup => render_github_setup_overlay(frame, area, state),
             OverlayKind::GitHubPicker => render_github_picker_overlay(frame, area, state),
+            OverlayKind::LogViewer => render_log_viewer_overlay(frame, area, log_lines),
             OverlayKind::CalendarSetup => render_calendar_setup_overlay(frame, area, state),
         }
     }
@@ -124,8 +126,12 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 description: "패널 포커스 순환",
             },
             HelpEntry {
-                key: "Ctrl+1~4",
-                description: "패널로 바로 이동 (팀/알림/캘린더/로그)",
+                key: "Ctrl+1~3",
+                description: "패널로 바로 이동 (팀/알림/캘린더)",
+            },
+            HelpEntry {
+                key: "Ctrl+4",
+                description: "로그 보기 (최근 기록 전체, 오버레이)",
             },
             HelpEntry {
                 key: "j/k, ↑/↓",
@@ -147,6 +153,10 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
             HelpEntry {
                 key: "/away, /active, /offline, /meeting, /lunch [메시지]",
                 description: "내 상태 변경",
+            },
+            HelpEntry {
+                key: "/pomodoro start|pause|reset [작업분] [휴식분]",
+                description: "뽀모도로 타이머 시작/일시정지/재설정",
             },
             HelpEntry {
                 key: "Tab",
@@ -503,6 +513,49 @@ fn presence_status_label(status: PresenceStatus) -> &'static str {
     }
 }
 
+/// Mirrors the semantic colors `connection_status_label` already
+/// established for Slack/GitHub/Calendar connection status (`step19.md`) --
+/// the Team panel is the one place presence is actually listed and it
+/// previously rendered every status in the same plain color, unlike the
+/// header. `Away`/`Meeting`/`Lunch` all share Yellow ("stepped away, not
+/// gone") -- a fifth distinct color for that nuance wasn't worth it.
+fn presence_status_color(status: PresenceStatus) -> Color {
+    match status {
+        PresenceStatus::Active => Color::Green,
+        PresenceStatus::Away | PresenceStatus::Meeting | PresenceStatus::Lunch => Color::Yellow,
+        PresenceStatus::Offline => Color::DarkGray,
+    }
+}
+
+/// `PriorityLevel::Medium` deliberately keeps the default (unstyled) color
+/// rather than getting its own -- most notifications are Medium, and
+/// coloring the common case would just be visual noise; only the two
+/// extremes (`step19.md`) stand out.
+fn priority_color(priority: PriorityLevel) -> Color {
+    match priority {
+        PriorityLevel::High => Color::Red,
+        PriorityLevel::Medium => Color::Reset,
+        PriorityLevel::Low => Color::DarkGray,
+    }
+}
+
+/// Level substrings scanned in priority order (`step19.md`) -- "WARN"
+/// doesn't contain "ERROR" but the reverse check order would still be safe;
+/// listed most-to-least severe for readability. Matches
+/// `tracing_subscriber::fmt::layer()`'s compact, no-ANSI output format
+/// (`step17.md`), which always puts the level right after the timestamp.
+fn log_line_color(line: &str) -> Color {
+    if line.contains("ERROR") {
+        Color::Red
+    } else if line.contains("WARN") {
+        Color::Yellow
+    } else if line.contains("DEBUG") || line.contains("TRACE") {
+        Color::DarkGray
+    } else {
+        Color::Reset
+    }
+}
+
 fn integration_source_label(source: IntegrationSource) -> &'static str {
     match source {
         IntegrationSource::Slack => "슬랙",
@@ -513,7 +566,16 @@ fn integration_source_label(source: IntegrationSource) -> &'static str {
     }
 }
 
-fn dock_block<'a>(title: &'a str, slot: UiDockSlot, state: &WorkspaceState) -> Block<'a> {
+/// `count` appends `" (N)"` to the title when non-zero (`step19.md`) -- a
+/// quick-glance unread/item count without having to focus the panel. `0` is
+/// rendered as the plain title, not `"(0)"`, to avoid permanent visual
+/// noise on an empty workspace.
+fn dock_block(
+    title: &str,
+    count: usize,
+    slot: UiDockSlot,
+    state: &WorkspaceState,
+) -> Block<'static> {
     let focused = state.focused_dock == slot;
     let style = if focused {
         Style::default()
@@ -522,8 +584,13 @@ fn dock_block<'a>(title: &'a str, slot: UiDockSlot, state: &WorkspaceState) -> B
     } else {
         Style::default()
     };
+    let full_title = if count > 0 {
+        format!("{title} ({count})")
+    } else {
+        title.to_string()
+    };
     Block::default()
-        .title(title)
+        .title(full_title)
         .borders(Borders::ALL)
         .border_style(style)
 }
@@ -618,7 +685,7 @@ fn render_team_panel(
     state: &WorkspaceState,
     model: &DashboardReadModel,
 ) {
-    let block = dock_block("팀", UiDockSlot::Left, state);
+    let block = dock_block("팀", model.team_presence.len(), UiDockSlot::Left, state);
     if model.team_presence.is_empty() {
         let empty = Paragraph::new("(아직 팀원이 없습니다)")
             .block(block)
@@ -632,12 +699,19 @@ fn render_team_panel(
         .iter()
         .enumerate()
         .map(|(i, member)| {
-            let line = format!(
-                "{} [{}]",
-                member.display_name,
-                presence_status_label(member.status)
-            );
-            let style = if state.focused_dock == UiDockSlot::Left && i == state.selected_index {
+            let selected = state.focused_dock == UiDockSlot::Left && i == state.selected_index;
+            let line = Line::from(vec![
+                Span::raw(format!("{} [", member.display_name)),
+                // Colored regardless of selection -- REVERSED (swapped
+                // fg/bg) still reads the status color as the background,
+                // keeping the same at-a-glance signal either way.
+                Span::styled(
+                    presence_status_label(member.status),
+                    Style::default().fg(presence_status_color(member.status)),
+                ),
+                Span::raw("]"),
+            ]);
+            let style = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
@@ -654,7 +728,12 @@ fn render_notification_panel(
     state: &WorkspaceState,
     model: &DashboardReadModel,
 ) {
-    let block = dock_block("알림", UiDockSlot::Center, state);
+    let block = dock_block(
+        "알림",
+        model.unread_notifications.len(),
+        UiDockSlot::Center,
+        state,
+    );
     if model.unread_notifications.is_empty() {
         let empty = Paragraph::new("(아직 알림이 없습니다)")
             .block(block)
@@ -668,11 +747,12 @@ fn render_notification_panel(
         .iter()
         .enumerate()
         .map(|(i, item)| {
+            let selected = state.focused_dock == UiDockSlot::Center && i == state.selected_index;
             let line = format!("[{}] {}", integration_source_label(item.source), item.title);
-            let style = if state.focused_dock == UiDockSlot::Center && i == state.selected_index {
+            let style = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
-                Style::default()
+                Style::default().fg(priority_color(item.priority))
             };
             ListItem::new(line).style(style)
         })
@@ -707,8 +787,8 @@ fn render_calendar_panel(
     state: &WorkspaceState,
     model: &DashboardReadModel,
 ) {
-    let block = dock_block("캘린더", UiDockSlot::Right, state);
     let items = calendar_notifications(model);
+    let block = dock_block("캘린더", items.len(), UiDockSlot::Right, state);
 
     if items.is_empty() {
         let text = if state.calendar_connection_status == IntegrationConnectionStatus::Disconnected
@@ -738,27 +818,39 @@ fn render_calendar_panel(
     frame.render_widget(List::new(list_items).block(block), area);
 }
 
-/// Live tail of the app's own `tracing` output (`step17.md`) -- the most
-/// recent lines that fit `area.height`, oldest at the top like a
-/// scrolling `tail -f`. Not scrollable yet (`step17.md` Decision 2 defers
-/// that); always shows whatever's most recent.
-fn render_log_panel(frame: &mut Frame, area: Rect, log_lines: &[String]) {
-    let block = Block::default().title("로그").borders(Borders::ALL);
+/// Full scrollback view of the app's own `tracing` output (`Ctrl+4`,
+/// `step19.md`, superseding `step17.md`'s permanently-visible 1-line
+/// strip) -- a large centered overlay, the most recent lines that fit its
+/// height, oldest at the top like a scrolling `tail -f`. Not scrollable yet
+/// (same deferral `step17.md` Decision 2 made); always shows whatever's
+/// most recent. Lines are colored by level (`log_line_color`) so an
+/// ERROR/WARN actually stands out from routine INFO noise.
+fn render_log_viewer_overlay(frame: &mut Frame, area: Rect, log_lines: &[String]) {
+    let popup = centered_rect(80, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title("로그 (Esc: 닫기)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
 
     if log_lines.is_empty() {
         let placeholder = Paragraph::new("(아직 로그가 없습니다)")
             .block(block)
             .wrap(Wrap { trim: true });
-        frame.render_widget(placeholder, area);
+        frame.render_widget(placeholder, popup);
         return;
     }
 
-    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+    let visible_rows = popup.height.saturating_sub(2).max(1) as usize;
     let start = log_lines.len().saturating_sub(visible_rows);
-    let text = log_lines[start..].join("\n");
+    let lines: Vec<Line> = log_lines[start..]
+        .iter()
+        .map(|line| Line::styled(line.clone(), Style::default().fg(log_line_color(line))))
+        .collect();
 
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, popup);
 }
 
 fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
@@ -808,9 +900,10 @@ fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer =
-        Paragraph::new("Tab:다음 패널  Ctrl+1~4:포커스 이동  ::명령줄  ?:도움말  Ctrl+Q:종료")
-            .style(Style::default().fg(Color::DarkGray));
+    let footer = Paragraph::new(
+        "Tab:다음 패널  Ctrl+1~3:포커스 이동  Ctrl+4:로그 보기  ::명령줄  ?:도움말  Ctrl+Q:종료",
+    )
+    .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer, area);
 }
 
@@ -876,6 +969,38 @@ mod tests {
         strip(haystack).contains(&strip(needle))
     }
 
+    /// Scans the rendered buffer, row by row, for `needle` (whitespace
+    /// stripped, same convention as [`contains_ignoring_whitespace`] -- a
+    /// wide glyph's padding cell reads back as a literal space, and this
+    /// must also tolerate a multi-word needle's own spaces) and returns the
+    /// foreground color of the first matching character's cell -- for tests
+    /// proving a color decision (`step19.md`'s presence/priority/log-level
+    /// coloring), not just that some text is present. Matches the *whole*
+    /// needle rather than just its first character -- popups don't cover
+    /// the full screen (`centered_rect`), so header/footer text stays
+    /// visible around them and a single-letter match can collide with an
+    /// unrelated earlier word (e.g. the 'u' in the header's "Workspace").
+    fn fg_color_of(terminal: &Terminal<TestBackend>, needle: &str) -> Color {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width.max(1) as usize;
+        let needle_stripped: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+        for row in buffer.content().chunks(width) {
+            let mut stripped = String::new();
+            let mut index_map = Vec::new(); // stripped char index -> original cell index
+            for (idx, cell) in row.iter().enumerate() {
+                for ch in cell.symbol().chars().filter(|c| !c.is_whitespace()) {
+                    stripped.push(ch);
+                    index_map.push(idx);
+                }
+            }
+            if let Some(byte_pos) = stripped.find(&needle_stripped) {
+                let char_idx = stripped[..byte_pos].chars().count();
+                return row[index_map[char_idx]].fg;
+            }
+        }
+        panic!("'{needle}' not found in rendered buffer");
+    }
+
     fn draw(width: u16, height: u16, state: &WorkspaceState, model: &DashboardReadModel) -> String {
         draw_with_logs(width, height, state, model, &[])
     }
@@ -912,12 +1037,29 @@ mod tests {
         log_lines: &[String],
         pomodoro: &PomodoroSnapshot,
     ) -> String {
+        buffer_text(&draw_terminal(
+            width, height, state, model, log_lines, pomodoro,
+        ))
+    }
+
+    /// Like [`draw_with_logs_and_pomodoro`], but returns the `Terminal`
+    /// itself rather than its flattened text -- for tests that need to
+    /// inspect cell styles (`fg_color_of`), not just which characters
+    /// rendered where (`step19.md`).
+    fn draw_terminal(
+        width: u16,
+        height: u16,
+        state: &WorkspaceState,
+        model: &DashboardReadModel,
+        log_lines: &[String],
+        pomodoro: &PomodoroSnapshot,
+    ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| render(frame, state, model, log_lines, pomodoro))
             .unwrap();
-        buffer_text(&terminal)
+        terminal
     }
 
     #[test]
@@ -985,8 +1127,10 @@ mod tests {
 
     #[test]
     fn collapsed_bottom_focus_falls_back_to_notification_panel() {
-        // Log already has its own always-visible row -- Bottom focus has
-        // nothing Log-specific to show in the swappable body slot.
+        // Unreachable via real keyboard input since step19.md (Bottom
+        // dropped out of DOCK_CYCLE, Ctrl+4 opens the Log Viewer overlay
+        // directly) -- this proves the defensive fallback still holds if
+        // `focused_dock` is ever `Bottom` regardless.
         let state = WorkspaceState {
             focused_dock: UiDockSlot::Bottom,
             ..Default::default()
@@ -1066,24 +1210,43 @@ mod tests {
         assert!(contains_ignoring_whitespace(&text, "Ctrl+L"));
     }
 
+    /// Real content only ever shows inside the Log Viewer overlay
+    /// (`Ctrl+4`, `step19.md`) now -- there's no permanently-visible log
+    /// dock anymore. This is the actual regression this redesign must
+    /// guard against: the old placeholder text must NOT leak into a
+    /// perfectly ordinary Normal-mode frame.
     #[test]
-    fn log_panel_shows_empty_state_text_when_no_lines_buffered_yet() {
+    fn log_viewer_overlay_does_not_render_in_normal_mode() {
         let text = draw(
             140,
             30,
             &WorkspaceState::default(),
             &DashboardReadModel::default(),
         );
+        assert!(!contains_ignoring_whitespace(&text, "아직 로그가 없습니다"));
+    }
+
+    fn log_viewer_state() -> WorkspaceState {
+        WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::LogViewer,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn log_viewer_overlay_shows_empty_state_text_when_no_lines_buffered_yet() {
+        let text = draw(140, 30, &log_viewer_state(), &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "아직 로그가 없습니다"));
     }
 
     #[test]
-    fn log_panel_shows_real_buffered_lines() {
+    fn log_viewer_overlay_shows_real_buffered_lines() {
         let log_lines = vec!["Slack adapter started.".to_string()];
         let text = draw_with_logs(
             140,
             30,
-            &WorkspaceState::default(),
+            &log_viewer_state(),
             &DashboardReadModel::default(),
             &log_lines,
         );
@@ -1095,24 +1258,42 @@ mod tests {
     }
 
     #[test]
-    fn log_panel_shows_only_the_most_recent_lines_that_fit() {
-        // The bottom dock is a fixed Constraint::Length(3) row -- 1 content
-        // row after borders -- regardless of terminal height, so only the
-        // single most recent line should ever be visible no matter how
-        // many are buffered.
-        let log_lines: Vec<String> = (1..=10).map(|n| format!("log line {n}")).collect();
+    fn log_viewer_overlay_shows_only_the_most_recent_lines_that_fit() {
+        // Zero-padded so no line number is a literal prefix substring of
+        // another (unlike plain "1"/"10") -- the overlay is tall enough
+        // now (`step19.md`, 70% of terminal height) to show many lines at
+        // once, so the old single-digit dodge from the 1-content-row era
+        // no longer holds across a wide enough number range.
+        let log_lines: Vec<String> = (1..=50).map(|n| format!("log line {n:04}")).collect();
         let text = draw_with_logs(
             140,
-            30,
-            &WorkspaceState::default(),
+            24,
+            &log_viewer_state(),
             &DashboardReadModel::default(),
             &log_lines,
         );
-        assert!(contains_ignoring_whitespace(&text, "log line 10"));
-        // "log line 9", not "log line 1" -- avoids a false negative from
-        // "log line 1" being a literal prefix substring of "log line 10"
-        // once `contains_ignoring_whitespace` strips the separating space.
-        assert!(!contains_ignoring_whitespace(&text, "log line 9"));
+        assert!(contains_ignoring_whitespace(&text, "log line 0050"));
+        assert!(!contains_ignoring_whitespace(&text, "log line 0001"));
+    }
+
+    #[test]
+    fn log_viewer_overlay_colors_an_error_line_differently_from_an_info_line() {
+        let log_lines = vec![
+            "2026-01-01T00:00:00Z INFO routine startup message".to_string(),
+            "2026-01-01T00:00:01Z ERROR something broke".to_string(),
+        ];
+        let terminal = draw_terminal(
+            140,
+            30,
+            &log_viewer_state(),
+            &DashboardReadModel::default(),
+            &log_lines,
+            &PomodoroSnapshot::default(),
+        );
+        let info_color = fg_color_of(&terminal, "routine");
+        let error_color = fg_color_of(&terminal, "something");
+        assert_eq!(error_color, Color::Red);
+        assert_ne!(info_color, error_color);
     }
 
     #[test]
@@ -1147,6 +1328,88 @@ mod tests {
         };
         let text = draw(140, 30, &WorkspaceState::default(), &model);
         assert!(text.contains("Alice"));
+    }
+
+    #[test]
+    fn team_panel_colors_presence_status_like_the_header_does() {
+        let model = DashboardReadModel {
+            team_presence: vec![
+                MemberPresence {
+                    user_id: UserId("u1".into()),
+                    display_name: "Alice".into(),
+                    status: PresenceStatus::Active,
+                    custom_status_text: None,
+                    last_updated_ms: 0,
+                },
+                MemberPresence {
+                    user_id: UserId("u2".into()),
+                    display_name: "Bob".into(),
+                    status: PresenceStatus::Offline,
+                    custom_status_text: None,
+                    last_updated_ms: 0,
+                },
+            ],
+            unread_notifications: Vec::new(),
+        };
+        let terminal = draw_terminal(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &model,
+            &[],
+            &PomodoroSnapshot::default(),
+        );
+        assert_eq!(fg_color_of(&terminal, "활동중"), Color::Green);
+        assert_eq!(fg_color_of(&terminal, "오프라인"), Color::DarkGray);
+    }
+
+    #[test]
+    fn notification_panel_colors_high_priority_differently_from_low() {
+        let model = DashboardReadModel {
+            unread_notifications: vec![
+                NotificationItem {
+                    priority: PriorityLevel::High,
+                    ..sample_notification_for(IntegrationSource::GitHub, "urgent thing")
+                },
+                NotificationItem {
+                    priority: PriorityLevel::Low,
+                    ..sample_notification_for(IntegrationSource::Slack, "fyi thing")
+                },
+            ],
+            ..Default::default()
+        };
+        let terminal = draw_terminal(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &model,
+            &[],
+            &PomodoroSnapshot::default(),
+        );
+        let high_color = fg_color_of(&terminal, "urgent");
+        let low_color = fg_color_of(&terminal, "fyi");
+        assert_eq!(high_color, Color::Red);
+        assert_ne!(high_color, low_color);
+    }
+
+    #[test]
+    fn dock_titles_show_a_count_when_non_empty_and_omit_it_when_zero() {
+        let model = DashboardReadModel {
+            team_presence: vec![MemberPresence {
+                user_id: UserId("u1".into()),
+                display_name: "Alice".into(),
+                status: PresenceStatus::Active,
+                custom_status_text: None,
+                last_updated_ms: 0,
+            }],
+            unread_notifications: Vec::new(),
+        };
+        let text = draw(140, 30, &WorkspaceState::default(), &model);
+        assert!(contains_ignoring_whitespace(&text, "팀 (1)"));
+        // Notification panel is empty in this model -- must stay plain
+        // "알림", not the noisy "알림 (0)".
+        assert!(!contains_ignoring_whitespace(&text, "알림 (0)"));
+        assert!(contains_ignoring_whitespace(&text, "알림"));
     }
 
     #[test]
@@ -1207,6 +1470,19 @@ mod tests {
         assert!(contains_ignoring_whitespace(&text, "Ctrl+S"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+G"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+L"));
+    }
+
+    /// `/pomodoro` was a real, shipped command (`step18.md`) that the help
+    /// overlay never mentioned -- the actual gap `step19.md` fixes.
+    #[test]
+    fn help_overlay_documents_the_pomodoro_command() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            ..Default::default()
+        };
+        let text = draw(140, 55, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "/pomodoro"));
+        assert!(contains_ignoring_whitespace(&text, "Ctrl+4"));
     }
 
     #[test]

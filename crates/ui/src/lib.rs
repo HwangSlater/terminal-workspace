@@ -247,6 +247,11 @@ impl TuiRenderer {
             // nothing to navigate; now it has real rows. Shares the same
             // filter render.rs uses so the two can't drift apart.
             registry::UiDockSlot::Right => render::calendar_notifications(&model).len(),
+            // Unreachable in practice since step19.md -- Bottom never
+            // enters `focused_dock` anymore (dropped from `DOCK_CYCLE`,
+            // `Ctrl+4` opens the Log Viewer overlay directly instead of
+            // focusing a dock). Kept for exhaustiveness over
+            // `UiDockSlot`'s four variants.
             registry::UiDockSlot::Bottom => 0,
         };
         drop(model);
