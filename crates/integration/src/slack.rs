@@ -12,7 +12,7 @@ use domain::{
 };
 use events::{Event, EventBus};
 use secrecy::ExposeSecret;
-use secrets::SecretProvider;
+use secrets::{SecretProvider, SecretWriter};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,6 +59,20 @@ pub trait SlackMessenger: Send + Sync {
     async fn send_message(&self, channel_id: &str, text: &str) -> Result<()>;
 }
 
+/// Narrow port for the in-app setup flow (`step7.md`): persist a token and
+/// (re)start the adapter with it. Separate from [`IntegrationAdapter`]'s
+/// generic lifecycle for the same reason [`SlackMessenger`] is — one
+/// capability per trait, so `crates/commands` depends on only what
+/// `Command::ConnectSlack` actually needs.
+#[async_trait]
+pub trait SlackConnector: Send + Sync {
+    /// Persist `token` durably (via the adapter's configured
+    /// [`SecretWriter`]), then stop any running poll loop and start a fresh
+    /// one with it — safe to call whether this is the first connection or
+    /// a reconnect with a replacement token.
+    async fn connect(&self, event_bus: Arc<dyn EventBus>, token: String) -> Result<()>;
+}
+
 struct AdapterState {
     status: ConnectionStatus,
     consecutive_failures: u32,
@@ -74,13 +88,16 @@ pub struct SlackAdapter {
     display_name_cache: Arc<Mutex<HashMap<String, String>>>,
     channel_cursor: Arc<Mutex<HashMap<String, String>>>,
     poll_task: Mutex<Option<JoinHandle<()>>>,
+    secret_writer: Arc<dyn SecretWriter>,
 }
 
 impl SlackAdapter {
     /// Create a new adapter. Call [`IntegrationAdapter::initialize`] before
-    /// [`IntegrationAdapter::start`].
+    /// [`IntegrationAdapter::start`]. `secret_writer` is where
+    /// [`SlackConnector::connect`] persists a token entered through the
+    /// setup UI (`step7.md`) — normally a `SecretProviderChain`.
     #[must_use]
-    pub fn new(config: SlackConfig) -> Self {
+    pub fn new(config: SlackConfig, secret_writer: Arc<dyn SecretWriter>) -> Self {
         Self {
             config,
             http: reqwest::Client::new(),
@@ -92,6 +109,7 @@ impl SlackAdapter {
             display_name_cache: Arc::new(Mutex::new(HashMap::new())),
             channel_cursor: Arc::new(Mutex::new(HashMap::new())),
             poll_task: Mutex::new(None),
+            secret_writer,
         }
     }
 }
@@ -154,6 +172,27 @@ impl SlackMessenger for SlackAdapter {
             WorkspaceError::Integration("Slack is not configured (no token found)".into())
         })?;
         post_message(&self.http, &token, channel_id, text).await
+    }
+}
+
+#[async_trait]
+impl SlackConnector for SlackAdapter {
+    async fn connect(&self, event_bus: Arc<dyn EventBus>, token: String) -> Result<()> {
+        self.secret_writer
+            .set_secret(SLACK_TOKEN_KEY, &token)
+            .await?;
+        {
+            let mut state = self.state.write().await;
+            state.token = Some(token);
+            state.status = ConnectionStatus::Connecting;
+            state.consecutive_failures = 0;
+        }
+        // Idempotent whether this is the first connection or a reconnect
+        // with a replacement token: stop whatever poll loop (if any) is
+        // already running before starting a fresh one, so a reconnect
+        // never leaves two loops racing against the same shared state.
+        self.shutdown().await?;
+        self.start(event_bus).await
     }
 }
 
@@ -616,6 +655,22 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingWriter {
+        written: tokio::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl SecretWriter for RecordingWriter {
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            self.written
+                .lock()
+                .await
+                .push((key.to_string(), value.to_string()));
+            Ok(())
+        }
+    }
+
     fn test_config() -> SlackConfig {
         SlackConfig {
             channel_ids: vec!["C1".into()],
@@ -624,9 +679,16 @@ mod tests {
         }
     }
 
+    fn test_adapter() -> (SlackAdapter, Arc<RecordingWriter>) {
+        let writer = Arc::new(RecordingWriter::default());
+        let adapter =
+            SlackAdapter::new(test_config(), Arc::clone(&writer) as Arc<dyn SecretWriter>);
+        (adapter, writer)
+    }
+
     #[tokio::test]
     async fn initialize_with_no_token_reports_disconnected_not_error() {
-        let adapter = SlackAdapter::new(test_config());
+        let (adapter, _writer) = test_adapter();
         let result = adapter.initialize(&NoneProvider).await;
         assert!(result.is_ok());
         assert_eq!(
@@ -637,11 +699,57 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_with_token_reports_connecting() {
-        let adapter = SlackAdapter::new(test_config());
+        let (adapter, _writer) = test_adapter();
         adapter
             .initialize(&FixedProvider("xoxb-test"))
             .await
             .unwrap();
+        assert_eq!(
+            adapter.health_check().await.unwrap(),
+            ConnectionStatus::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_persists_the_token_and_transitions_to_connecting() {
+        let (adapter, writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+
+        adapter
+            .connect(Arc::clone(&event_bus), "xoxb-from-ui".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            writer.written.lock().await.as_slice(),
+            [(SLACK_TOKEN_KEY.to_string(), "xoxb-from-ui".to_string())]
+        );
+        // Connecting, not Connected -- the first real poll cycle (which
+        // needs live network) hasn't run yet; this only proves the local
+        // state transition + persistence, not a real Slack round-trip.
+        assert_eq!(
+            adapter.health_check().await.unwrap(),
+            ConnectionStatus::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_is_safe_to_call_twice_in_a_row() {
+        // Reconnecting with a replacement token must not panic or leave
+        // two poll loops racing -- shutdown-then-start makes this
+        // idempotent regardless of whether a loop was already running.
+        let (adapter, _writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+
+        adapter
+            .connect(Arc::clone(&event_bus), "xoxb-first".to_string())
+            .await
+            .unwrap();
+        adapter
+            .connect(Arc::clone(&event_bus), "xoxb-second".to_string())
+            .await
+            .unwrap();
+
         assert_eq!(
             adapter.health_check().await.unwrap(),
             ConnectionStatus::Connecting
@@ -654,7 +762,7 @@ mod tests {
         // returns quickly and without error, matching integration-contract.md
         // §2.3 ("must not return an error or abort").
         let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
-        let adapter = SlackAdapter::new(test_config());
+        let (adapter, _writer) = test_adapter();
         adapter.initialize(&NoneProvider).await.unwrap();
         assert!(adapter.start(event_bus).await.is_ok());
     }

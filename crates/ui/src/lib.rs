@@ -10,7 +10,7 @@ mod state;
 pub use keyboard::{handle_key, KeyOutcome, PaneAction};
 pub use state::{ActiveLayout, CommandBufferState, FocusMode, PanelId, WorkspaceState};
 
-use commands::SharedReadModel;
+use commands::{Command, CommandDispatcher, SharedReadModel};
 use common::{Result, WorkspaceError};
 use crossterm::event::{Event as CrosstermEvent, KeyEventKind};
 use crossterm::terminal::{
@@ -19,6 +19,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use registry::UiRegistry;
+use state::SlackSetupStatus;
 use std::io::Stdout;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -34,15 +35,25 @@ pub struct TuiRenderer {
     #[allow(dead_code)] // wired for future dynamic panel registration (plugins)
     ui_registry: Arc<dyn UiRegistry>,
     read_model: SharedReadModel,
+    /// Lets the run loop actually mutate state through the CQRS write path
+    /// (`Command::ConnectSlack` from the setup overlay, `step7.md`) — before
+    /// this phase, `TuiRenderer` was pure CQRS *read* side with no way to
+    /// dispatch anything.
+    command_dispatcher: Arc<dyn CommandDispatcher>,
 }
 
 impl TuiRenderer {
     /// Create new renderer wrapper.
     #[must_use]
-    pub fn new(ui_registry: Arc<dyn UiRegistry>, read_model: SharedReadModel) -> Self {
+    pub fn new(
+        ui_registry: Arc<dyn UiRegistry>,
+        read_model: SharedReadModel,
+        command_dispatcher: Arc<dyn CommandDispatcher>,
+    ) -> Self {
         Self {
             ui_registry,
             read_model,
+            command_dispatcher,
         }
     }
 
@@ -72,9 +83,14 @@ impl TuiRenderer {
 
         while let Some(event) = rx.recv().await {
             if let InputEvent::Key(key) = event {
-                let outcome = handle_key(state, key);
-                if let KeyOutcome::DispatchToPane(action) = outcome {
-                    self.apply_pane_action(state, action).await;
+                match handle_key(state, key) {
+                    KeyOutcome::DispatchToPane(action) => {
+                        self.apply_pane_action(state, action).await;
+                    }
+                    KeyOutcome::SubmitSlackToken(token) => {
+                        self.submit_slack_token(terminal, state, token).await?;
+                    }
+                    KeyOutcome::Handled | KeyOutcome::Ignored => {}
                 }
                 if state.should_quit {
                     break;
@@ -108,6 +124,28 @@ impl TuiRenderer {
                 // (Phase 5 scope: shell only) — nothing to do.
             }
         }
+    }
+
+    /// Dispatches `Command::ConnectSlack` for a token submitted through the
+    /// setup overlay (`step7.md`), redrawing before the network call so
+    /// "연결 중..." is visible immediately rather than the UI appearing to
+    /// freeze until the request completes.
+    async fn submit_slack_token(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+        token: String,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+        let result = self
+            .command_dispatcher
+            .dispatch(Command::ConnectSlack { token })
+            .await;
+        state.slack_setup.status = match result {
+            Ok(()) => SlackSetupStatus::Connected,
+            Err(e) => SlackSetupStatus::Failed(e.to_string()),
+        };
+        Ok(())
     }
 
     async fn draw(&self, terminal: &mut Terminal<Backend>, state: &WorkspaceState) -> Result<()> {

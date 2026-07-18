@@ -1,8 +1,16 @@
 //! SecretProvider Chain and Credential retrieval.
 
 use async_trait::async_trait;
-use common::Result;
+use common::{Result, WorkspaceError};
 use secrecy::SecretString;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+mod encrypted_file;
+mod keyring_provider;
+
+pub use encrypted_file::EncryptedFileProvider;
+pub use keyring_provider::KeyringProvider;
 
 /// Abstract Secret Provider interface retrieving access tokens safely.
 #[async_trait]
@@ -11,15 +19,15 @@ pub trait SecretProvider: Send + Sync {
     async fn get_secret(&self, key: &str) -> Result<Option<SecretString>>;
 }
 
-/// Keyring system secret provider.
-pub struct KeyringProvider;
-
+/// Abstract Secret Writer interface persisting tokens/API keys durably.
+/// Separate from [`SecretProvider`] because not every provider can
+/// meaningfully be written to — [`EnvProvider`] is read-only, since
+/// setting a process environment variable from inside the app wouldn't
+/// survive a restart, defeating the point of "durable" storage.
 #[async_trait]
-impl SecretProvider for KeyringProvider {
-    async fn get_secret(&self, _key: &str) -> Result<Option<SecretString>> {
-        // Stub implementation - will link keyring crate in Phase 3
-        Ok(None)
-    }
+pub trait SecretWriter: Send + Sync {
+    /// Persist `value` under `key`.
+    async fn set_secret(&self, key: &str, value: &str) -> Result<()>;
 }
 
 /// Environment variable secret provider.
@@ -36,45 +44,70 @@ impl SecretProvider for EnvProvider {
     }
 }
 
-/// Encrypted local file secret provider for zero-dependency portability.
-pub struct EncryptedFileProvider;
-
-#[async_trait]
-impl SecretProvider for EncryptedFileProvider {
-    async fn get_secret(&self, _key: &str) -> Result<Option<SecretString>> {
-        // Stub implementation - reads encrypted vault file on local disk
-        Ok(None)
-    }
+/// `~/.config/terminal-workspace` (or `%USERPROFILE%\.config\terminal-workspace`
+/// on Windows) — same base directory `crates/config` uses for `config.toml`,
+/// per `docs/05-operations/configuration.md` §3.2's documented
+/// `secrets.enc` location.
+fn default_secrets_dir() -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("terminal-workspace")
 }
 
-/// Chain orchestrator routing secret lookup across multiple providers.
+/// Chain orchestrator routing secret lookup and, separately, secret
+/// persistence across multiple providers.
 pub struct SecretProviderChain {
-    providers: Vec<Box<dyn SecretProvider>>,
+    providers: Vec<Arc<dyn SecretProvider>>,
+    writers: Vec<Arc<dyn SecretWriter>>,
 }
 
 impl SecretProviderChain {
-    /// Create new provider chain.
+    /// Create a new chain from explicit read and write provider lists.
     #[must_use]
-    pub fn new(providers: Vec<Box<dyn SecretProvider>>) -> Self {
-        Self { providers }
+    pub fn new(
+        providers: Vec<Arc<dyn SecretProvider>>,
+        writers: Vec<Arc<dyn SecretWriter>>,
+    ) -> Self {
+        Self { providers, writers }
     }
 
-    /// Assemble the canonical provider order defined by ADR-0006:
-    /// `Env -> Keyring -> EncryptedFile`. Additive convenience constructor;
-    /// callers needing a different order (e.g. tests injecting a mock
-    /// provider first) should keep using [`Self::new`] / [`Self::add_provider`].
+    /// Assemble the canonical order defined by ADR-0006: reads try
+    /// `Env -> Keyring -> EncryptedFile`; writes try `Keyring -> EncryptedFile`
+    /// (`Env` is read-only — see [`SecretWriter`]'s docs). Keyring and
+    /// EncryptedFile each back both lists via the same `Arc` instance, not
+    /// duplicated construction. Additive convenience constructor; callers
+    /// needing a different order (e.g. tests injecting a mock provider
+    /// first) should keep using [`Self::new`] / [`Self::add_provider`].
     #[must_use]
     pub fn default_chain() -> Self {
-        Self::new(vec![
-            Box::new(EnvProvider),
-            Box::new(KeyringProvider),
-            Box::new(EncryptedFileProvider),
-        ])
+        let keyring: Arc<KeyringProvider> = Arc::new(KeyringProvider::new());
+        let encrypted_file: Arc<EncryptedFileProvider> =
+            Arc::new(EncryptedFileProvider::new(default_secrets_dir()));
+
+        Self::new(
+            vec![
+                Arc::new(EnvProvider),
+                Arc::clone(&keyring) as Arc<dyn SecretProvider>,
+                Arc::clone(&encrypted_file) as Arc<dyn SecretProvider>,
+            ],
+            vec![
+                keyring as Arc<dyn SecretWriter>,
+                encrypted_file as Arc<dyn SecretWriter>,
+            ],
+        )
     }
 
-    /// Add dynamic provider to the tail of the chain.
-    pub fn add_provider(&mut self, provider: Box<dyn SecretProvider>) {
+    /// Add a dynamic provider to the tail of the read chain.
+    pub fn add_provider(&mut self, provider: Arc<dyn SecretProvider>) {
         self.providers.push(provider);
+    }
+
+    /// Add a dynamic writer to the tail of the write chain.
+    pub fn add_writer(&mut self, writer: Arc<dyn SecretWriter>) {
+        self.writers.push(writer);
     }
 
     /// Query providers sequentially until secret is retrieved.
@@ -85,6 +118,21 @@ impl SecretProviderChain {
             }
         }
         Ok(None)
+    }
+
+    /// Persist `value` under `key`, trying each writer in order and
+    /// returning on the first success — e.g. falling back to the encrypted
+    /// file if no OS keyring backend is reachable.
+    pub async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+        let mut last_error = None;
+        for writer in &self.writers {
+            match writer.set_secret(key, value).await {
+                Ok(()) => return Ok(()),
+                Err(e) => last_error = Some(e),
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| WorkspaceError::Security("No secret writer available".into())))
     }
 }
 
@@ -106,6 +154,25 @@ impl SecretProvider for SecretProviderChain {
     }
 }
 
+/// The chain is itself a `SecretWriter` for the same reason — code that
+/// only needs to persist a secret (`SlackAdapter::connect`) can depend on
+/// the trait, not the concrete chain type. (Same non-delegation reasoning
+/// as the `SecretProvider` impl above.)
+#[async_trait]
+impl SecretWriter for SecretProviderChain {
+    async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+        let mut last_error = None;
+        for writer in &self.writers {
+            match writer.set_secret(key, value).await {
+                Ok(()) => return Ok(()),
+                Err(e) => last_error = Some(e),
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| WorkspaceError::Security("No secret writer available".into())))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,18 +187,49 @@ mod tests {
         }
     }
 
+    struct RecordingWriter {
+        should_fail: bool,
+        received: tokio::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingWriter {
+        fn new(should_fail: bool) -> Self {
+            Self {
+                should_fail,
+                received: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SecretWriter for RecordingWriter {
+        async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+            if self.should_fail {
+                return Err(WorkspaceError::Security("simulated failure".into()));
+            }
+            self.received
+                .lock()
+                .await
+                .push((key.to_string(), value.to_string()));
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn chain_short_circuits_on_first_hit() {
-        let chain = SecretProviderChain::new(vec![
-            Box::new(AlwaysHitProvider("first")),
-            Box::new(AlwaysHitProvider("second")),
-        ]);
+        let chain = SecretProviderChain::new(
+            vec![
+                Arc::new(AlwaysHitProvider("first")),
+                Arc::new(AlwaysHitProvider("second")),
+            ],
+            vec![],
+        );
         let secret = chain.get_secret("ANY_KEY").await.unwrap();
         assert_eq!(secret.unwrap().expose_secret(), "first");
     }
 
     #[tokio::test]
-    async fn default_chain_prefers_env_over_stub_providers() {
+    async fn default_chain_prefers_env_over_other_providers() {
         let key = "TW_TEST_DEFAULT_CHAIN_SECRET";
         std::env::set_var(key, "from-env");
         let chain = SecretProviderChain::default_chain();
@@ -148,5 +246,42 @@ mod tests {
             .await
             .unwrap();
         assert!(secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_secret_falls_back_to_the_next_writer_on_failure() {
+        let failing = Arc::new(RecordingWriter::new(true));
+        let succeeding = Arc::new(RecordingWriter::new(false));
+        let chain = SecretProviderChain::new(
+            vec![],
+            vec![
+                Arc::clone(&failing) as Arc<dyn SecretWriter>,
+                Arc::clone(&succeeding) as Arc<dyn SecretWriter>,
+            ],
+        );
+
+        chain.set_secret("KEY", "value").await.unwrap();
+
+        assert_eq!(
+            succeeding.received.lock().await.as_slice(),
+            [("KEY".to_string(), "value".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_secret_errors_when_every_writer_fails() {
+        let chain = SecretProviderChain::new(
+            vec![],
+            vec![Arc::new(RecordingWriter::new(true)) as Arc<dyn SecretWriter>],
+        );
+        let result = chain.set_secret("KEY", "value").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_secret_errors_when_there_are_no_writers() {
+        let chain = SecretProviderChain::new(vec![], vec![]);
+        let result = chain.set_secret("KEY", "value").await;
+        assert!(result.is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! Ratatui drawing functions. See `docs/01-product/screen-spec.md` for the
 //! layout this implements (Phase 5 subset — see `step5.md`).
 
-use crate::state::{FocusMode, WorkspaceState};
+use crate::state::{FocusMode, OverlayKind, SlackSetupStatus, WorkspaceState};
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, PresenceStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -62,7 +62,10 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
     render_footer(frame, rows[4]);
 
     if state.focus_mode == FocusMode::Overlay {
-        render_help_overlay(frame, area);
+        match state.active_overlay {
+            OverlayKind::Help => render_help_overlay(frame, area),
+            OverlayKind::SlackSetup => render_slack_setup_overlay(frame, area, state),
+        }
     }
 }
 
@@ -73,12 +76,40 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 Ctrl+1~4             패널로 바로 이동 (팀/알림/캘린더/로그)\n\
                 j/k, ↑/↓             선택한 패널 안에서 위아래 이동\n\
                 :                    명령줄 입력\n\
+                Ctrl+S               Slack 연결 설정\n\
                 Esc                  닫기 / Normal 모드로 복귀\n\
                 Ctrl+Q               종료";
     let block = Block::default()
         .title("도움말")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+/// In-app Slack Bot Token entry (`step7.md`). The token is rendered
+/// masked (`*` per character) — never the raw value — so a screenshot or
+/// shoulder-surf of this overlay doesn't leak it the way the command bar
+/// (plain-text history) would.
+fn render_slack_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(60, 30, area);
+    frame.render_widget(Clear, popup);
+
+    let masked: String = "*".repeat(state.slack_setup.token_input.chars().count());
+    let status_line = match &state.slack_setup.status {
+        SlackSetupStatus::Idle => "Bot Token을 입력하고 Enter를 누르세요.".to_string(),
+        SlackSetupStatus::Connecting => "연결 중...".to_string(),
+        SlackSetupStatus::Connected => "연결됨.".to_string(),
+        SlackSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
+    };
+    let text = format!("Token: {masked}\n\n{status_line}\n\nEsc: 닫기");
+
+    let block = Block::default()
+        .title("Slack 연결 설정")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -261,6 +292,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SlackSetupState;
     use commands::DashboardReadModel;
     use domain::{MemberPresence, PresenceStatus, UserId};
     use ratatui::backend::TestBackend;
@@ -458,6 +490,52 @@ mod tests {
             &WorkspaceState::default(),
             &DashboardReadModel::default(),
         );
+        assert!(!contains_ignoring_whitespace(&text, OVERLAY_ONLY_TEXT));
+    }
+
+    #[test]
+    fn slack_setup_overlay_renders_masked_token_not_the_raw_value() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            slack_setup: SlackSetupState {
+                token_input: "xoxb-super-secret".to_string(),
+                status: SlackSetupStatus::Idle,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        // The real regression to guard against: the raw token must never
+        // appear in the rendered buffer, only asterisks standing in for it.
+        assert!(!text.contains("xoxb-super-secret"));
+        assert!(contains_ignoring_whitespace(&text, "Slack 연결 설정"));
+        let mask = "*".repeat("xoxb-super-secret".chars().count());
+        assert!(text.contains(&mask));
+    }
+
+    #[test]
+    fn slack_setup_overlay_shows_the_failure_reason() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            slack_setup: SlackSetupState {
+                token_input: String::new(),
+                status: SlackSetupStatus::Failed("invalid_auth".to_string()),
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "invalid_auth"));
+    }
+
+    #[test]
+    fn help_overlay_does_not_render_when_slack_setup_is_active() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(!contains_ignoring_whitespace(&text, OVERLAY_ONLY_TEXT));
     }
 }

@@ -7,7 +7,7 @@ use domain::{
     PresenceStatus, UserId,
 };
 use events::{Event, EventBus, EventHandler};
-use integration::SlackMessenger;
+use integration::{SlackConnector, SlackMessenger};
 use logging::{spans::command_span, TraceContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -32,6 +32,16 @@ pub enum Command {
         channel_id: String,
         /// Text message payload.
         text: String,
+    },
+
+    /// Persist a Slack Bot Token (entered through the setup overlay,
+    /// `step7.md`) and connect with it. `token`'s raw value never appears in
+    /// logs even in a `{:?}` dump of this command — the logging pipeline's
+    /// secret-scrubbing writer (`crates/logging/src/redact.rs`) masks any
+    /// `xoxb-`-prefixed substring regardless of where it appears.
+    ConnectSlack {
+        /// Slack Bot User OAuth Token (`xoxb-...`).
+        token: String,
     },
 
     /// Mark notification as read.
@@ -77,6 +87,7 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::SetPresence { .. } => "SetPresence",
         Command::SendSlackMessage { .. } => "SendSlackMessage",
+        Command::ConnectSlack { .. } => "ConnectSlack",
         Command::MarkNotificationRead { .. } => "MarkNotificationRead",
         Command::SyncAllAdapters => "SyncAllAdapters",
     }
@@ -89,27 +100,36 @@ pub struct WorkspaceCommandHandler {
     presence_repo: Arc<dyn PresenceRepository>,
     notification_repo: Arc<dyn NotificationRepository>,
     event_bus: Arc<dyn EventBus>,
-    /// `None` when Slack isn't configured/enabled — `SendSlackMessage` then
-    /// returns the same honest "not available" error it always has,
+    /// `None` when no Slack adapter was constructed at all — `SendSlackMessage`
+    /// then returns the same honest "not available" error it always has,
     /// instead of a fake success (`docs/04-extensions/integration-contract.md` §2.3).
     slack_messenger: Option<Arc<dyn SlackMessenger>>,
+    /// `None` under the same condition as `slack_messenger` above. Unlike
+    /// `slack_messenger`, this is populated even when `enabled = false` in
+    /// config — the setup overlay (`step7.md`) needs an adapter to hand a
+    /// token to even before the user has configured anything (see
+    /// `crates/app/src/main.rs`).
+    slack_connector: Option<Arc<dyn SlackConnector>>,
 }
 
 impl WorkspaceCommandHandler {
     /// Construct a handler wired to the given repositories and event bus.
-    /// `slack_messenger` is `None` when Slack isn't configured/enabled.
+    /// `slack_messenger`/`slack_connector` are `None` when no Slack adapter
+    /// was constructed at all.
     #[must_use]
     pub fn new(
         presence_repo: Arc<dyn PresenceRepository>,
         notification_repo: Arc<dyn NotificationRepository>,
         event_bus: Arc<dyn EventBus>,
         slack_messenger: Option<Arc<dyn SlackMessenger>>,
+        slack_connector: Option<Arc<dyn SlackConnector>>,
     ) -> Self {
         Self {
             presence_repo,
             notification_repo,
             event_bus,
             slack_messenger,
+            slack_connector,
         }
     }
 }
@@ -150,6 +170,12 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                 Some(messenger) => messenger.send_message(&channel_id, &text).await,
                 None => Err(WorkspaceError::Integration(
                     "Slack integration not configured".into(),
+                )),
+            },
+            Command::ConnectSlack { token } => match &self.slack_connector {
+                Some(connector) => connector.connect(Arc::clone(&self.event_bus), token).await,
+                None => Err(WorkspaceError::Integration(
+                    "Slack adapter not available".into(),
                 )),
             },
             Command::SyncAllAdapters => {
@@ -335,10 +361,13 @@ mod tests {
     );
 
     fn make_handler() -> Fixture {
-        make_handler_with_slack(None)
+        make_handler_with_slack(None, None)
     }
 
-    fn make_handler_with_slack(slack_messenger: Option<Arc<dyn SlackMessenger>>) -> Fixture {
+    fn make_handler_with_slack(
+        slack_messenger: Option<Arc<dyn SlackMessenger>>,
+        slack_connector: Option<Arc<dyn SlackConnector>>,
+    ) -> Fixture {
         let presence = Arc::new(MockPresenceRepo::default());
         let notifications = Arc::new(MockNotificationRepo::default());
         let bus = Arc::new(InProcessEventBus::new(10));
@@ -347,6 +376,7 @@ mod tests {
             Arc::clone(&notifications) as Arc<dyn NotificationRepository>,
             Arc::clone(&bus) as Arc<dyn EventBus>,
             slack_messenger,
+            slack_connector,
         ));
         (handler, presence, notifications, bus)
     }
@@ -428,8 +458,10 @@ mod tests {
             sent: Mutex::new(Vec::new()),
             should_fail: false,
         });
-        let (handler, ..) =
-            make_handler_with_slack(Some(Arc::clone(&messenger) as Arc<dyn SlackMessenger>));
+        let (handler, ..) = make_handler_with_slack(
+            Some(Arc::clone(&messenger) as Arc<dyn SlackMessenger>),
+            None,
+        );
 
         handler
             .handle(Command::SendSlackMessage {
@@ -451,12 +483,79 @@ mod tests {
             sent: Mutex::new(Vec::new()),
             should_fail: true,
         });
-        let (handler, ..) = make_handler_with_slack(Some(messenger));
+        let (handler, ..) = make_handler_with_slack(Some(messenger), None);
 
         let result = handler
             .handle(Command::SendSlackMessage {
                 channel_id: "C1".into(),
                 text: "hi".into(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    struct MockSlackConnector {
+        connected: Mutex<Vec<String>>,
+        should_fail: bool,
+    }
+
+    #[async_trait]
+    impl SlackConnector for MockSlackConnector {
+        async fn connect(&self, _event_bus: Arc<dyn EventBus>, token: String) -> Result<()> {
+            if self.should_fail {
+                return Err(common::WorkspaceError::Integration("boom".into()));
+            }
+            self.connected.lock().await.push(token);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_slack_errors_without_an_adapter() {
+        let (handler, ..) = make_handler();
+        let result = handler
+            .handle(Command::ConnectSlack {
+                token: "xoxb-test".into(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_slack_delegates_to_the_configured_connector() {
+        let connector = Arc::new(MockSlackConnector {
+            connected: Mutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let (handler, ..) = make_handler_with_slack(
+            None,
+            Some(Arc::clone(&connector) as Arc<dyn SlackConnector>),
+        );
+
+        handler
+            .handle(Command::ConnectSlack {
+                token: "xoxb-from-ui".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            connector.connected.lock().await.as_slice(),
+            ["xoxb-from-ui".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_slack_propagates_connector_errors() {
+        let connector = Arc::new(MockSlackConnector {
+            connected: Mutex::new(Vec::new()),
+            should_fail: true,
+        });
+        let (handler, ..) = make_handler_with_slack(None, Some(connector));
+
+        let result = handler
+            .handle(Command::ConnectSlack {
+                token: "xoxb-test".into(),
             })
             .await;
         assert!(result.is_err());

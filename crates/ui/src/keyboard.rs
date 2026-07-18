@@ -2,7 +2,7 @@
 //! this is a direct implementation of that document's capture pipeline
 //! diagram, not a new design.
 
-use crate::state::{FocusMode, WorkspaceState};
+use crate::state::{FocusMode, OverlayKind, SlackSetupStatus, WorkspaceState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use registry::UiDockSlot;
 
@@ -32,12 +32,17 @@ pub enum PaneAction {
 }
 
 /// Result of processing one key event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyOutcome {
     /// Consumed internally (mode switch, global shortcut, text input).
     Handled,
     /// Not a global shortcut in Normal mode; forward to the focused pane.
     DispatchToPane(PaneAction),
+    /// `Enter` pressed in the Slack setup overlay with a non-empty token —
+    /// the caller (`crates/ui`'s async event loop) dispatches
+    /// `Command::ConnectSlack` with this value; `handle_key` itself stays
+    /// synchronous and can't perform that I/O.
+    SubmitSlackToken(String),
     /// Recognized as "nothing to do" in the current context.
     Ignored,
 }
@@ -58,12 +63,10 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
             capture_command_text(state, key);
             KeyOutcome::Handled
         }
-        FocusMode::Overlay => {
-            // Tab/arrows cycle dialog fields once a dialog has fields to
-            // cycle through; Phase 5 has no overlay dialogs wired up yet
-            // (only `?` opens an as-yet-content-free Help overlay).
-            KeyOutcome::Handled
-        }
+        FocusMode::Overlay => match state.active_overlay {
+            OverlayKind::Help => KeyOutcome::Handled,
+            OverlayKind::SlackSetup => capture_slack_setup_input(state, key),
+        },
         FocusMode::Normal => {
             if let Some(outcome) = try_global_shortcut(state, key) {
                 return outcome;
@@ -85,6 +88,13 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
         }
         (KeyCode::Char('?'), _) => {
             state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::Help;
+            Some(KeyOutcome::Handled)
+        }
+        (KeyCode::Char('s'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::SlackSetup;
+            state.slack_setup.status = SlackSetupStatus::Idle;
             Some(KeyOutcome::Handled)
         }
         (KeyCode::Tab, _) => {
@@ -138,6 +148,31 @@ fn dispatch_to_pane(key: KeyEvent) -> KeyOutcome {
         KeyCode::Char('l') | KeyCode::Right => KeyOutcome::DispatchToPane(PaneAction::Right),
         KeyCode::Enter => KeyOutcome::DispatchToPane(PaneAction::Activate),
         _ => KeyOutcome::Ignored,
+    }
+}
+
+/// Text capture for the Slack setup overlay's token field. Deliberately
+/// simpler than `capture_command_text`'s cursor-aware editing — a Bot
+/// Token is typically pasted or typed once in order, not edited mid-string,
+/// so append/backspace-from-the-end is enough and avoids duplicating the
+/// cursor-position bookkeeping for a field that doesn't need it.
+fn capture_slack_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let setup = &mut state.slack_setup;
+    match key.code {
+        KeyCode::Char(c) => {
+            setup.token_input.push(c);
+            KeyOutcome::Handled
+        }
+        KeyCode::Backspace => {
+            setup.token_input.pop();
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter if !setup.token_input.is_empty() => {
+            let token = std::mem::take(&mut setup.token_input);
+            setup.status = SlackSetupStatus::Connecting;
+            KeyOutcome::SubmitSlackToken(token)
+        }
+        _ => KeyOutcome::Handled,
     }
 }
 
@@ -285,5 +320,74 @@ mod tests {
         handle_key(&mut state, key(KeyCode::Char('b'), KeyModifiers::NONE));
         handle_key(&mut state, key(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(state.cmd_buffer.raw_text, "a");
+    }
+
+    #[test]
+    fn ctrl_s_opens_the_slack_setup_overlay() {
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::SlackSetup);
+    }
+
+    #[test]
+    fn slack_setup_overlay_captures_typed_characters_masked_in_render() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(state.slack_setup.token_input, "xo");
+    }
+
+    #[test]
+    fn slack_setup_overlay_backspace_removes_last_char() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(state.slack_setup.token_input, "");
+    }
+
+    #[test]
+    fn enter_with_a_token_submits_and_clears_the_input() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::SubmitSlackToken("x".to_string()));
+        assert_eq!(state.slack_setup.token_input, "");
+        assert_eq!(state.slack_setup.status, SlackSetupStatus::Connecting);
+    }
+
+    #[test]
+    fn enter_with_no_token_does_not_submit() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+    }
+
+    #[test]
+    fn esc_closes_the_slack_setup_overlay_like_any_other_overlay() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(state.focus_mode, FocusMode::Normal);
     }
 }

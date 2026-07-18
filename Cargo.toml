@@ -42,6 +42,8 @@ secrecy = { version = "0.8", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 redb = "2"
 reqwest = { version = "0.11", features = ["json"] }
+keyring = { version = "4", default-features = false, features = ["v1", "windows-native-keyring-store", "apple-native-keyring-store", "zbus-secret-service-keyring-store"] }
+aes-gcm = "0.11"
 
 # Shared Workspace Lints
 [workspace.lints.rust]

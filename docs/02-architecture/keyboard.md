@@ -2,7 +2,7 @@
 
 The Terminal Workspace utilizes a **Modal Input System** (inspired by Vim) to allow developers to perform rapid navigation, command dispatch, and content viewing without leaving the home row.
 
-> **Implementation Status (Phase 5)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Team Panel and Notification Panel (the two panels that exist so far); Detail Pane/CI panel navigation will follow when those panels do.
+> **Implementation Status (Phase 5, amended Phase 7)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Team Panel and Notification Panel (the two panels that exist so far); Detail Pane/CI panel navigation will follow when those panels do. `Ctrl+S` (Phase 7, `step7.md`) is the first real Overlay/Dialog Mode dialog with actual input fields — the Slack credential setup screen; line 12's "connection setup" example was written before any adapter existed to connect, and this is what filled it in.
 
 ## Input Modes
 
@@ -17,12 +17,13 @@ The system operates in one of three modes:
 
 | Key | Action | Scope | Description |
 | :--- | :--- | :--- | :--- |
-| `Ctrl + q` | Quit Application | Global | Gracefully terminates connections, writes cache to SQLite, and exits. |
+| `Ctrl + q` | Quit Application | Global | Gracefully terminates connections, writes cache to `redb` (ADR-0014), and exits. |
 | `Esc` | Enter Normal Mode | Global | Cancels active operations, closes popups, unfocuses input bar. |
 | `:` | Enter Input Mode | Global | Focuses the Command Line Input Bar for command entry. |
 | `Tab` | Focus Next Pane | Global | Cycles focus clockwise through visible layout panes. |
 | `Shift + Tab`| Focus Prev Pane | Global | Cycles focus counter-clockwise through visible layout panes. |
 | `?` | Show Help Dialog | Global | Renders an overlay listing all context-aware shortcuts. |
+| `Ctrl + s` | Slack Setup | Global | Opens the Slack Bot Token entry overlay (`step7.md`) — masked input, connects immediately on submit. |
 
 ---
 

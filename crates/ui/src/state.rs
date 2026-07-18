@@ -20,6 +20,42 @@ pub enum FocusMode {
     Overlay,
 }
 
+/// Which dialog is showing while `focus_mode == FocusMode::Overlay`
+/// (`step7.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OverlayKind {
+    /// Static keybinding reference.
+    #[default]
+    Help,
+    /// In-app Slack Bot Token entry (`Ctrl+S`).
+    SlackSetup,
+}
+
+/// Outcome of the last `Command::ConnectSlack` dispatch, shown inline in
+/// the setup overlay.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SlackSetupStatus {
+    /// No connection attempt made yet this overlay session.
+    #[default]
+    Idle,
+    /// `Command::ConnectSlack` dispatched, awaiting the result.
+    Connecting,
+    /// The command returned successfully.
+    Connected,
+    /// The command returned an error; the message is shown to the user.
+    Failed(String),
+}
+
+/// Text input + last outcome for the Slack setup overlay (`step7.md`).
+#[derive(Debug, Clone, Default)]
+pub struct SlackSetupState {
+    /// Token as typed so far — rendered masked (`*` per character), never
+    /// shown in the clear or pushed into the command bar's history.
+    pub token_input: String,
+    /// Result of the most recent connection attempt, if any.
+    pub status: SlackSetupStatus,
+}
+
 /// `docs/03-domain/workspace-state.md`'s `ActiveLayout`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveLayout {
@@ -67,6 +103,10 @@ pub struct WorkspaceState {
     pub active_panel_focus: HashMap<UiDockSlot, PanelId>,
     /// Command line bar state.
     pub cmd_buffer: CommandBufferState,
+    /// Which dialog `Overlay` mode is currently showing.
+    pub active_overlay: OverlayKind,
+    /// Slack setup overlay's text input and last connection outcome.
+    pub slack_setup: SlackSetupState,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
     /// Selected index within the focused pane's list (Team/Notification).
@@ -84,6 +124,8 @@ impl Default for WorkspaceState {
             docking_registry: HashMap::new(),
             active_panel_focus: HashMap::new(),
             cmd_buffer: CommandBufferState::default(),
+            active_overlay: OverlayKind::default(),
+            slack_setup: SlackSetupState::default(),
             active_theme: "default-dark".to_string(),
             selected_index: 0,
             should_quit: false,
