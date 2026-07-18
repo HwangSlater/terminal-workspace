@@ -14,7 +14,7 @@ use commands::{Command, CommandDispatcher, SharedReadModel};
 use common::{Result, WorkspaceError};
 use crossterm::event::{Event as CrosstermEvent, KeyEventKind};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
 };
 use domain::IntegrationSource;
 use events::{Event as DomainEvent, EventBus, IntegrationConnectionStatus};
@@ -477,10 +477,36 @@ impl TuiRenderer {
         let model = self.read_model.read().await;
         let log_lines = self.log_buffer.snapshot();
         let pomodoro = self.scheduler.snapshot().await;
+        // Terminal tab/window title badge (`step22.md`) -- visible in the
+        // tab bar/taskbar even from a different tab, unlike anything drawn
+        // inside the frame itself. Set unconditionally every draw rather
+        // than diffed against the last value; the escape sequence is cheap
+        // and terminals don't visibly re-render on a same-value title set.
+        crossterm::execute!(
+            terminal.backend_mut(),
+            SetTitle(title_for_unread_count(model.unread_notifications.len()))
+        )
+        .map_err(io_err)?;
         terminal
             .draw(|frame| render::render(frame, state, &model, &log_lines, &pomodoro))
             .map_err(io_err)?;
         Ok(())
+    }
+}
+
+/// Base terminal title, shared between [`title_for_unread_count`] and
+/// [`restore_terminal`]'s reset-on-exit.
+const APP_TITLE: &str = "Terminal Workspace";
+
+/// `"Terminal Workspace"` at zero unread, `"Terminal Workspace (N)"`
+/// otherwise (`step22.md` Decision 1) -- the same unread count
+/// `step19.md`'s dock-title badges (`"알림 (3)"`) already compute from
+/// `DashboardReadModel.unread_notifications`.
+fn title_for_unread_count(unread_count: usize) -> String {
+    if unread_count > 0 {
+        format!("{APP_TITLE} ({unread_count})")
+    } else {
+        APP_TITLE.to_string()
     }
 }
 
@@ -495,6 +521,9 @@ fn setup_terminal() -> Result<Terminal<Backend>> {
 fn restore_terminal(terminal: &mut Terminal<Backend>) -> Result<()> {
     disable_raw_mode().map_err(io_err)?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen).map_err(io_err)?;
+    // Reset the title (`step22.md` Decision 3) so a stale unread count
+    // doesn't linger in the tab bar after the app has actually quit.
+    crossterm::execute!(terminal.backend_mut(), SetTitle(APP_TITLE)).map_err(io_err)?;
     terminal.show_cursor().map_err(io_err)?;
     Ok(())
 }
@@ -547,4 +576,19 @@ fn spawn_input_reader(tx: mpsc::UnboundedSender<InputEvent>) {
             Err(_) => break,
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_is_plain_at_zero_unread() {
+        assert_eq!(title_for_unread_count(0), "Terminal Workspace");
+    }
+
+    #[test]
+    fn title_shows_the_count_when_nonzero() {
+        assert_eq!(title_for_unread_count(3), "Terminal Workspace (3)");
+    }
 }
