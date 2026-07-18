@@ -13,6 +13,7 @@ pub struct AppConfig {
     /// Core runtime configs.
     pub core: CoreSettings,
     /// Enabled integrations switch.
+    #[serde(default)]
     pub integrations: IntegrationsToggle,
 }
 
@@ -29,11 +30,20 @@ pub struct CoreSettings {
 
 /// Per-integration settings. `slack` is a real nested table (Phase 6); `github_enabled`
 /// stays a flat toggle since no GitHub adapter exists yet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Every field here is `#[serde(default)]`: a `config.toml` written before
+/// a given field existed (or before the `[integrations.slack]` table
+/// existed at all — the schema this superseded, ADR-0014-adjacent lesson
+/// from `step6.md`) must still parse, not hard-fail the whole app on
+/// startup. Zero Configuration (`product-requirements.md` §2.1) applies to
+/// config *evolution*, not just first run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntegrationsToggle {
     /// Slack integration settings (`docs/04-extensions/integrations/slack.md`).
+    #[serde(default)]
     pub slack: SlackSettings,
     /// Sync GitHub updates.
+    #[serde(default)]
     pub github_enabled: bool,
 }
 
@@ -42,6 +52,7 @@ pub struct IntegrationsToggle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlackSettings {
     /// Whether the Slack adapter starts at all.
+    #[serde(default)]
     pub enabled: bool,
     /// Seconds between poll cycles.
     #[serde(default = "default_slack_sync_interval")]
@@ -53,6 +64,17 @@ pub struct SlackSettings {
     /// watch-list, not the whole workspace roster.
     #[serde(default)]
     pub watched_user_ids: Vec<String>,
+}
+
+impl Default for SlackSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sync_interval_secs: default_slack_sync_interval(),
+            channel_ids: Vec::new(),
+            watched_user_ids: Vec::new(),
+        }
+    }
 }
 
 fn default_slack_sync_interval() -> u64 {
@@ -375,6 +397,30 @@ mod tests {
     fn parse_empty_string_returns_defaults() {
         let config = AppConfig::parse("").expect("empty input should fall back to defaults");
         assert_eq!(config.core.theme, "default-dark");
+    }
+
+    #[test]
+    fn a_pre_phase_6_config_toml_still_parses_instead_of_crashing_on_startup() {
+        // Reproduces a real bug report: a config.toml written before Phase 6
+        // (flat `[integrations] slack_enabled = ...`, no `[integrations.slack]`
+        // table at all) hard-failed AppConfig::load_or_create_default() with
+        // "missing field `slack`", killing the app on every startup instead of
+        // defaulting -- exactly the failure mode Zero Configuration promises
+        // not to have (docs/05-operations/configuration.md's Phase 6 amendment).
+        let old_toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations]
+            slack_enabled = false
+            github_enabled = false
+        "#;
+        let config = AppConfig::parse(old_toml).expect("an old config.toml must not crash startup");
+        assert!(!config.integrations.slack.enabled);
+        assert_eq!(config.integrations.slack.sync_interval_secs, 30);
+        assert!(!config.integrations.github_enabled);
     }
 
     #[test]
