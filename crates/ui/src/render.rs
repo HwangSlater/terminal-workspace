@@ -46,7 +46,7 @@ pub fn render(
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Header
+            Constraint::Length(3), // Header (title / status / Pomodoro rows, step19.md)
             Constraint::Min(5),    // Body (Left/Center/Right docks)
             Constraint::Length(1), // Command bar
             Constraint::Length(1), // Footer
@@ -595,12 +595,43 @@ fn dock_block(
         .border_style(style)
 }
 
+/// Three fixed rows, not one (`step19.md` follow-up) -- a single
+/// `Constraint::Length(1)` row with no wrap silently truncated mid-word at
+/// the documented 80-column minimum terminal width (confirmed empirically:
+/// `Calendar: 연` got cut off, and the trailing help/quit hint vanished
+/// entirely with no `...` or other sign anything was missing). A first
+/// attempt moved only Pomodoro to its own row (2 rows total) and dropped
+/// the redundant help/quit hint (already in the footer), but title +
+/// three statuses alone still measured 89 cells -- 9 over budget even
+/// without Pomodoro. Splitting the title onto its own row instead of
+/// trimming any *content* keeps every connection status fully legible at
+/// the minimum size (65 cells for statuses alone, comfortable headroom)
+/// rather than solving an overflow by cutting the information the row
+/// exists to show. Row 1: title. Row 2: the three connection statuses.
+/// Row 3: Pomodoro when active, blank otherwise.
 fn render_header(
     frame: &mut Frame,
     area: Rect,
     state: &WorkspaceState,
     pomodoro: &PomodoroSnapshot,
 ) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Terminal Workspace",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        rows[0],
+    );
+
     let (slack_text, slack_color) =
         connection_status_label("Slack", &state.slack_connection_status);
     let (github_text, github_color) =
@@ -608,30 +639,23 @@ fn render_header(
     let (calendar_text, calendar_color) =
         connection_status_label("Calendar", &state.calendar_connection_status);
 
-    let mut spans = vec![
-        Span::styled(
-            "Terminal Workspace",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  |  "),
+    let status_line = Line::from(vec![
         Span::styled(slack_text, Style::default().fg(slack_color)),
         Span::raw("  |  "),
         Span::styled(github_text, Style::default().fg(github_color)),
         Span::raw("  |  "),
         Span::styled(calendar_text, Style::default().fg(calendar_color)),
-    ];
+    ]);
+    frame.render_widget(Paragraph::new(status_line), rows[1]);
+
     // Nothing shown while idle (never started) -- `step18.md` Decision 5.
     if let Some((pomodoro_text, pomodoro_color)) = pomodoro_label(pomodoro) {
-        spans.push(Span::raw("  |  "));
-        spans.push(Span::styled(
+        let pomodoro_line = Line::from(Span::styled(
             pomodoro_text,
             Style::default().fg(pomodoro_color),
         ));
+        frame.render_widget(Paragraph::new(pomodoro_line), rows[2]);
     }
-    spans.push(Span::raw("  |  도움말: ?   종료: Ctrl+Q"));
-
-    let header = Paragraph::new(Line::from(spans));
-    frame.render_widget(header, area);
 }
 
 /// `🍅 24:35 (Work)` while running, `⏸` swapped in and dimmed while paused
@@ -1630,6 +1654,29 @@ mod tests {
             &DashboardReadModel::default(),
         );
         assert!(contains_ignoring_whitespace(&text, "연결 안"));
+    }
+
+    /// Regression test for a real bug found by manual review: at the
+    /// documented minimum terminal size, the old single-row header (no
+    /// wrap) silently truncated mid-word -- `Calendar`'s status got cut off
+    /// and the header's own trailing help/quit hint vanished with no `...`
+    /// or other sign anything was missing. Fixed by splitting the header
+    /// into two fixed rows and dropping the hint (already duplicated in
+    /// the footer). This proves all three connection statuses survive
+    /// intact at 80x24, the smallest size the app renders its real layout
+    /// (not the placeholder) at.
+    #[test]
+    fn header_does_not_truncate_any_connection_status_at_minimum_terminal_size() {
+        let text = draw(
+            80,
+            24,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+        );
+        assert!(contains_ignoring_whitespace(&text, "Terminal Workspace"));
+        assert!(contains_ignoring_whitespace(&text, "Slack: 연결 안 됨"));
+        assert!(contains_ignoring_whitespace(&text, "GitHub: 연결 안 됨"));
+        assert!(contains_ignoring_whitespace(&text, "Calendar: 연결 안 됨"));
     }
 
     #[test]
