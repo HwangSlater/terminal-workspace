@@ -3,13 +3,14 @@
 use async_trait::async_trait;
 use common::{Result, WorkspaceError};
 use domain::{
-    MemberPresence, NotificationId, NotificationItem, NotificationRepository, PresenceRepository,
-    PresenceStatus, UserId,
+    IntegrationSource, MemberPresence, NotificationId, NotificationItem, NotificationRepository,
+    PresenceRepository, PresenceStatus, UserId,
 };
 use events::{Event, EventBus, EventHandler};
-use integration::{SlackConnector, SlackMessenger};
+use integration::{IntegrationConnector, SlackMessenger};
 use logging::{spans::command_span, TraceContext};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -34,24 +35,46 @@ pub enum Command {
         text: String,
     },
 
-    /// Persist a Slack Bot Token (entered through the setup overlay,
-    /// `step7.md`) and connect with it. `token`'s raw value never appears in
-    /// logs even in a `{:?}` dump of this command — the logging pipeline's
-    /// secret-scrubbing writer (`crates/logging/src/redact.rs`) masks any
-    /// `xoxb-`-prefixed substring regardless of where it appears.
-    ConnectSlack {
-        /// Slack Bot User OAuth Token (`xoxb-...`).
+    /// Persist a credential (entered through an integration's setup
+    /// overlay — Slack's `step7.md`, GitHub's `step10.md`) and connect with
+    /// it. Generalized in `step11.md` from separate `ConnectSlack`/
+    /// `ConnectGitHub` variants once both turned out to have byte-for-byte
+    /// identical shape. `token`'s raw value never appears in logs even in a
+    /// `{:?}` dump of this command — the logging pipeline's secret-scrubbing
+    /// writer (`crates/logging/src/redact.rs`) masks any `xoxb-`/`ghp_`-
+    /// prefixed substring regardless of where it appears.
+    Connect {
+        /// Which integration to connect.
+        source: IntegrationSource,
+        /// Bot Token (Slack, `xoxb-...`) or Personal Access Token (GitHub,
+        /// `ghp_...`), depending on `source`.
         token: String,
     },
 
-    /// Persist a channel/watched-user selection made through the picker
-    /// overlay (`step8.md`, `Ctrl+P`) to `config.toml` and restart the
-    /// Slack poll loop with it.
+    /// Persist a channel/watched-user selection made through the Slack
+    /// picker overlay (`step8.md`, `Ctrl+P`) to `config.toml` and restart
+    /// the Slack poll loop with it. Slack has **two** independent
+    /// selectable lists (channels for messages, people for presence) —
+    /// this does not generalize into `ApplySelection` below, which is for
+    /// integrations with exactly one list (`step11.md`).
     ApplySlackSelection {
         /// Channels to poll for messages (`conversations.history`).
         channel_ids: Vec<String>,
         /// Teammates to poll for presence (`users.getPresence`).
         watched_user_ids: Vec<String>,
+    },
+
+    /// Persist a single-list selection made through a picker overlay
+    /// (GitHub's `step10.md`, `Ctrl+R`) to `config.toml` and restart that
+    /// integration's poll loop with it. Generalized in `step11.md` from
+    /// `ApplyGitHubSelection`; only fits integrations with exactly one
+    /// selectable list — Slack's two-list selection stays its own variant
+    /// above.
+    ApplySelection {
+        /// Which integration this selection applies to.
+        source: IntegrationSource,
+        /// Selected item ids (e.g. GitHub `owner/repo` strings).
+        items: Vec<String>,
     },
 
     /// Mark notification as read.
@@ -83,6 +106,18 @@ pub trait SlackSelectionApplier: Send + Sync {
         channel_ids: Vec<String>,
         watched_user_ids: Vec<String>,
     ) -> Result<()>;
+}
+
+/// Narrow port for `Command::ApplySelection` — any integration with a
+/// single selectable list (GitHub's repositories, a future Calendar's
+/// calendar ids, ...). Same cross-context reasoning as
+/// [`SlackSelectionApplier`] (`config.toml` + the live adapter), same
+/// composition-root wiring. Generalized in `step11.md` from
+/// `GitHubSelectionApplier`, which had this exact shape already.
+#[async_trait]
+pub trait SelectionApplier: Send + Sync {
+    /// Persist `items` and restart that integration's polling with them.
+    async fn apply(&self, event_bus: Arc<dyn EventBus>, items: Vec<String>) -> Result<()>;
 }
 
 /// Abstract Command Handler executing state mutations.
@@ -118,8 +153,9 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::SetPresence { .. } => "SetPresence",
         Command::SendSlackMessage { .. } => "SendSlackMessage",
-        Command::ConnectSlack { .. } => "ConnectSlack",
+        Command::Connect { .. } => "Connect",
         Command::ApplySlackSelection { .. } => "ApplySlackSelection",
+        Command::ApplySelection { .. } => "ApplySelection",
         Command::MarkNotificationRead { .. } => "MarkNotificationRead",
         Command::SyncAllAdapters => "SyncAllAdapters",
     }
@@ -136,36 +172,58 @@ pub struct WorkspaceCommandHandler {
     /// then returns the same honest "not available" error it always has,
     /// instead of a fake success (`docs/04-extensions/integration-contract.md` §2.3).
     slack_messenger: Option<Arc<dyn SlackMessenger>>,
-    /// `None` under the same condition as `slack_messenger` above. Unlike
-    /// `slack_messenger`, this is populated even when `enabled = false` in
-    /// config — the setup overlay (`step7.md`) needs an adapter to hand a
-    /// token to even before the user has configured anything (see
-    /// `crates/app/src/main.rs`).
-    slack_connector: Option<Arc<dyn SlackConnector>>,
-    /// `None` under the same condition as `slack_connector` above.
+    /// `None` when no Slack adapter was constructed at all, same as
+    /// `slack_messenger` above — but unlike it, populated even when
+    /// `enabled = false` in config, since the picker overlay (`step8.md`)
+    /// needs an adapter to apply a selection to even before the user has
+    /// configured anything (see `crates/app/src/main.rs`).
     slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
+    /// Every integration's `Command::Connect` target, keyed by source.
+    /// Absent key = that integration's adapter was never constructed at
+    /// all (`step11.md` — replaces the earlier `slack_connector`/
+    /// `github_connector` named `Option` fields, which had identical
+    /// shape).
+    connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>>,
+    /// Every single-selectable-list integration's `Command::ApplySelection`
+    /// target, keyed by source. Slack's two-list selection is not here —
+    /// see `slack_selection_applier` above (`step11.md`).
+    selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
+}
+
+/// Looks up `source` in a connector/applier registry, or returns the same
+/// "not available" error shape every integration used to hand-write
+/// individually (`step11.md`).
+fn require<T: ?Sized>(
+    map: &HashMap<IntegrationSource, Arc<T>>,
+    source: IntegrationSource,
+) -> Result<&Arc<T>> {
+    map.get(&source)
+        .ok_or_else(|| WorkspaceError::Integration(format!("{source:?} adapter not available")))
 }
 
 impl WorkspaceCommandHandler {
     /// Construct a handler wired to the given repositories and event bus.
-    /// `slack_messenger`/`slack_connector`/`slack_selection_applier` are
-    /// `None` when no Slack adapter was constructed at all.
+    /// `slack_messenger`/`slack_selection_applier` are `None` when no Slack
+    /// adapter was constructed at all; `connectors`/`selection_appliers`
+    /// simply omit a key for any integration that wasn't constructed.
     #[must_use]
     pub fn new(
         presence_repo: Arc<dyn PresenceRepository>,
         notification_repo: Arc<dyn NotificationRepository>,
         event_bus: Arc<dyn EventBus>,
         slack_messenger: Option<Arc<dyn SlackMessenger>>,
-        slack_connector: Option<Arc<dyn SlackConnector>>,
         slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
+        connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>>,
+        selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
     ) -> Self {
         Self {
             presence_repo,
             notification_repo,
             event_bus,
             slack_messenger,
-            slack_connector,
             slack_selection_applier,
+            connectors,
+            selection_appliers,
         }
     }
 }
@@ -208,12 +266,10 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                     "Slack integration not configured".into(),
                 )),
             },
-            Command::ConnectSlack { token } => match &self.slack_connector {
-                Some(connector) => connector.connect(Arc::clone(&self.event_bus), token).await,
-                None => Err(WorkspaceError::Integration(
-                    "Slack adapter not available".into(),
-                )),
-            },
+            Command::Connect { source, token } => {
+                let connector = require(&self.connectors, source)?;
+                connector.connect(Arc::clone(&self.event_bus), token).await
+            }
             Command::ApplySlackSelection {
                 channel_ids,
                 watched_user_ids,
@@ -227,6 +283,10 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                     "Slack adapter not available".into(),
                 )),
             },
+            Command::ApplySelection { source, items } => {
+                let applier = require(&self.selection_appliers, source)?;
+                applier.apply(Arc::clone(&self.event_bus), items).await
+            }
             Command::SyncAllAdapters => {
                 tracing::info!("SyncAllAdapters requested; no integration adapters registered yet");
                 Ok(())
@@ -416,13 +476,31 @@ mod tests {
     );
 
     fn make_handler() -> Fixture {
-        make_handler_with_slack(None, None, None)
+        make_handler_with(None, None, HashMap::new(), HashMap::new())
     }
 
     fn make_handler_with_slack(
         slack_messenger: Option<Arc<dyn SlackMessenger>>,
-        slack_connector: Option<Arc<dyn SlackConnector>>,
+        slack_connector: Option<Arc<dyn IntegrationConnector>>,
         slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
+    ) -> Fixture {
+        let mut connectors = HashMap::new();
+        if let Some(c) = slack_connector {
+            connectors.insert(IntegrationSource::Slack, c);
+        }
+        make_handler_with(
+            slack_messenger,
+            slack_selection_applier,
+            connectors,
+            HashMap::new(),
+        )
+    }
+
+    fn make_handler_with(
+        slack_messenger: Option<Arc<dyn SlackMessenger>>,
+        slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
+        connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>>,
+        selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
     ) -> Fixture {
         let presence = Arc::new(MockPresenceRepo::default());
         let notifications = Arc::new(MockNotificationRepo::default());
@@ -432,8 +510,9 @@ mod tests {
             Arc::clone(&notifications) as Arc<dyn NotificationRepository>,
             Arc::clone(&bus) as Arc<dyn EventBus>,
             slack_messenger,
-            slack_connector,
             slack_selection_applier,
+            connectors,
+            selection_appliers,
         ));
         (handler, presence, notifications, bus)
     }
@@ -552,13 +631,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    struct MockSlackConnector {
+    struct MockConnector {
         connected: Mutex<Vec<String>>,
         should_fail: bool,
     }
 
     #[async_trait]
-    impl SlackConnector for MockSlackConnector {
+    impl IntegrationConnector for MockConnector {
         async fn connect(&self, _event_bus: Arc<dyn EventBus>, token: String) -> Result<()> {
             if self.should_fail {
                 return Err(common::WorkspaceError::Integration("boom".into()));
@@ -569,10 +648,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_slack_errors_without_an_adapter() {
+    async fn connect_errors_without_a_matching_adapter() {
         let (handler, ..) = make_handler();
         let result = handler
-            .handle(Command::ConnectSlack {
+            .handle(Command::Connect {
+                source: IntegrationSource::Slack,
                 token: "xoxb-test".into(),
             })
             .await;
@@ -580,19 +660,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_slack_delegates_to_the_configured_connector() {
-        let connector = Arc::new(MockSlackConnector {
+    async fn connect_delegates_to_the_connector_registered_for_that_source() {
+        let connector = Arc::new(MockConnector {
             connected: Mutex::new(Vec::new()),
             should_fail: false,
         });
         let (handler, ..) = make_handler_with_slack(
             None,
-            Some(Arc::clone(&connector) as Arc<dyn SlackConnector>),
+            Some(Arc::clone(&connector) as Arc<dyn IntegrationConnector>),
             None,
         );
 
         handler
-            .handle(Command::ConnectSlack {
+            .handle(Command::Connect {
+                source: IntegrationSource::Slack,
                 token: "xoxb-from-ui".into(),
             })
             .await
@@ -605,19 +686,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_slack_propagates_connector_errors() {
-        let connector = Arc::new(MockSlackConnector {
+    async fn connect_propagates_connector_errors() {
+        let connector = Arc::new(MockConnector {
             connected: Mutex::new(Vec::new()),
             should_fail: true,
         });
-        let (handler, ..) = make_handler_with_slack(None, Some(connector), None);
+        let (handler, ..) = make_handler_with_slack(
+            None,
+            Some(Arc::clone(&connector) as Arc<dyn IntegrationConnector>),
+            None,
+        );
 
         let result = handler
-            .handle(Command::ConnectSlack {
+            .handle(Command::Connect {
+                source: IntegrationSource::Slack,
                 token: "xoxb-test".into(),
             })
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_dispatch_to_an_unregistered_source_even_if_another_is_registered() {
+        // Two integrations registered under different sources must not
+        // cross-wire -- a connector registered for Slack must not answer
+        // for GitHub.
+        let connector = Arc::new(MockConnector {
+            connected: Mutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let (handler, ..) = make_handler_with_slack(
+            None,
+            Some(Arc::clone(&connector) as Arc<dyn IntegrationConnector>),
+            None,
+        );
+
+        let result = handler
+            .handle(Command::Connect {
+                source: IntegrationSource::GitHub,
+                token: "ghp_test".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(connector.connected.lock().await.is_empty());
     }
 
     struct MockSlackSelectionApplier {
@@ -694,6 +805,113 @@ mod tests {
             .handle(Command::ApplySlackSelection {
                 channel_ids: vec![],
                 watched_user_ids: vec![],
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    // Reuses MockConnector above to prove a second source (GitHub) works
+    // through the exact same registry/dispatch path as Slack did -- the
+    // whole point of generalizing Command::Connect (step11.md).
+    #[tokio::test]
+    async fn connect_works_for_a_second_registered_source() {
+        let connector = Arc::new(MockConnector {
+            connected: Mutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let mut connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>> =
+            HashMap::new();
+        connectors.insert(
+            IntegrationSource::GitHub,
+            Arc::clone(&connector) as Arc<dyn IntegrationConnector>,
+        );
+        let (handler, ..) = make_handler_with(None, None, connectors, HashMap::new());
+
+        handler
+            .handle(Command::Connect {
+                source: IntegrationSource::GitHub,
+                token: "ghp_from_ui".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            connector.connected.lock().await.as_slice(),
+            ["ghp_from_ui".to_string()]
+        );
+    }
+
+    struct MockSelectionApplier {
+        applied: Mutex<Vec<Vec<String>>>,
+        should_fail: bool,
+    }
+
+    #[async_trait]
+    impl SelectionApplier for MockSelectionApplier {
+        async fn apply(&self, _event_bus: Arc<dyn EventBus>, items: Vec<String>) -> Result<()> {
+            if self.should_fail {
+                return Err(common::WorkspaceError::Integration("boom".into()));
+            }
+            self.applied.lock().await.push(items);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_selection_errors_without_a_matching_adapter() {
+        let (handler, ..) = make_handler();
+        let result = handler
+            .handle(Command::ApplySelection {
+                source: IntegrationSource::GitHub,
+                items: vec!["owner/repo".into()],
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_selection_delegates_to_the_applier_registered_for_that_source() {
+        let applier = Arc::new(MockSelectionApplier {
+            applied: Mutex::new(Vec::new()),
+            should_fail: false,
+        });
+        let mut selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>> =
+            HashMap::new();
+        selection_appliers.insert(
+            IntegrationSource::GitHub,
+            Arc::clone(&applier) as Arc<dyn SelectionApplier>,
+        );
+        let (handler, ..) = make_handler_with(None, None, HashMap::new(), selection_appliers);
+
+        handler
+            .handle(Command::ApplySelection {
+                source: IntegrationSource::GitHub,
+                items: vec!["owner/repo".into()],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            applier.applied.lock().await.as_slice(),
+            [vec!["owner/repo".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_selection_propagates_applier_errors() {
+        let applier = Arc::new(MockSelectionApplier {
+            applied: Mutex::new(Vec::new()),
+            should_fail: true,
+        });
+        let mut selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>> =
+            HashMap::new();
+        selection_appliers.insert(IntegrationSource::GitHub, applier);
+        let (handler, ..) = make_handler_with(None, None, HashMap::new(), selection_appliers);
+
+        let result = handler
+            .handle(Command::ApplySelection {
+                source: IntegrationSource::GitHub,
+                items: vec![],
             })
             .await;
         assert!(result.is_err());

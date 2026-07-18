@@ -3,11 +3,12 @@
 //! diagram, not a new design.
 
 use crate::state::{
-    FocusMode, OverlayKind, SlackPickerState, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
+    FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind, SlackPickerState,
+    SlackPickerStatus, SlackSetupStatus, WorkspaceState,
 };
 use commands::Command;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use domain::PresenceStatus;
+use domain::{IntegrationSource, PresenceStatus};
 use registry::UiDockSlot;
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
@@ -42,19 +43,33 @@ pub enum KeyOutcome {
     Handled,
     /// Not a global shortcut in Normal mode; forward to the focused pane.
     DispatchToPane(PaneAction),
-    /// `Enter` pressed in the Slack setup overlay with a non-empty token —
-    /// the caller (`crates/ui`'s async event loop) dispatches
-    /// `Command::ConnectSlack` with this value; `handle_key` itself stays
-    /// synchronous and can't perform that I/O.
-    SubmitSlackToken(String),
-    /// `Ctrl+P` pressed — the caller opens the picker overlay and fetches
-    /// channel/user lists (`SlackPicker::list_channels`/`list_users`, both
-    /// network I/O `handle_key` can't perform synchronously).
+    /// `Enter` pressed in a setup overlay (Slack's `Ctrl+S` or GitHub's
+    /// `Ctrl+G`) with a non-empty token — the caller (`crates/ui`'s async
+    /// event loop) dispatches `Command::Connect{source, token}`;
+    /// `handle_key` itself stays synchronous and can't perform that I/O.
+    /// Generalized in `step11.md` from separate `SubmitSlackToken`/
+    /// `SubmitGitHubToken` variants — the connect flow is identical shape
+    /// for every integration built so far, including Slack.
+    SubmitToken(IntegrationSource, String),
+    /// `Ctrl+P` pressed — the caller opens the Slack picker overlay and
+    /// fetches channel/user lists (`SlackPicker::list_channels`/
+    /// `list_users`, both network I/O `handle_key` can't perform
+    /// synchronously). Slack's two independent lists don't fit the generic
+    /// `OpenPicker` below.
     OpenSlackPicker,
-    /// `Enter` pressed in the picker overlay — `(channel_ids, watched_user_ids)`
-    /// of the currently checked rows; the caller dispatches
-    /// `Command::ApplySlackSelection` with them.
+    /// `Enter` pressed in the Slack picker overlay — `(channel_ids,
+    /// watched_user_ids)` of the currently checked rows; the caller
+    /// dispatches `Command::ApplySlackSelection` with them.
     SubmitSlackSelection(Vec<String>, Vec<String>),
+    /// `Ctrl+R` (GitHub) or a future single-list integration's picker
+    /// shortcut — the caller opens that integration's picker overlay and
+    /// fetches its item list (`Picker::list_items`, network I/O). Generalized
+    /// in `step11.md` from `OpenGitHubPicker`.
+    OpenPicker(IntegrationSource),
+    /// `Enter` pressed in a single-list picker overlay — the checked rows'
+    /// ids; the caller dispatches `Command::ApplySelection{source, items}`.
+    /// Generalized in `step11.md` from `SubmitGitHubSelection`.
+    SubmitSelection(IntegrationSource, Vec<String>),
     /// `Enter` pressed in the command bar and the line parsed to a real
     /// command (`/send`, `/away`, ...) — the caller dispatches it through
     /// `CommandDispatcher` (`step9.md`).
@@ -83,6 +98,8 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
             OverlayKind::Help => KeyOutcome::Handled,
             OverlayKind::SlackSetup => capture_slack_setup_input(state, key),
             OverlayKind::SlackPicker => capture_slack_picker_input(state, key),
+            OverlayKind::GitHubSetup => capture_github_setup_input(state, key),
+            OverlayKind::GitHubPicker => capture_github_picker_input(state, key),
         },
         FocusMode::Normal => {
             if let Some(outcome) = try_global_shortcut(state, key) {
@@ -119,6 +136,18 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.active_overlay = OverlayKind::SlackPicker;
             state.slack_picker.status = SlackPickerStatus::Loading;
             Some(KeyOutcome::OpenSlackPicker)
+        }
+        (KeyCode::Char('g'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::GitHubSetup;
+            state.github_setup.status = GitHubSetupStatus::Idle;
+            Some(KeyOutcome::Handled)
+        }
+        (KeyCode::Char('r'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::GitHubPicker;
+            state.github_picker.status = GitHubPickerStatus::Loading;
+            Some(KeyOutcome::OpenPicker(IntegrationSource::GitHub))
         }
         (KeyCode::Tab, _) => {
             focus_dock(state, 1);
@@ -193,7 +222,7 @@ fn capture_slack_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOu
         KeyCode::Enter if !setup.token_input.is_empty() => {
             let token = std::mem::take(&mut setup.token_input);
             setup.status = SlackSetupStatus::Connecting;
-            KeyOutcome::SubmitSlackToken(token)
+            KeyOutcome::SubmitToken(IntegrationSource::Slack, token)
         }
         _ => KeyOutcome::Handled,
     }
@@ -242,6 +271,67 @@ fn capture_slack_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyO
                 .collect();
             picker.status = SlackPickerStatus::Saving;
             KeyOutcome::SubmitSlackSelection(channel_ids, watched_user_ids)
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
+/// Text capture for the GitHub setup overlay's token field. Mirrors
+/// `capture_slack_setup_input` exactly (`step10.md`).
+fn capture_github_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let setup = &mut state.github_setup;
+    match key.code {
+        KeyCode::Char(c) => {
+            setup.token_input.push(c);
+            KeyOutcome::Handled
+        }
+        KeyCode::Backspace => {
+            setup.token_input.pop();
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter if !setup.token_input.is_empty() => {
+            let token = std::mem::take(&mut setup.token_input);
+            setup.status = GitHubSetupStatus::Connecting;
+            KeyOutcome::SubmitToken(IntegrationSource::GitHub, token)
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
+/// Navigation + selection for the GitHub repo picker overlay (`step10.md`).
+/// Simpler than `capture_slack_picker_input`: one list, not a combined
+/// channels-then-users index space, so there's no split-index arithmetic to
+/// share between them — a forced common helper would trade ~10 straight-line
+/// lines for an abstraction with only one real shape on each side.
+fn capture_github_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let picker = &mut state.github_picker;
+    let total = picker.repositories.len();
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if total > 0 {
+                picker.cursor = (picker.cursor + 1).min(total - 1);
+            }
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            picker.cursor = picker.cursor.saturating_sub(1);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char(' ') => {
+            if let Some(row) = picker.repositories.get_mut(picker.cursor) {
+                row.selected = !row.selected;
+            }
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter => {
+            let repositories = picker
+                .repositories
+                .iter()
+                .filter(|r| r.selected)
+                .map(|r| r.id.clone())
+                .collect();
+            picker.status = GitHubPickerStatus::Saving;
+            KeyOutcome::SubmitSelection(IntegrationSource::GitHub, repositories)
         }
         _ => KeyOutcome::Handled,
     }
@@ -630,7 +720,10 @@ mod tests {
         };
         handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
         let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(outcome, KeyOutcome::SubmitSlackToken("x".to_string()));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitToken(IntegrationSource::Slack, "x".to_string())
+        );
         assert_eq!(state.slack_setup.token_input, "");
         assert_eq!(state.slack_setup.status, SlackSetupStatus::Connecting);
     }
@@ -738,6 +831,130 @@ mod tests {
         assert_eq!(
             outcome,
             KeyOutcome::SubmitSlackSelection(vec!["C2".to_string()], vec!["U1".to_string()])
+        );
+    }
+
+    #[test]
+    fn ctrl_g_opens_the_github_setup_overlay() {
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::GitHubSetup);
+    }
+
+    #[test]
+    fn github_setup_overlay_captures_typed_characters() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('g'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(state.github_setup.token_input, "gh");
+    }
+
+    #[test]
+    fn github_setup_enter_with_a_token_submits_and_clears_the_input() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitToken(IntegrationSource::GitHub, "x".to_string())
+        );
+        assert_eq!(state.github_setup.token_input, "");
+        assert_eq!(state.github_setup.status, GitHubSetupStatus::Connecting);
+    }
+
+    #[test]
+    fn github_setup_enter_with_no_token_does_not_submit() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubSetup,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+    }
+
+    #[test]
+    fn ctrl_r_opens_the_github_picker_overlay() {
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::OpenPicker(IntegrationSource::GitHub));
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::GitHubPicker);
+    }
+
+    fn github_picker_state_with_two_repos() -> crate::state::GitHubPickerState {
+        crate::state::GitHubPickerState {
+            repositories: vec![
+                PickerRow {
+                    id: "owner/repo-one".into(),
+                    label: "owner/repo-one".into(),
+                    selected: false,
+                },
+                PickerRow {
+                    id: "owner/repo-two".into(),
+                    label: "owner/repo-two".into(),
+                    selected: false,
+                },
+            ],
+            cursor: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn github_picker_space_toggles_the_row_under_the_cursor() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: github_picker_state_with_two_repos(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(state.github_picker.repositories[0].selected);
+        assert!(!state.github_picker.repositories[1].selected);
+    }
+
+    #[test]
+    fn github_picker_j_does_not_run_past_the_last_row() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: github_picker_state_with_two_repos(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.github_picker.cursor, 1);
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.github_picker.cursor, 1);
+    }
+
+    #[test]
+    fn github_picker_enter_submits_only_the_selected_repos() {
+        let mut picker = github_picker_state_with_two_repos();
+        picker.repositories[1].selected = true;
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: picker,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitSelection(
+                IntegrationSource::GitHub,
+                vec!["owner/repo-two".to_string()]
+            )
         );
     }
 }

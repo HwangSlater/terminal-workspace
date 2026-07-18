@@ -2,7 +2,7 @@
 
 The Terminal Workspace is configured via a single **TOML** file (`config.toml`) situated in the user's standard configuration directory. TOML was selected for its clean syntax, strong typing support, and seamless integration with Rust's `serde` framework.
 
-> **Implementation Status (Phase 2, amended Phase 6)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), and a still-flat `github_enabled` toggle (no GitHub adapter exists yet). This was a breaking change to the on-disk schema (`[integrations] slack_enabled = ...` → `[integrations.slack] enabled = ...`) — acceptable pre-v1.0 with no public users yet (`step6.md`); a user with an old `config.toml` gets the new default file layout by deleting it and letting Zero-Config regenerate it. The richer schema shown in §1 beyond Slack (`repositories`, `[plugins]`, `[keybindings]`, etc.) remains the target shape for later phases, not built yet.
+> **Implementation Status (Phase 2, amended Phase 6/10)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), and now (Phase 10) a real nested `[integrations.github]` section (`enabled`, `sync_interval_secs`, `repositories` — see `docs/04-extensions/integrations/github.md`), replacing the flat `github_enabled` toggle from Phase 6-9. Both were breaking changes to the on-disk schema — acceptable pre-v1.0 with no public users yet (`step6.md`, `step10.md`); a user with an old `config.toml` gets defaults for the new fields (parses without crashing, per each phase's `#[serde(default)]` lesson) rather than the old flat value carrying over. The richer schema shown in §1 beyond Slack/GitHub (`[plugins]`, `[keybindings]`, etc.) remains the target shape for later phases, not built yet.
 
 ---
 
@@ -128,7 +128,7 @@ AppConfig
   - `TERM_WS_CORE_REFRESH_RATE_MS` → `core.refresh_rate_ms`
   - `TERM_WS_CORE_LOG_LEVEL` → `core.log_level`
   - `TERM_WS_INTEGRATIONS_SLACK_ENABLED` → `integrations.slack.enabled`
-  - `TERM_WS_INTEGRATIONS_GITHUB_ENABLED` → `integrations.github_enabled`
+  - `TERM_WS_INTEGRATIONS_GITHUB_ENABLED` → `integrations.github.enabled`
 - **CLI Option** (`merge_cli`): highest precedence, for one-off overrides at invocation time: `--theme`, `--log-level`, `--refresh-rate-ms`, `--config <path>`. Implemented as a small hand-rolled `--key value` scan rather than a CLI-parsing dependency (e.g. `clap`) — the flag surface is intentionally tiny today (4 flags) and the project favors a minimal dependency graph until the CLI surface actually grows (e.g. plugin subcommands in a later phase). Revisit this choice via ADR if/when that happens.
 - `AppConfig::load_or_create_default()` is a convenience wrapper: `ConfigBuilder::new().merge_file(<standard path>).merge_env().merge_cli(std::env::args()).build()`.
 

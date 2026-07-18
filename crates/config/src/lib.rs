@@ -28,8 +28,8 @@ pub struct CoreSettings {
     pub log_level: String,
 }
 
-/// Per-integration settings. `slack` is a real nested table (Phase 6); `github_enabled`
-/// stays a flat toggle since no GitHub adapter exists yet.
+/// Per-integration settings. `slack` (Phase 6) and `github` (Phase 10) are
+/// both real nested tables.
 ///
 /// Every field here is `#[serde(default)]`: a `config.toml` written before
 /// a given field existed (or before the `[integrations.slack]` table
@@ -42,9 +42,9 @@ pub struct IntegrationsToggle {
     /// Slack integration settings (`docs/04-extensions/integrations/slack.md`).
     #[serde(default)]
     pub slack: SlackSettings,
-    /// Sync GitHub updates.
+    /// GitHub integration settings (`docs/04-extensions/integrations/github.md`, `step10.md`).
     #[serde(default)]
-    pub github_enabled: bool,
+    pub github: GitHubSettings,
 }
 
 /// `[integrations.slack]` settings. The Bot Token itself is never here —
@@ -81,6 +81,35 @@ fn default_slack_sync_interval() -> u64 {
     30
 }
 
+/// `[integrations.github]` settings. The PAT itself is never here — it's
+/// resolved via `SecretProviderChain` (ADR-0006), never `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubSettings {
+    /// Whether the GitHub adapter starts at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Seconds between poll cycles.
+    #[serde(default = "default_github_sync_interval")]
+    pub sync_interval_secs: u64,
+    /// Repositories polled for open PRs (`owner/repo`, e.g. `"rust-lang/rust"`).
+    #[serde(default)]
+    pub repositories: Vec<String>,
+}
+
+impl Default for GitHubSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sync_interval_secs: default_github_sync_interval(),
+            repositories: Vec::new(),
+        }
+    }
+}
+
+fn default_github_sync_interval() -> u64 {
+    60
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -96,7 +125,11 @@ impl Default for AppConfig {
                     channel_ids: Vec::new(),
                     watched_user_ids: Vec::new(),
                 },
-                github_enabled: false,
+                github: GitHubSettings {
+                    enabled: false,
+                    sync_interval_secs: default_github_sync_interval(),
+                    repositories: Vec::new(),
+                },
             },
         }
     }
@@ -202,14 +235,16 @@ theme = "default-dark"
 refresh_rate_ms = 100
 log_level = "info"
 
-[integrations]
-github_enabled = false
-
 [integrations.slack]
 enabled = false
 sync_interval_secs = 30
 channel_ids = []
 watched_user_ids = []
+
+[integrations.github]
+enabled = false
+sync_interval_secs = 60
+repositories = []
 "#;
 
 /// Builds an `AppConfig` by layering Default -> File -> Environment -> CLI,
@@ -285,7 +320,7 @@ impl ConfigBuilder {
                 }
                 "TERM_WS_INTEGRATIONS_GITHUB_ENABLED" => {
                     if let Ok(b) = value.parse() {
-                        self.config.integrations.github_enabled = b;
+                        self.config.integrations.github.enabled = b;
                     } else {
                         tracing::warn!(
                             "Ignoring invalid TERM_WS_INTEGRATIONS_GITHUB_ENABLED={value}"
@@ -447,7 +482,33 @@ mod tests {
         let config = AppConfig::parse(old_toml).expect("an old config.toml must not crash startup");
         assert!(!config.integrations.slack.enabled);
         assert_eq!(config.integrations.slack.sync_interval_secs, 30);
-        assert!(!config.integrations.github_enabled);
+        assert!(!config.integrations.github.enabled);
+    }
+
+    #[test]
+    fn a_pre_phase_10_config_toml_with_flat_github_enabled_still_parses() {
+        // Same lesson as the Phase 6 Slack test above, applied to the flat
+        // `github_enabled` shape that existed between Phase 6 and Phase 10.
+        let old_toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations]
+            github_enabled = true
+
+            [integrations.slack]
+            enabled = false
+            sync_interval_secs = 30
+            channel_ids = []
+            watched_user_ids = []
+        "#;
+        let config =
+            AppConfig::parse(old_toml).expect("a pre-Phase-10 config.toml must not crash startup");
+        assert!(!config.integrations.github.enabled);
+        assert_eq!(config.integrations.github.sync_interval_secs, 60);
+        assert!(config.integrations.github.repositories.is_empty());
     }
 
     #[test]
@@ -461,7 +522,9 @@ mod tests {
         assert_eq!(config.integrations.slack.sync_interval_secs, 30);
         assert!(config.integrations.slack.channel_ids.is_empty());
         assert!(config.integrations.slack.watched_user_ids.is_empty());
-        assert!(!config.integrations.github_enabled);
+        assert!(!config.integrations.github.enabled);
+        assert_eq!(config.integrations.github.sync_interval_secs, 60);
+        assert!(config.integrations.github.repositories.is_empty());
     }
 
     #[test]
@@ -489,6 +552,53 @@ mod tests {
             config.integrations.slack.watched_user_ids,
             vec!["U0123456789", "U0987654321"]
         );
+    }
+
+    #[test]
+    fn parses_real_github_repository_config() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations.github]
+            enabled = true
+            sync_interval_secs = 90
+            repositories = ["rust-lang/rust", "google/terminal-workspace"]
+        "#;
+        let config = AppConfig::parse(toml).expect("valid GitHub config must parse");
+        assert!(config.integrations.github.enabled);
+        assert_eq!(config.integrations.github.sync_interval_secs, 90);
+        assert_eq!(
+            config.integrations.github.repositories,
+            vec!["rust-lang/rust", "google/terminal-workspace"]
+        );
+    }
+
+    #[test]
+    fn save_to_then_parse_round_trips_a_github_repository_selection() {
+        let dir = std::env::temp_dir().join(format!("tw_config_test_{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.toml");
+
+        let mut config = AppConfig::default();
+        config.integrations.github.enabled = true;
+        config.integrations.github.repositories = vec![
+            "rust-lang/rust".to_string(),
+            "google/terminal-workspace".to_string(),
+        ];
+        config.save_to(&path).expect("save_to must succeed");
+
+        let reloaded_toml = std::fs::read_to_string(&path).unwrap();
+        let reloaded = AppConfig::parse(&reloaded_toml).expect("saved config must parse back");
+
+        assert!(reloaded.integrations.github.enabled);
+        assert_eq!(
+            reloaded.integrations.github.repositories,
+            vec!["rust-lang/rust", "google/terminal-workspace"]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

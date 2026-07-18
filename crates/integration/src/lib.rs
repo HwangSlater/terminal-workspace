@@ -6,12 +6,53 @@ use events::EventBus;
 use secrets::SecretProvider;
 use std::sync::Arc;
 
+pub mod github;
+pub(crate) mod polling;
 pub mod slack;
 
+pub use github::{GitHubAdapter, GitHubConfig};
 pub use slack::{
-    PickerChannel, PickerUser, SlackAdapter, SlackConfig, SlackConnector, SlackMessenger,
-    SlackPicker,
+    PickerChannel, PickerUser, SlackAdapter, SlackConfig, SlackMessenger, SlackPicker,
 };
+
+/// Narrow port for connecting an integration with a bearer-style credential
+/// (token). Identical in shape across every adapter built so far (Slack's
+/// Bot Token, GitHub's PAT) — see `step11.md` for why this, unlike the
+/// selection/picker ports below, generalizes with no loss of information.
+/// Replaces the earlier per-integration `SlackConnector`/`GitHubConnector`
+/// traits, which had byte-for-byte identical signatures.
+#[async_trait]
+pub trait IntegrationConnector: Send + Sync {
+    /// Persist `token` durably (via the adapter's configured
+    /// `SecretWriter`), then stop any running poll loop and start a fresh
+    /// one with it — safe to call whether this is the first connection or
+    /// a reconnect with a replacement token.
+    async fn connect(&self, event_bus: Arc<dyn EventBus>, token: String) -> Result<()>;
+}
+
+/// One selectable item returned by [`Picker`] — an `id`/`label` pair. The
+/// picker overlay decides how to render/select it; this crate has no
+/// opinion beyond "here's what's available."
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerItem {
+    /// Adapter-specific identifier, persisted into config on selection.
+    pub id: String,
+    /// Display label.
+    pub label: String,
+}
+
+/// Narrow read-only port for integrations with a single selectable list
+/// (GitHub's repositories, a future Calendar's calendar ids, ...). Slack's
+/// two independent lists (channels + users) don't fit this shape and keep
+/// their own dedicated [`SlackPicker`] port instead of being forced into
+/// it (`step11.md`). Deliberately not routed through `Command`/
+/// `CommandHandler` — listing is a read, not a mutation (the CQRS
+/// correction made in `step8.md`).
+#[async_trait]
+pub trait Picker: Send + Sync {
+    /// Items the authenticated account can access.
+    async fn list_items(&self) -> Result<Vec<PickerItem>>;
+}
 
 /// Operational connection health status. See
 /// `docs/04-extensions/state-machine.md` for the transition rules of a

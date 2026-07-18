@@ -119,6 +119,8 @@ Unlike `01-product/` through `06-development/` above, this folder isn't topical 
 - [`step7.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step7.md) — Phase 7: in-app Slack setup (`Ctrl+S`), OS keyring + encrypted-file storage.
 - [`step8.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step8.md) — Phase 8: in-app channel/user picker (`Ctrl+P`).
 - [`step9.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step9.md) — Phase 9: command bar dispatch (`/send`, presence shortcuts), live connection status (ADR-0016).
+- [`step10.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step10.md) — Phase 10: GitHub integration (polling, `Ctrl+G` setup, `Ctrl+R` repo picker — full treatment in one phase, not spread across multiple phases like Slack's).
+- [`step11.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step11.md) — Phase 11: integration registry generalization (`Command::Connect`/`ApplySelection`, keyed connector/picker/applier registries) — done ahead of Calendar (v0.4) rather than after, since Calendar wasn't going to be the last integration.
 
 ---
 

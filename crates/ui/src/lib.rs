@@ -16,12 +16,16 @@ use crossterm::event::{Event as CrosstermEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use domain::IntegrationSource;
 use events::{Event as DomainEvent, EventBus, IntegrationConnectionStatus};
-use integration::SlackPicker;
+use integration::{Picker, SlackPicker};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use registry::UiRegistry;
-use state::{PickerRow, SlackPickerStatus, SlackSetupStatus};
+use state::{
+    GitHubPickerStatus, GitHubSetupStatus, PickerRow, SlackPickerStatus, SlackSetupStatus,
+};
+use std::collections::HashMap;
 use std::io::Stdout;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -38,7 +42,7 @@ pub struct TuiRenderer {
     ui_registry: Arc<dyn UiRegistry>,
     read_model: SharedReadModel,
     /// Lets the run loop actually mutate state through the CQRS write path
-    /// (`Command::ConnectSlack` from the setup overlay, `step7.md`) — before
+    /// (`Command::Connect` from the setup overlay, `step7.md`) — before
     /// this phase, `TuiRenderer` was pure CQRS *read* side with no way to
     /// dispatch anything.
     command_dispatcher: Arc<dyn CommandDispatcher>,
@@ -48,6 +52,13 @@ pub struct TuiRenderer {
     /// through `Command`/`CommandHandler` (see `SlackSelectionApplier`'s
     /// doc comment in `crates/commands` for the full reasoning).
     slack_picker: Arc<dyn SlackPicker>,
+    /// Every single-selectable-list integration's picker port, keyed by
+    /// source. Holds GitHub today; a future Calendar just adds a key here
+    /// instead of `TuiRenderer` growing another named field
+    /// (`step11.md` — replaces the earlier `github_picker: Arc<dyn
+    /// GitHubPicker>` field). Slack's two-list `slack_picker` above stays
+    /// separate, same reasoning as `commands::WorkspaceCommandHandler`.
+    pickers: HashMap<IntegrationSource, Arc<dyn Picker>>,
     /// Subscribed to in `run_loop` so the render loop redraws on background
     /// changes (a new message, a status change) instead of only ever on a
     /// keypress/resize (`step9.md`, ADR-0016) — before this phase
@@ -58,26 +69,33 @@ pub struct TuiRenderer {
     /// anything) — seeds `WorkspaceState.slack_connection_status`; kept
     /// current after that purely by the `event_bus` subscription.
     initial_slack_status: IntegrationConnectionStatus,
+    /// GitHub's equivalent of `initial_slack_status` (`step10.md`).
+    initial_github_status: IntegrationConnectionStatus,
 }
 
 impl TuiRenderer {
     /// Create new renderer wrapper.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ui_registry: Arc<dyn UiRegistry>,
         read_model: SharedReadModel,
         command_dispatcher: Arc<dyn CommandDispatcher>,
         slack_picker: Arc<dyn SlackPicker>,
+        pickers: HashMap<IntegrationSource, Arc<dyn Picker>>,
         event_bus: Arc<dyn EventBus>,
         initial_slack_status: IntegrationConnectionStatus,
+        initial_github_status: IntegrationConnectionStatus,
     ) -> Self {
         Self {
             ui_registry,
             read_model,
             command_dispatcher,
             slack_picker,
+            pickers,
             event_bus,
             initial_slack_status,
+            initial_github_status,
         }
     }
 
@@ -88,6 +106,7 @@ impl TuiRenderer {
         let mut terminal = setup_terminal()?;
         let mut state = WorkspaceState {
             slack_connection_status: self.initial_slack_status.clone(),
+            github_connection_status: self.initial_github_status.clone(),
             ..WorkspaceState::default()
         };
 
@@ -121,14 +140,21 @@ impl TuiRenderer {
                             KeyOutcome::DispatchToPane(action) => {
                                 self.apply_pane_action(state, action).await;
                             }
-                            KeyOutcome::SubmitSlackToken(token) => {
-                                self.submit_slack_token(terminal, state, token).await?;
+                            KeyOutcome::SubmitToken(source, token) => {
+                                self.submit_token(terminal, state, source, token).await?;
                             }
                             KeyOutcome::OpenSlackPicker => {
                                 self.open_slack_picker(terminal, state).await?;
                             }
                             KeyOutcome::SubmitSlackSelection(channel_ids, watched_user_ids) => {
                                 self.submit_slack_selection(terminal, state, channel_ids, watched_user_ids)
+                                    .await?;
+                            }
+                            KeyOutcome::OpenPicker(source) => {
+                                self.open_picker(terminal, state, source).await?;
+                            }
+                            KeyOutcome::SubmitSelection(source, items) => {
+                                self.submit_selection(terminal, state, source, items)
                                     .await?;
                             }
                             KeyOutcome::SubmitCommand(command) => {
@@ -149,8 +175,21 @@ impl TuiRenderer {
                 }
                 received = event_rx.recv() => {
                     match received {
-                        Ok(DomainEvent::IntegrationStatusChanged { status, .. }) => {
-                            state.slack_connection_status = status;
+                        Ok(DomainEvent::IntegrationStatusChanged { source, status }) => {
+                            // Route by source -- before GitHub existed this
+                            // event only ever carried Slack, so writing to
+                            // slack_connection_status unconditionally was
+                            // correct by coincidence, not by design; now
+                            // that a second source exists it must be
+                            // checked, or a GitHub status update would
+                            // clobber the Slack header line.
+                            match source {
+                                IntegrationSource::Slack => state.slack_connection_status = status,
+                                IntegrationSource::GitHub => state.github_connection_status = status,
+                                IntegrationSource::Calendar
+                                | IntegrationSource::Gmail
+                                | IntegrationSource::Jira => {}
+                            }
                             self.draw(terminal, state).await?;
                         }
                         Ok(_) => {
@@ -199,25 +238,40 @@ impl TuiRenderer {
         }
     }
 
-    /// Dispatches `Command::ConnectSlack` for a token submitted through the
-    /// setup overlay (`step7.md`), redrawing before the network call so
-    /// "연결 중..." is visible immediately rather than the UI appearing to
-    /// freeze until the request completes.
-    async fn submit_slack_token(
+    /// Dispatches `Command::Connect` for a token submitted through a setup
+    /// overlay (Slack `step7.md`, GitHub `step10.md`), redrawing before the
+    /// network call so "연결 중..." is visible immediately rather than the UI
+    /// appearing to freeze until the request completes. Generalized in
+    /// `step11.md` from separate `submit_slack_token`/`submit_github_token`
+    /// methods — the dispatch itself is identical, only which
+    /// `WorkspaceState` field records the outcome differs per source.
+    async fn submit_token(
         &self,
         terminal: &mut Terminal<Backend>,
         state: &mut WorkspaceState,
+        source: IntegrationSource,
         token: String,
     ) -> Result<()> {
         self.draw(terminal, state).await?;
         let result = self
             .command_dispatcher
-            .dispatch(Command::ConnectSlack { token })
+            .dispatch(Command::Connect { source, token })
             .await;
-        state.slack_setup.status = match result {
-            Ok(()) => SlackSetupStatus::Connected,
-            Err(e) => SlackSetupStatus::Failed(e.to_string()),
-        };
+        match source {
+            IntegrationSource::Slack => {
+                state.slack_setup.status = match result {
+                    Ok(()) => SlackSetupStatus::Connected,
+                    Err(e) => SlackSetupStatus::Failed(e.to_string()),
+                };
+            }
+            IntegrationSource::GitHub => {
+                state.github_setup.status = match result {
+                    Ok(()) => GitHubSetupStatus::Connected,
+                    Err(e) => GitHubSetupStatus::Failed(e.to_string()),
+                };
+            }
+            IntegrationSource::Calendar | IntegrationSource::Gmail | IntegrationSource::Jira => {}
+        }
         Ok(())
     }
 
@@ -286,6 +340,83 @@ impl TuiRenderer {
             Ok(()) => SlackPickerStatus::Saved,
             Err(e) => SlackPickerStatus::Failed(e.to_string()),
         };
+        Ok(())
+    }
+
+    /// Fetches the item list for a single-list picker overlay (GitHub's
+    /// `step10.md`; a future Calendar would land here too). Simpler than
+    /// `open_slack_picker`: one list, one call. Generalized in `step11.md`
+    /// from `open_github_picker` — looks up the right `Picker` by `source`
+    /// instead of holding a named `github_picker` field.
+    async fn open_picker(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+        source: IntegrationSource,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+
+        let Some(picker) = self.pickers.get(&source) else {
+            // Only a bound keybinding (Ctrl+R today) can produce
+            // KeyOutcome::OpenPicker, and every such binding only exists
+            // for a source that was actually registered at construction
+            // time -- an unregistered source here would be a wiring bug,
+            // not a reachable user-facing state. Stay honest rather than
+            // silently no-op if that invariant is ever violated.
+            return Err(WorkspaceError::Internal(format!(
+                "no picker registered for {source:?}"
+            )));
+        };
+
+        let result = picker.list_items().await;
+        match (source, result) {
+            (IntegrationSource::GitHub, Ok(items)) => {
+                state.github_picker.repositories = items
+                    .into_iter()
+                    .map(|i| PickerRow {
+                        id: i.id,
+                        label: i.label,
+                        selected: false,
+                    })
+                    .collect();
+                state.github_picker.cursor = 0;
+                state.github_picker.status = GitHubPickerStatus::Loaded;
+            }
+            (IntegrationSource::GitHub, Err(e)) => {
+                state.github_picker.status = GitHubPickerStatus::Failed(e.to_string());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Dispatches `Command::ApplySelection` for a selection confirmed in a
+    /// single-list picker overlay (`step10.md`). Generalized in
+    /// `step11.md` from `submit_github_selection`.
+    async fn submit_selection(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+        source: IntegrationSource,
+        items: Vec<String>,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+        let result = self
+            .command_dispatcher
+            .dispatch(Command::ApplySelection { source, items })
+            .await;
+        match source {
+            IntegrationSource::GitHub => {
+                state.github_picker.status = match result {
+                    Ok(()) => GitHubPickerStatus::Saved,
+                    Err(e) => GitHubPickerStatus::Failed(e.to_string()),
+                };
+            }
+            IntegrationSource::Slack
+            | IntegrationSource::Calendar
+            | IntegrationSource::Gmail
+            | IntegrationSource::Jira => {}
+        }
         Ok(())
     }
 

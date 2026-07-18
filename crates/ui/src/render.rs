@@ -1,7 +1,10 @@
 //! Ratatui drawing functions. See `docs/01-product/screen-spec.md` for the
 //! layout this implements (Phase 5 subset — see `step5.md`).
 
-use crate::state::{FocusMode, OverlayKind, SlackPickerStatus, SlackSetupStatus, WorkspaceState};
+use crate::state::{
+    FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind, SlackPickerStatus,
+    SlackSetupStatus, WorkspaceState,
+};
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, PresenceStatus};
 use events::IntegrationConnectionStatus;
@@ -67,33 +70,128 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
             OverlayKind::Help => render_help_overlay(frame, area),
             OverlayKind::SlackSetup => render_slack_setup_overlay(frame, area, state),
             OverlayKind::SlackPicker => render_slack_picker_overlay(frame, area, state),
+            OverlayKind::GitHubSetup => render_github_setup_overlay(frame, area, state),
+            OverlayKind::GitHubPicker => render_github_picker_overlay(frame, area, state),
         }
     }
 }
 
+/// One key/description row within a [`HELP_CATEGORIES`] section.
+struct HelpEntry {
+    key: &'static str,
+    description: &'static str,
+}
+
+/// A titled group of [`HelpEntry`] rows. Data-driven rather than one
+/// hand-formatted string: as more integrations arrive (Calendar, Jira, ...)
+/// each just appends a category here instead of hand-aligning a growing
+/// wall of text — the flat-list version of this became hard to scan once
+/// Slack and GitHub's shortcuts were both mixed in with navigation and
+/// command-bar syntax.
+const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
+    (
+        "탐색",
+        &[
+            HelpEntry {
+                key: "Tab / Shift+Tab",
+                description: "패널 포커스 순환",
+            },
+            HelpEntry {
+                key: "Ctrl+1~4",
+                description: "패널로 바로 이동 (팀/알림/캘린더/로그)",
+            },
+            HelpEntry {
+                key: "j/k, ↑/↓",
+                description: "선택한 패널 안에서 위아래 이동",
+            },
+        ],
+    ),
+    (
+        "명령줄",
+        &[
+            HelpEntry {
+                key: ":",
+                description: "명령줄 입력",
+            },
+            HelpEntry {
+                key: "/send #채널 메시지",
+                description: "Slack 메시지 보내기",
+            },
+            HelpEntry {
+                key: "/away, /active, /offline, /meeting, /lunch [메시지]",
+                description: "내 상태 변경",
+            },
+        ],
+    ),
+    (
+        "Slack 연동",
+        &[
+            HelpEntry {
+                key: "Ctrl+S",
+                description: "연결 설정",
+            },
+            HelpEntry {
+                key: "Ctrl+P",
+                description: "채널/사용자 선택",
+            },
+        ],
+    ),
+    (
+        "GitHub 연동",
+        &[
+            HelpEntry {
+                key: "Ctrl+G",
+                description: "연결 설정",
+            },
+            HelpEntry {
+                key: "Ctrl+R",
+                description: "저장소 선택",
+            },
+        ],
+    ),
+    (
+        "기타",
+        &[
+            HelpEntry {
+                key: "Esc",
+                description: "닫기 / Normal 모드로 복귀",
+            },
+            HelpEntry {
+                key: "Ctrl+Q",
+                description: "종료",
+            },
+        ],
+    ),
+];
+
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(60, 50, area);
+    let popup = centered_rect(60, 60, area);
     frame.render_widget(Clear, popup);
-    let text = "Tab / Shift+Tab      패널 포커스 순환\n\
-                Ctrl+1~4             패널로 바로 이동 (팀/알림/캘린더/로그)\n\
-                j/k, ↑/↓             선택한 패널 안에서 위아래 이동\n\
-                :                    명령줄 입력\n\
-                  /send #채널 메시지   Slack 메시지 보내기\n\
-                  /away, /active,\n\
-                  /offline, /meeting,\n\
-                  /lunch [메시지]      내 상태 변경\n\
-                Ctrl+S               Slack 연결 설정\n\
-                Ctrl+P               Slack 채널/사용자 선택\n\
-                Esc                  닫기 / Normal 모드로 복귀\n\
-                Ctrl+Q               종료";
+
+    let mut items: Vec<ListItem> = Vec::new();
+    for (i, (title, entries)) in HELP_CATEGORIES.iter().enumerate() {
+        if i > 0 {
+            items.push(ListItem::new(""));
+        }
+        items.push(ListItem::new(Span::styled(
+            *title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for entry in *entries {
+            items.push(ListItem::new(format!(
+                "  {:<20} {}",
+                entry.key, entry.description
+            )));
+        }
+    }
+
     let block = Block::default()
         .title("도움말")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
-    frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
-        popup,
-    );
+    frame.render_widget(List::new(items).block(block), popup);
 }
 
 /// In-app Slack Bot Token entry (`step7.md`). The token is rendered
@@ -210,6 +308,97 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     );
 }
 
+/// In-app GitHub PAT entry (`step10.md`). Mirrors `render_slack_setup_overlay`
+/// exactly, including the masked-token rationale.
+fn render_github_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(60, 30, area);
+    frame.render_widget(Clear, popup);
+
+    let masked: String = "*".repeat(state.github_setup.token_input.chars().count());
+    let status_line = match &state.github_setup.status {
+        GitHubSetupStatus::Idle => "Personal Access Token을 입력하고 Enter를 누르세요.".to_string(),
+        GitHubSetupStatus::Connecting => "연결 중...".to_string(),
+        GitHubSetupStatus::Connected => "연결됨.".to_string(),
+        GitHubSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
+    };
+    let text = format!("Token: {masked}\n\n{status_line}\n\nEsc: 닫기");
+
+    let block = Block::default()
+        .title("GitHub 연결 설정")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+/// GitHub repository picker (`step10.md`). Simpler than
+/// `render_slack_picker_overlay`: one list, no channel/user section split.
+fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let picker = &state.github_picker;
+    let block = Block::default()
+        .title("GitHub 저장소 선택")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    match &picker.status {
+        GitHubPickerStatus::Loading => {
+            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            return;
+        }
+        GitHubPickerStatus::Failed(reason) => {
+            frame.render_widget(
+                Paragraph::new(format!("불러오기 실패: {reason}\n\nEsc: 닫기"))
+                    .block(block)
+                    .wrap(Wrap { trim: true }),
+                popup,
+            );
+            return;
+        }
+        GitHubPickerStatus::Idle
+        | GitHubPickerStatus::Loaded
+        | GitHubPickerStatus::Saving
+        | GitHubPickerStatus::Saved => {}
+    }
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    if picker.repositories.is_empty() {
+        items.push(ListItem::new("  (없음)"));
+    }
+    for (i, row) in picker.repositories.iter().enumerate() {
+        let checkbox = if row.selected { "[x]" } else { "[ ]" };
+        let style = if picker.cursor == i {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
+    }
+    frame.render_widget(List::new(items), layout[0]);
+
+    let status_line = match &picker.status {
+        GitHubPickerStatus::Saving => "저장 중...",
+        GitHubPickerStatus::Saved => "저장됨!",
+        _ => "j/k: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+    };
+    frame.render_widget(
+        Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
+        layout[1],
+    );
+}
+
 /// Standard ratatui centered-popup idiom: `percent_x`/`percent_y` of `area`,
 /// centered on both axes.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -274,29 +463,40 @@ fn dock_block<'a>(title: &'a str, slot: UiDockSlot, state: &WorkspaceState) -> B
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
-    let (status_text, status_color) = slack_status_label(&state.slack_connection_status);
+    let (slack_text, slack_color) =
+        connection_status_label("Slack", &state.slack_connection_status);
+    let (github_text, github_color) =
+        connection_status_label("GitHub", &state.github_connection_status);
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             "Terminal Workspace",
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  "),
-        Span::styled(status_text, Style::default().fg(status_color)),
+        Span::styled(slack_text, Style::default().fg(slack_color)),
+        Span::raw("  |  "),
+        Span::styled(github_text, Style::default().fg(github_color)),
         Span::raw("  |  도움말: ?   종료: Ctrl+Q"),
     ]));
     frame.render_widget(header, area);
 }
 
 /// Kept current purely by the `EventBus` subscription in `crates/ui/src/lib.rs`'s
-/// event loop (`step9.md`, ADR-0016) — not polled, genuinely live.
-fn slack_status_label(status: &IntegrationConnectionStatus) -> (&'static str, Color) {
-    match status {
-        IntegrationConnectionStatus::Disconnected => ("Slack: 연결 안 됨", Color::DarkGray),
-        IntegrationConnectionStatus::Connecting => ("Slack: 연결 중...", Color::Yellow),
-        IntegrationConnectionStatus::Connected => ("Slack: 연결됨", Color::Green),
-        IntegrationConnectionStatus::Reconnecting => ("Slack: 재연결 중...", Color::Yellow),
-        IntegrationConnectionStatus::Failed(_) => ("Slack: 연결 실패", Color::Red),
-    }
+/// event loop (`step9.md`, ADR-0016) — not polled, genuinely live. Generic
+/// across integrations since `step10.md` (was `slack_status_label`,
+/// Slack-only) — `label` is the integration's display name.
+fn connection_status_label(
+    label: &'static str,
+    status: &IntegrationConnectionStatus,
+) -> (String, Color) {
+    let (suffix, color) = match status {
+        IntegrationConnectionStatus::Disconnected => ("연결 안 됨", Color::DarkGray),
+        IntegrationConnectionStatus::Connecting => ("연결 중...", Color::Yellow),
+        IntegrationConnectionStatus::Connected => ("연결됨", Color::Green),
+        IntegrationConnectionStatus::Reconnecting => ("재연결 중...", Color::Yellow),
+        IntegrationConnectionStatus::Failed(_) => ("연결 실패", Color::Red),
+    };
+    (format!("{label}: {suffix}"), color)
 }
 
 fn render_team_panel(
@@ -604,6 +804,25 @@ mod tests {
     }
 
     #[test]
+    fn help_overlay_groups_shortcuts_under_category_headers() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            ..Default::default()
+        };
+        let text = draw(140, 40, &state, &DashboardReadModel::default());
+        for category in ["탐색", "명령줄", "Slack 연동", "GitHub 연동", "기타"] {
+            assert!(
+                contains_ignoring_whitespace(&text, category),
+                "missing help category: {category}"
+            );
+        }
+        // A representative entry from each category, proving rows still
+        // show up under their heading, not just the headings themselves.
+        assert!(contains_ignoring_whitespace(&text, "Ctrl+S"));
+        assert!(contains_ignoring_whitespace(&text, "Ctrl+G"));
+    }
+
+    #[test]
     fn normal_mode_does_not_render_help_popup() {
         let text = draw(
             140,
@@ -748,6 +967,104 @@ mod tests {
             &DashboardReadModel::default(),
         );
         assert!(contains_ignoring_whitespace(&text, "연결 안"));
+    }
+
+    #[test]
+    fn github_setup_overlay_renders_masked_token_not_the_raw_value() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubSetup,
+            github_setup: crate::state::GitHubSetupState {
+                token_input: "ghp_super_secret".to_string(),
+                status: GitHubSetupStatus::Idle,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(!text.contains("ghp_super_secret"));
+        assert!(contains_ignoring_whitespace(&text, "GitHub 연결 설정"));
+        let mask = "*".repeat("ghp_super_secret".chars().count());
+        assert!(text.contains(&mask));
+    }
+
+    #[test]
+    fn github_setup_overlay_shows_the_failure_reason() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubSetup,
+            github_setup: crate::state::GitHubSetupState {
+                token_input: String::new(),
+                status: GitHubSetupStatus::Failed("bad_credentials".to_string()),
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "bad_credentials"));
+    }
+
+    #[test]
+    fn github_picker_overlay_shows_loading_state() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: crate::state::GitHubPickerState {
+                status: GitHubPickerStatus::Loading,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "불러오는 중"));
+    }
+
+    #[test]
+    fn github_picker_overlay_renders_checkboxes_reflecting_selection() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: crate::state::GitHubPickerState {
+                repositories: vec![
+                    PickerRow {
+                        id: "owner/repo-one".into(),
+                        label: "owner/repo-one".into(),
+                        selected: true,
+                    },
+                    PickerRow {
+                        id: "owner/repo-two".into(),
+                        label: "owner/repo-two".into(),
+                        selected: false,
+                    },
+                ],
+                cursor: 0,
+                status: GitHubPickerStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(text.contains("[x] owner/repo-one"));
+        assert!(text.contains("[ ] owner/repo-two"));
+    }
+
+    #[test]
+    fn header_shows_github_connected_status() {
+        let state = WorkspaceState {
+            github_connection_status: IntegrationConnectionStatus::Connected,
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "GitHub: 연결됨"));
+    }
+
+    #[test]
+    fn header_shows_both_slack_and_github_status_independently() {
+        let state = WorkspaceState {
+            slack_connection_status: IntegrationConnectionStatus::Connected,
+            github_connection_status: IntegrationConnectionStatus::Failed("boom".into()),
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "Slack: 연결됨"));
+        assert!(contains_ignoring_whitespace(&text, "GitHub: 연결 실패"));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! (polling over Socket Mode, Bot Token over full OAuth, honest-empty over
 //! fake demo data, a watch-list over whole-workspace presence).
 
-use crate::{ConnectionStatus, IntegrationAdapter};
+use crate::polling::{max_option, next_status, retry_after_seconds, to_event_status, PollResult};
+use crate::{ConnectionStatus, IntegrationAdapter, IntegrationConnector};
 use async_trait::async_trait;
 use common::{Result, WorkspaceError};
 use domain::{
@@ -23,8 +24,6 @@ use uuid::Uuid;
 
 const SLACK_TOKEN_KEY: &str = "SLACK_BOT_TOKEN";
 const SLACK_API_BASE: &str = "https://slack.com/api";
-const RECONNECTING_THRESHOLD: u32 = 5;
-const FAILED_THRESHOLD: u32 = 10;
 
 /// Fixed namespace for deriving deterministic per-message notification ids
 /// from `channel_id:ts` (UUIDv5) — re-polling the same Slack message
@@ -59,20 +58,6 @@ pub trait SlackMessenger: Send + Sync {
     async fn send_message(&self, channel_id: &str, text: &str) -> Result<()>;
 }
 
-/// Narrow port for the in-app setup flow (`step7.md`): persist a token and
-/// (re)start the adapter with it. Separate from [`IntegrationAdapter`]'s
-/// generic lifecycle for the same reason [`SlackMessenger`] is — one
-/// capability per trait, so `crates/commands` depends on only what
-/// `Command::ConnectSlack` actually needs.
-#[async_trait]
-pub trait SlackConnector: Send + Sync {
-    /// Persist `token` durably (via the adapter's configured
-    /// [`SecretWriter`]), then stop any running poll loop and start a fresh
-    /// one with it — safe to call whether this is the first connection or
-    /// a reconnect with a replacement token.
-    async fn connect(&self, event_bus: Arc<dyn EventBus>, token: String) -> Result<()>;
-}
-
 struct AdapterState {
     status: ConnectionStatus,
     consecutive_failures: u32,
@@ -94,8 +79,8 @@ pub struct SlackAdapter {
 impl SlackAdapter {
     /// Create a new adapter. Call [`IntegrationAdapter::initialize`] before
     /// [`IntegrationAdapter::start`]. `secret_writer` is where
-    /// [`SlackConnector::connect`] persists a token entered through the
-    /// setup UI (`step7.md`) — normally a `SecretProviderChain`.
+    /// [`IntegrationConnector::connect`] persists a token entered through
+    /// the setup UI (`step7.md`) — normally a `SecretProviderChain`.
     #[must_use]
     pub fn new(config: SlackConfig, secret_writer: Arc<dyn SecretWriter>) -> Self {
         Self {
@@ -176,7 +161,7 @@ impl SlackMessenger for SlackAdapter {
 }
 
 #[async_trait]
-impl SlackConnector for SlackAdapter {
+impl IntegrationConnector for SlackAdapter {
     async fn connect(&self, event_bus: Arc<dyn EventBus>, token: String) -> Result<()> {
         self.secret_writer
             .set_secret(SLACK_TOKEN_KEY, &token)
@@ -427,67 +412,6 @@ impl SlackPoller {
             tokio::time::sleep(wait).await;
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PollResult {
-    Success,
-    RateLimited,
-    Failure,
-}
-
-fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.max(y)),
-        (Some(x), None) | (None, Some(x)) => Some(x),
-        (None, None) => None,
-    }
-}
-
-/// Pure state transition per `docs/04-extensions/state-machine.md`:
-/// a success always resets to `Connected`; a rate-limited cycle is a no-op
-/// (not counted as a failure); a failure only changes status once the
-/// consecutive-failure count crosses the `Reconnecting`/`Failed` thresholds.
-fn next_status(
-    prev: &ConnectionStatus,
-    consecutive_failures: u32,
-    result: PollResult,
-) -> (u32, ConnectionStatus) {
-    match result {
-        PollResult::Success => (0, ConnectionStatus::Connected),
-        PollResult::RateLimited => (consecutive_failures, prev.clone()),
-        PollResult::Failure => {
-            let failures = consecutive_failures + 1;
-            let status = if failures >= FAILED_THRESHOLD {
-                ConnectionStatus::Failed(format!("{failures} consecutive poll failures"))
-            } else if failures >= RECONNECTING_THRESHOLD {
-                ConnectionStatus::Reconnecting
-            } else {
-                prev.clone()
-            };
-            (failures, status)
-        }
-    }
-}
-
-/// Maps this crate's own `ConnectionStatus` to the structurally-identical
-/// but separately-defined `events::IntegrationConnectionStatus` (ADR-0016
-/// explains why `crates/events` can't just re-export this crate's type).
-fn to_event_status(status: &ConnectionStatus) -> IntegrationConnectionStatus {
-    match status {
-        ConnectionStatus::Disconnected => IntegrationConnectionStatus::Disconnected,
-        ConnectionStatus::Connecting => IntegrationConnectionStatus::Connecting,
-        ConnectionStatus::Connected => IntegrationConnectionStatus::Connected,
-        ConnectionStatus::Reconnecting => IntegrationConnectionStatus::Reconnecting,
-        ConnectionStatus::Failed(reason) => IntegrationConnectionStatus::Failed(reason.clone()),
-    }
-}
-
-fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
 }
 
 fn now_ms() -> u64 {
@@ -1058,30 +982,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn to_event_status_maps_every_variant() {
-        assert_eq!(
-            to_event_status(&ConnectionStatus::Disconnected),
-            IntegrationConnectionStatus::Disconnected
-        );
-        assert_eq!(
-            to_event_status(&ConnectionStatus::Connecting),
-            IntegrationConnectionStatus::Connecting
-        );
-        assert_eq!(
-            to_event_status(&ConnectionStatus::Connected),
-            IntegrationConnectionStatus::Connected
-        );
-        assert_eq!(
-            to_event_status(&ConnectionStatus::Reconnecting),
-            IntegrationConnectionStatus::Reconnecting
-        );
-        assert_eq!(
-            to_event_status(&ConnectionStatus::Failed("x".into())),
-            IntegrationConnectionStatus::Failed("x".into())
-        );
-    }
-
     #[tokio::test]
     async fn connect_is_safe_to_call_twice_in_a_row() {
         // Reconnecting with a replacement token must not panic or leave
@@ -1192,63 +1092,6 @@ mod tests {
         let body: PresenceResponse = serde_json::from_str(json).unwrap();
         assert!(body.ok);
         assert_eq!(body.presence.as_deref(), Some("active"));
-    }
-
-    #[test]
-    fn first_through_fourth_consecutive_failures_do_not_change_status() {
-        let mut status = ConnectionStatus::Connected;
-        let mut failures = 0;
-        for _ in 0..4 {
-            let (f, s) = next_status(&status, failures, PollResult::Failure);
-            failures = f;
-            status = s;
-        }
-        assert_eq!(failures, 4);
-        assert_eq!(status, ConnectionStatus::Connected);
-    }
-
-    #[test]
-    fn fifth_consecutive_failure_moves_to_reconnecting() {
-        let (failures, status) = next_status(&ConnectionStatus::Connected, 4, PollResult::Failure);
-        assert_eq!(failures, 5);
-        assert_eq!(status, ConnectionStatus::Reconnecting);
-    }
-
-    #[test]
-    fn tenth_consecutive_failure_moves_to_failed() {
-        let (failures, status) =
-            next_status(&ConnectionStatus::Reconnecting, 9, PollResult::Failure);
-        assert_eq!(failures, 10);
-        assert!(matches!(status, ConnectionStatus::Failed(_)));
-    }
-
-    #[test]
-    fn success_after_failures_resets_the_counter() {
-        let (failures, status) =
-            next_status(&ConnectionStatus::Reconnecting, 7, PollResult::Success);
-        assert_eq!(failures, 0);
-        assert_eq!(status, ConnectionStatus::Connected);
-    }
-
-    #[test]
-    fn rate_limited_cycle_does_not_count_as_a_failure() {
-        let (failures, status) =
-            next_status(&ConnectionStatus::Connected, 3, PollResult::RateLimited);
-        assert_eq!(failures, 3);
-        assert_eq!(status, ConnectionStatus::Connected);
-    }
-
-    #[test]
-    fn parses_retry_after_header() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "42".parse().unwrap());
-        assert_eq!(retry_after_seconds(&headers), Some(42));
-    }
-
-    #[test]
-    fn missing_retry_after_header_is_none() {
-        let headers = reqwest::header::HeaderMap::new();
-        assert_eq!(retry_after_seconds(&headers), None);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use domain::{
     NotificationRepository, PresenceRepository, PresenceStatus, PriorityLevel,
 };
 use events::{Event, EventBus, EventDispatcher, EventHandler, InProcessEventBus};
+use std::collections::HashMap;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
 use tokio::sync::Mutex;
@@ -49,7 +50,8 @@ async fn cqrs_write_path_flows_through_storage_and_events() -> Result<()> {
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
         None,
         None,
-        None,
+        HashMap::new(),
+        HashMap::new(),
     ));
     let command_dispatcher = InMemoryCommandDispatcher::new(handler);
 

@@ -10,7 +10,7 @@ use uuid::Uuid;
 pub struct NotificationId(pub Uuid);
 
 /// Integrations source enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntegrationSource {
     /// Slack messaging adapter.
     Slack,

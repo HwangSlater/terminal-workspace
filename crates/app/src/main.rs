@@ -2,22 +2,26 @@
 
 use async_trait::async_trait;
 use commands::{
-    Command, CommandDispatcher, InMemoryCommandDispatcher, Projector, SlackSelectionApplier,
-    WorkspaceCommandHandler,
+    Command, CommandDispatcher, InMemoryCommandDispatcher, Projector, SelectionApplier,
+    SlackSelectionApplier, WorkspaceCommandHandler,
 };
 use common::Result;
 use config::AppConfig;
-use domain::{FailedEventRepository, NotificationRepository, PresenceRepository, PresenceStatus};
+use domain::{
+    FailedEventRepository, IntegrationSource, NotificationRepository, PresenceRepository,
+    PresenceStatus,
+};
 use events::{
     EventBus, EventDispatcher, EventHandler, InProcessEventBus, IntegrationConnectionStatus,
 };
 use integration::{
-    ConnectionStatus, IntegrationAdapter, SlackAdapter, SlackConfig, SlackConnector,
-    SlackMessenger, SlackPicker,
+    ConnectionStatus, GitHubAdapter, GitHubConfig, IntegrationAdapter, IntegrationConnector,
+    Picker, SlackAdapter, SlackConfig, SlackMessenger, SlackPicker,
 };
 use logging::{init_logger, spans::application_span};
 use registry::InMemoryUiRegistry;
 use secrets::{SecretProviderChain, SecretWriter};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
@@ -56,6 +60,30 @@ impl SlackSelectionApplier for ConfigFileSlackSelectionApplier {
         self.slack_adapter
             .update_selection(event_bus, channel_ids, watched_user_ids)
             .await
+    }
+}
+
+/// GitHub's equivalent of [`ConfigFileSlackSelectionApplier`] (`step10.md`),
+/// same cross-context bridging reasoning. Implements the generic
+/// [`SelectionApplier`] (`step11.md`) rather than a bespoke
+/// `GitHubSelectionApplier` — GitHub's single-list selection is exactly the
+/// shape that trait generalizes.
+struct ConfigFileGitHubSelectionApplier {
+    github_adapter: Arc<GitHubAdapter>,
+    config_path: PathBuf,
+    base_config: Mutex<AppConfig>,
+}
+
+#[async_trait]
+impl SelectionApplier for ConfigFileGitHubSelectionApplier {
+    async fn apply(&self, event_bus: Arc<dyn EventBus>, items: Vec<String>) -> Result<()> {
+        {
+            let mut cfg = self.base_config.lock().await;
+            cfg.integrations.github.repositories = items.clone();
+            cfg.integrations.github.enabled = true;
+            cfg.save_to(&self.config_path)?;
+        }
+        self.github_adapter.update_selection(event_bus, items).await
     }
 }
 
@@ -111,7 +139,7 @@ async fn main() -> Result<()> {
     ));
     slack_adapter.initialize(secret_chain.as_ref()).await?;
     let slack_messenger = Arc::clone(&slack_adapter) as Arc<dyn SlackMessenger>;
-    let slack_connector = Arc::clone(&slack_adapter) as Arc<dyn SlackConnector>;
+    let slack_connector = Arc::clone(&slack_adapter) as Arc<dyn IntegrationConnector>;
     let slack_picker = Arc::clone(&slack_adapter) as Arc<dyn SlackPicker>;
     // Bridges config.toml persistence + the adapter's live poll loop for
     // Command::ApplySlackSelection (step8.md's channel/user picker,
@@ -123,16 +151,48 @@ async fn main() -> Result<()> {
             base_config: Mutex::new(config.clone()),
         });
 
+    // 4b. GitHub's equivalent of step 4 (`step10.md`) — always constructed
+    //     for the same "the setup overlay needs something to connect
+    //     through" reason.
+    let github_adapter = Arc::new(GitHubAdapter::new(
+        GitHubConfig {
+            repositories: config.integrations.github.repositories.clone(),
+            sync_interval_secs: config.integrations.github.sync_interval_secs,
+        },
+        Arc::clone(&secret_chain) as Arc<dyn SecretWriter>,
+    ));
+    github_adapter.initialize(secret_chain.as_ref()).await?;
+    let github_connector = Arc::clone(&github_adapter) as Arc<dyn IntegrationConnector>;
+    let github_picker = Arc::clone(&github_adapter) as Arc<dyn Picker>;
+    let github_selection_applier: Arc<dyn SelectionApplier> =
+        Arc::new(ConfigFileGitHubSelectionApplier {
+            github_adapter: Arc::clone(&github_adapter),
+            config_path: config::resolve_config_path(),
+            base_config: Mutex::new(config.clone()),
+        });
+
     // 5. Wire the CQRS write path: Command -> WorkspaceCommandHandler ->
     //    Storage + EventBus (see docs/06-development/decisions/0007-cqrs.md).
+    //    Connectors/selection-appliers are keyed registries (`step11.md`)
+    //    rather than one named `Option` field per integration — a future
+    //    Calendar adds a key to each map instead of growing this call's
+    //    argument list again.
+    let mut connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>> = HashMap::new();
+    connectors.insert(IntegrationSource::Slack, slack_connector);
+    connectors.insert(IntegrationSource::GitHub, github_connector);
+    let mut selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>> =
+        HashMap::new();
+    selection_appliers.insert(IntegrationSource::GitHub, github_selection_applier);
+
     let event_bus = Arc::new(InProcessEventBus::new(256));
     let handler = Arc::new(WorkspaceCommandHandler::new(
         Arc::clone(&storage) as Arc<dyn PresenceRepository>,
         Arc::clone(&storage) as Arc<dyn NotificationRepository>,
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
         Some(slack_messenger),
-        Some(slack_connector),
         Some(slack_selection_applier),
+        connectors,
+        selection_appliers,
     ));
     let dispatcher: Arc<dyn CommandDispatcher> = Arc::new(InMemoryCommandDispatcher::new(handler));
 
@@ -151,6 +211,18 @@ async fn main() -> Result<()> {
             .start(Arc::clone(&event_bus) as Arc<dyn EventBus>)
             .await?;
         info!("Slack adapter started.");
+    }
+
+    // 6b. GitHub's equivalent of step 6 (`step10.md`), same reasoning.
+    let github_already_connected = !matches!(
+        github_adapter.health_check().await?,
+        ConnectionStatus::Disconnected
+    );
+    if config.integrations.github.enabled || github_already_connected {
+        github_adapter
+            .start(Arc::clone(&event_bus) as Arc<dyn EventBus>)
+            .await?;
+        info!("GitHub adapter started.");
     }
 
     // 7. Wire the CQRS read path (Phase 5): Projector keeps a
@@ -187,14 +259,19 @@ async fn main() -> Result<()> {
     //     the initial status (Phase 9) let the header stay live via a
     //     direct EventBus subscription instead of polling on redraw.
     let initial_slack_status = to_event_status(slack_adapter.health_check().await?);
+    let initial_github_status = to_event_status(github_adapter.health_check().await?);
     let ui_registry = Arc::new(InMemoryUiRegistry::new());
+    let mut pickers: HashMap<IntegrationSource, Arc<dyn Picker>> = HashMap::new();
+    pickers.insert(IntegrationSource::GitHub, github_picker);
     let renderer = TuiRenderer::new(
         ui_registry,
         read_model,
         Arc::clone(&dispatcher),
         slack_picker,
+        pickers,
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
         initial_slack_status,
+        initial_github_status,
     );
     renderer.run_loop().await?;
 

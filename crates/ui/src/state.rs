@@ -22,7 +22,7 @@ pub enum FocusMode {
 }
 
 /// Which dialog is showing while `focus_mode == FocusMode::Overlay`
-/// (`step7.md`, `step8.md`).
+/// (`step7.md`, `step8.md`, `step10.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum OverlayKind {
     /// Static keybinding reference.
@@ -32,6 +32,10 @@ pub enum OverlayKind {
     SlackSetup,
     /// Channel/watched-user picker (`Ctrl+P`, `step8.md`).
     SlackPicker,
+    /// In-app GitHub PAT entry (`Ctrl+G`, `step10.md`).
+    GitHubSetup,
+    /// Repository picker (`Ctrl+R`, `step10.md`).
+    GitHubPicker,
 }
 
 /// One selectable row in the Slack channel/user picker (`step8.md`) — a
@@ -77,14 +81,14 @@ pub struct SlackPickerState {
     pub status: SlackPickerStatus,
 }
 
-/// Outcome of the last `Command::ConnectSlack` dispatch, shown inline in
+/// Outcome of the last `Command::Connect` dispatch, shown inline in
 /// the setup overlay.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SlackSetupStatus {
     /// No connection attempt made yet this overlay session.
     #[default]
     Idle,
-    /// `Command::ConnectSlack` dispatched, awaiting the result.
+    /// `Command::Connect` dispatched, awaiting the result.
     Connecting,
     /// The command returned successfully.
     Connected,
@@ -100,6 +104,67 @@ pub struct SlackSetupState {
     pub token_input: String,
     /// Result of the most recent connection attempt, if any.
     pub status: SlackSetupStatus,
+}
+
+/// Outcome of the last `Command::Connect` dispatch, shown inline in
+/// the setup overlay. Structurally identical to [`SlackSetupStatus`] —
+/// kept as a separate type (not a shared generic) since the two overlays
+/// are independent UI flows that happen to look alike today, matching
+/// `step10.md` Decision 1's "duplicate structure per integration" choice.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum GitHubSetupStatus {
+    /// No connection attempt made yet this overlay session.
+    #[default]
+    Idle,
+    /// `Command::Connect` dispatched, awaiting the result.
+    Connecting,
+    /// The command returned successfully.
+    Connected,
+    /// The command returned an error; the message is shown to the user.
+    Failed(String),
+}
+
+/// Text input + last outcome for the GitHub setup overlay (`step10.md`).
+#[derive(Debug, Clone, Default)]
+pub struct GitHubSetupState {
+    /// Token as typed so far — rendered masked (`*` per character), never
+    /// shown in the clear or pushed into the command bar's history.
+    pub token_input: String,
+    /// Result of the most recent connection attempt, if any.
+    pub status: GitHubSetupStatus,
+}
+
+/// Outcome of the GitHub repository picker's data fetch / apply flow. See
+/// [`SlackPickerStatus`] — same shape, kept separate for the same reason
+/// [`GitHubSetupStatus`] is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum GitHubPickerStatus {
+    /// Overlay not open, or open but not yet fetched.
+    #[default]
+    Idle,
+    /// `Picker::list_items` in flight.
+    Loading,
+    /// Repositories fetched successfully; rows are ready to select.
+    Loaded,
+    /// `Command::ApplySelection` dispatched, awaiting the result.
+    Saving,
+    /// Selection applied successfully.
+    Saved,
+    /// A fetch or apply failed; the message is shown to the user.
+    Failed(String),
+}
+
+/// State for the GitHub repository picker overlay (`step10.md`). Simpler
+/// than [`SlackPickerState`]: one list (repositories), not two
+/// (channels + users).
+#[derive(Debug, Clone, Default)]
+pub struct GitHubPickerState {
+    /// Fetched repositories the authenticated user can access.
+    pub repositories: Vec<PickerRow>,
+    /// Index into `repositories`.
+    pub cursor: usize,
+    /// Current fetch/apply outcome.
+    pub status: GitHubPickerStatus,
 }
 
 /// `docs/03-domain/workspace-state.md`'s `ActiveLayout`.
@@ -163,6 +228,13 @@ pub struct WorkspaceState {
     /// Slack's connection status, kept current by an `EventBus` subscription
     /// in the run loop (`step9.md`, ADR-0016) — not polled, genuinely live.
     pub slack_connection_status: IntegrationConnectionStatus,
+    /// GitHub setup overlay's text input and last connection outcome.
+    pub github_setup: GitHubSetupState,
+    /// GitHub repository picker overlay's fetched rows and selection.
+    pub github_picker: GitHubPickerState,
+    /// GitHub's connection status, kept current the same way
+    /// `slack_connection_status` is (`step10.md`).
+    pub github_connection_status: IntegrationConnectionStatus,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
     /// Selected index within the focused pane's list (Team/Notification).
@@ -187,6 +259,10 @@ impl Default for WorkspaceState {
             // the real value from `SlackAdapter::health_check` at boot —
             // `WorkspaceState::default()` has no way to reach that itself.
             slack_connection_status: IntegrationConnectionStatus::Disconnected,
+            github_setup: GitHubSetupState::default(),
+            github_picker: GitHubPickerState::default(),
+            // Same placeholder reasoning as slack_connection_status above.
+            github_connection_status: IntegrationConnectionStatus::Disconnected,
             active_theme: "default-dark".to_string(),
             selected_index: 0,
             should_quit: false,

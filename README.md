@@ -64,9 +64,11 @@ GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSand
 | `Esc` | 명령줄/도움말 닫고 Normal 모드로 복귀 |
 | `Ctrl+S` | Slack 연결 설정 |
 | `Ctrl+P` | Slack 채널/사용자 선택 |
+| `Ctrl+G` | GitHub 연결 설정 |
+| `Ctrl+R` | GitHub 저장소 선택 |
 | `Ctrl+Q` | 종료 |
 
-Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표시됩니다. 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](docs/07-implementation-log/step5.md)를 참고하세요.
+Slack/GitHub을 연동하면 팀·알림 패널에 실제 메시지/프레즌스/PR 알림이 표시됩니다. 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](docs/07-implementation-log/step5.md)를 참고하세요.
 
 ### Slack 연동
 
@@ -82,11 +84,20 @@ Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표
 
 자세한 내용은 [`docs/04-extensions/integrations/slack.md`](docs/04-extensions/integrations/slack.md), [`step7.md`](docs/07-implementation-log/step7.md), [`step8.md`](docs/07-implementation-log/step8.md)를 참고하세요.
 
+### GitHub 연동
+
+1. GitHub → Settings → Developer settings → Personal access tokens에서 `repo` 스코프로 Classic PAT(`ghp_...`)를 발급받으세요.
+2. 앱을 실행하고 `Ctrl+G`를 눌러 토큰을 붙여넣은 뒤 Enter — 저장과 동시에 바로 연결을 시도합니다. 토큰은 Slack과 동일하게 OS 키체인(또는 암호화 파일 폴백)에 영구 저장되고, `config.toml`에는 절대 들어가지 않습니다.
+3. `Ctrl+R`을 눌러 접근 가능한 저장소 목록을 불러오고, `j`/`k`로 이동, `Space`로 선택, `Enter`로 저장하세요 — `config.toml`에 바로 반영되고 폴링도 재시작 없이 바로 적용됩니다.
+4. 선택한 저장소의 열린 PR이 알림 패널에 표시됩니다 (새로 열린 PR만 — 수정/닫힘은 아직 추적하지 않습니다).
+
+자세한 내용은 [`docs/04-extensions/integrations/github.md`](docs/04-extensions/integrations/github.md), [`step10.md`](docs/07-implementation-log/step10.md)를 참고하세요.
+
 ---
 
 ## 진행 현황
 
-이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step2.md` ~ `step9.md`를 참고하세요.
+이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시), Phase 10(두 번째 연동인 GitHub — 폴링, 연결 설정, 저장소 피커까지 한 단계에 구현), Phase 11(연동 2개로 반복되던 패턴을 `Command::Connect`/`ApplySelection` 등으로 일반화 — Calendar 붙이기 전에 정리)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step2.md` ~ `step11.md`를 참고하세요.
 
 ## 문서
 
