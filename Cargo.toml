@@ -25,7 +25,7 @@ members = [
 # -- not part of `cargo check --workspace`'s native-target build, so they
 # stay out of the root workspace rather than needing per-crate
 # `--exclude`/target juggling in every workspace-wide cargo invocation.
-exclude = ["examples/plugins/hello", "examples/plugins/looper", "examples/plugins/memhog"]
+exclude = ["examples/plugins/hello", "examples/plugins/looper", "examples/plugins/memhog", "examples/plugins/presence-checker"]
 
 [workspace.package]
 version = "0.1.0"

@@ -21,6 +21,22 @@ interface host-services {
     /// Print a message through the host's unified `tracing` logger.
     /// `level` is one of "trace"/"debug"/"info"/"warn"/"error".
     log: func(level: string, message: string);
+
+    /// Mirrors `domain::PresenceStatus` (`step16.md`).
+    enum presence-status {
+        active,
+        away,
+        offline,
+        meeting,
+        lunch,
+    }
+
+    /// Query a team member's current presence status. Gated behind the
+    /// `presence-read` capability (`step16.md`, `crates/plugin-sdk`'s
+    /// `PluginCapability::PresenceRead`) -- a plugin without it declared in
+    /// its `<plugin-id>.toml` manifest gets `Err("capability not granted:
+    /// presence-read")` without the host even looking up `user-id`.
+    get-member-presence: func(user-id: string) -> result<presence-status, string>;
 }
 
 world developer-workspace-plugin {

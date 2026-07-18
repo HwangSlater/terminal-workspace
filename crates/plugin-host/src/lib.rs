@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use common::{Result, WorkspaceError};
 use events::{Event, EventBus, EventHandler};
 use plugin_sdk::PluginCapability;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,16 +58,22 @@ impl PermissionManager {
         Self
     }
 
-    /// Assert capability request is approved.
-    ///
-    /// **Stub, documented as such** (`step14.md` Decision 3): every
-    /// `PluginCapability` variant is defined but not yet enforced -- no
-    /// example plugin in this phase requests network/filesystem access, so
-    /// wiring real enforcement now would be building for a need nothing
-    /// exercises yet. Wire this for real once a plugin actually needs one
-    /// of these gated.
-    pub fn verify_capability(&self, _plugin_id: &str, _capability: &PluginCapability) -> bool {
-        true
+    /// Assert `requested` is present in `granted` -- exact match. A real
+    /// check as of `step16.md` (`PresenceRead` is the first capability this
+    /// enforces); the other three `PluginCapability` variants
+    /// (`NetworkConnect`/`FsRead`/`FsWrite`/`SlackRead`) are still defined
+    /// but unreachable from any host function yet, so nothing calls this
+    /// with them. Kept as the single decision point (rather than an inline
+    /// `.contains()` at each call site) so a future capability needing more
+    /// than exact-match -- e.g. `NetworkConnect` domain-prefix matching --
+    /// has one place to grow into.
+    #[must_use]
+    pub fn verify_capability(
+        &self,
+        granted: &[PluginCapability],
+        requested: &PluginCapability,
+    ) -> bool {
+        granted.contains(requested)
     }
 }
 
@@ -74,6 +81,17 @@ impl Default for PermissionManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Supplies the live data behind `get-member-presence` (`step16.md`).
+/// Implemented in `crates/app` (the only place that actually holds the
+/// `SharedReadModel`) and injected into [`PluginHostManager`], so this
+/// crate stays decoupled from `crates/storage`/`crates/commands` -- it
+/// already depends on `domain` for `PresenceStatus`, nothing more.
+#[async_trait]
+pub trait PluginPresenceProvider: Send + Sync {
+    /// Look up `user_id`'s current presence, if known.
+    async fn presence(&self, user_id: &str) -> Option<domain::PresenceStatus>;
 }
 
 /// Where to discover plugin components and which of them are allowed to
@@ -88,11 +106,15 @@ pub struct PluginHostConfig {
 }
 
 /// Per-plugin-instance state handed to its WASM `Store` -- carries what the
-/// `host-services` `Host` impl below needs (which plugin is calling, and
-/// where to publish events) plus wasmtime's own memory limiter state.
+/// `host-services` `Host` impl below needs (which plugin is calling, where
+/// to publish events, what it's allowed to do, and where to get presence
+/// data) plus wasmtime's own memory limiter state.
 struct PluginState {
     plugin_id: String,
     event_bus: Arc<dyn EventBus>,
+    permission_manager: Arc<PermissionManager>,
+    granted_capabilities: Vec<PluginCapability>,
+    presence_provider: Arc<dyn PluginPresenceProvider>,
     limits: StoreLimits,
 }
 
@@ -156,6 +178,37 @@ impl HostServicesHost for PluginState {
             _ => tracing::info!(plugin_id = %self.plugin_id, "{message}"),
         }
     }
+
+    fn get_member_presence(
+        &mut self,
+        user_id: String,
+    ) -> std::result::Result<bindings::workspace::plugins::host_services::PresenceStatus, String>
+    {
+        if !self
+            .permission_manager
+            .verify_capability(&self.granted_capabilities, &PluginCapability::PresenceRead)
+        {
+            return Err("capability not granted: presence-read".to_string());
+        }
+        let presence =
+            tokio::runtime::Handle::current().block_on(self.presence_provider.presence(&user_id));
+        presence
+            .map(map_presence_status)
+            .ok_or_else(|| format!("no presence found for user: {user_id}"))
+    }
+}
+
+fn map_presence_status(
+    status: domain::PresenceStatus,
+) -> bindings::workspace::plugins::host_services::PresenceStatus {
+    use bindings::workspace::plugins::host_services::PresenceStatus as Wit;
+    match status {
+        domain::PresenceStatus::Active => Wit::Active,
+        domain::PresenceStatus::Away => Wit::Away,
+        domain::PresenceStatus::Offline => Wit::Offline,
+        domain::PresenceStatus::Meeting => Wit::Meeting,
+        domain::PresenceStatus::Lunch => Wit::Lunch,
+    }
 }
 
 /// A successfully loaded and initialized plugin instance.
@@ -170,8 +223,8 @@ pub struct PluginHostManager {
     linker: Linker<PluginState>,
     config: PluginHostConfig,
     event_bus: Arc<dyn EventBus>,
-    #[allow(dead_code)]
-    permission_manager: PermissionManager,
+    permission_manager: Arc<PermissionManager>,
+    presence_provider: Arc<dyn PluginPresenceProvider>,
     plugins: Mutex<HashMap<String, LoadedPlugin>>,
 }
 
@@ -183,6 +236,7 @@ impl PluginHostManager {
         config: PluginHostConfig,
         event_bus: Arc<dyn EventBus>,
         permission_manager: PermissionManager,
+        presence_provider: Arc<dyn PluginPresenceProvider>,
     ) -> Result<Self> {
         let mut engine_config = Config::new();
         engine_config.consume_fuel(true);
@@ -198,7 +252,8 @@ impl PluginHostManager {
             linker,
             config,
             event_bus,
-            permission_manager,
+            permission_manager: Arc::new(permission_manager),
+            presence_provider,
             plugins: Mutex::new(HashMap::new()),
         })
     }
@@ -234,9 +289,19 @@ impl PluginHostManager {
         let path = path.to_path_buf();
         let plugin_id_owned = plugin_id.to_string();
         let event_bus = Arc::clone(&self.event_bus);
+        let permission_manager = Arc::clone(&self.permission_manager);
+        let presence_provider = Arc::clone(&self.presence_provider);
 
         let (store, instance) = tokio::task::spawn_blocking(move || {
-            load_and_initialize(&engine, &linker, &path, plugin_id_owned, event_bus)
+            load_and_initialize(
+                &engine,
+                &linker,
+                &path,
+                plugin_id_owned,
+                event_bus,
+                permission_manager,
+                presence_provider,
+            )
         })
         .await
         .map_err(|e| WorkspaceError::Plugin(format!("plugin load task panicked: {e}")))??;
@@ -252,23 +317,37 @@ impl PluginHostManager {
     /// Call `shutdown` on every loaded plugin and drop the instances.
     /// Called once at workspace exit (`plugin-lifecycle.md`'s
     /// `Active -> Terminated -> Unloaded` transition).
+    ///
+    /// Runs each guest call inside `spawn_blocking` (see
+    /// [`EventHandler::handle`]'s doc comment for why this matters -- same
+    /// reasoning applies here).
     pub async fn shutdown_all(&self) {
-        let mut plugins = self.plugins.lock().await;
-        for (id, loaded) in plugins.iter_mut() {
-            if loaded.store.set_fuel(FUEL_PER_CALL).is_err() {
+        let ids: Vec<String> = self.plugins.lock().await.keys().cloned().collect();
+        for id in ids {
+            let Some(mut loaded) = self.plugins.lock().await.remove(&id) else {
                 continue;
-            }
-            match loaded.instance.call_shutdown(&mut loaded.store) {
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                if loaded.store.set_fuel(FUEL_PER_CALL).is_err() {
+                    return Err("fuel re-arm failed".to_string());
+                }
+                match loaded.instance.call_shutdown(&mut loaded.store) {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(guest_err)) => Err(guest_err),
+                    Err(trap) => Err(trap.to_string()),
+                }
+            })
+            .await;
+            match result {
                 Ok(Ok(())) => tracing::info!(plugin_id = %id, "Plugin shut down cleanly."),
                 Ok(Err(e)) => {
                     tracing::warn!(plugin_id = %id, error = %e, "Plugin shutdown returned an error");
                 }
-                Err(trap) => {
-                    tracing::error!(plugin_id = %id, error = %trap, "Plugin trapped during shutdown");
+                Err(join_err) => {
+                    tracing::error!(plugin_id = %id, error = %join_err, "Plugin shutdown task panicked");
                 }
             }
         }
-        plugins.clear();
     }
 
     /// Plugin ids currently loaded and initialized (for diagnostics/tests).
@@ -285,9 +364,13 @@ fn load_and_initialize(
     path: &Path,
     plugin_id: String,
     event_bus: Arc<dyn EventBus>,
+    permission_manager: Arc<PermissionManager>,
+    presence_provider: Arc<dyn PluginPresenceProvider>,
 ) -> Result<(Store<PluginState>, DeveloperWorkspacePlugin)> {
     let component = Component::from_file(engine, path)
         .map_err(|e| WorkspaceError::Plugin(format!("compile {}: {e}", path.display())))?;
+
+    let granted_capabilities = load_granted_capabilities(path, &plugin_id);
 
     let limits = StoreLimitsBuilder::new()
         .memory_size(MEMORY_LIMIT_BYTES)
@@ -297,6 +380,9 @@ fn load_and_initialize(
         PluginState {
             plugin_id: plugin_id.clone(),
             event_bus,
+            permission_manager,
+            granted_capabilities,
+            presence_provider,
             limits,
         },
     );
@@ -314,6 +400,59 @@ fn load_and_initialize(
         .map_err(|e| WorkspaceError::Plugin(format!("{plugin_id} initialize failed: {e}")))?;
 
     Ok((store, instance))
+}
+
+/// The `<plugin-id>.toml` manifest sitting next to a plugin's `.wasm`
+/// (`step16.md` Decision 2) -- just the capability list for now, not the
+/// fuller `[plugin]`/`[capabilities.network]`/etc. shape
+/// `docs/04-extensions/capability-system.md` sketches (more surface than
+/// this phase's one real capability needs).
+#[derive(Debug, Deserialize)]
+struct PluginManifestFile {
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+/// Read `<wasm_path with .toml extension>` and resolve it to a list of
+/// granted [`PluginCapability`]s. A **missing** file grants nothing
+/// (secure default -- `capability-system.md` §1's "zero-privilege sandbox
+/// by default," made real for the first time this phase). A file that
+/// exists but fails to parse, or names a capability this host doesn't
+/// recognize, is logged and that entry (or the whole file, if
+/// unparseable) grants nothing -- fail-closed, but never load-blocking.
+fn load_granted_capabilities(wasm_path: &Path, plugin_id: &str) -> Vec<PluginCapability> {
+    let manifest_path = wasm_path.with_extension("toml");
+    let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+        return Vec::new();
+    };
+
+    let manifest: PluginManifestFile = match toml::from_str(&contents) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            tracing::error!(
+                plugin_id = %plugin_id,
+                error = %e,
+                "Malformed plugin manifest; granting zero capabilities"
+            );
+            return Vec::new();
+        }
+    };
+
+    manifest
+        .capabilities
+        .into_iter()
+        .filter_map(|name| match name.as_str() {
+            "presence-read" => Some(PluginCapability::PresenceRead),
+            other => {
+                tracing::warn!(
+                    plugin_id = %plugin_id,
+                    capability = %other,
+                    "Unknown capability in manifest; ignoring"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// Scan `directory` (non-recursive) for `<id>.wasm` files whose stem
@@ -339,6 +478,15 @@ fn discover_plugin_paths(directory: &Path, allowed_list: &[String]) -> Vec<(Stri
     found
 }
 
+/// Outcome of one guest `on-event`/`shutdown` call, computed inside a
+/// `spawn_blocking` closure (see [`EventHandler::handle`]) and reported
+/// back out alongside the [`LoadedPlugin`] the closure took ownership of.
+enum CallOutcome {
+    Ok,
+    GuestError(String),
+    Trapped(String),
+}
+
 #[async_trait]
 impl EventHandler for PluginHostManager {
     /// Forward every `Event` published on the shared bus into each loaded
@@ -347,36 +495,67 @@ impl EventHandler for PluginHostManager {
     /// genuine guest bug) is caught, logged, and that plugin instance is
     /// dropped -- it does not take down the host process or block delivery
     /// to any other plugin (ADR-0002).
+    ///
+    /// Each guest call runs inside `tokio::task::spawn_blocking`, not
+    /// directly on whatever worker thread is running this async fn. Two
+    /// reasons: wasmtime execution (even fuel-limited) is synchronous
+    /// CPU-bound work that shouldn't occupy an async executor's worker
+    /// thread, and -- found the hard way, `step16.md` Implementation Notes
+    /// -- host functions that need to call back into async code
+    /// (`publish-event`, `get-member-presence`) use
+    /// `tokio::runtime::Handle::current().block_on(..)`, which panics with
+    /// "Cannot start a runtime from within a runtime" if invoked directly
+    /// on a worker thread instead of a blocking-pool thread. `load_one`
+    /// already ran guest calls this way; this brings `on-event`/`shutdown`
+    /// into line with the invariant `PluginState::publish_event`'s own doc
+    /// comment already claimed but which wasn't actually true here until
+    /// this fix.
     async fn handle(&self, event: Event) -> Result<()> {
-        let event_type = event_type_name(&event);
+        let event_type = event_type_name(&event).to_string();
         let payload = serde_json::to_string(&event)
             .map_err(|e| WorkspaceError::Plugin(format!("event serialization failed: {e}")))?;
 
-        let mut plugins = self.plugins.lock().await;
-        let mut trapped: Vec<String> = Vec::new();
+        let ids: Vec<String> = self.plugins.lock().await.keys().cloned().collect();
 
-        for (id, loaded) in plugins.iter_mut() {
-            if loaded.store.set_fuel(FUEL_PER_CALL).is_err() {
-                trapped.push(id.clone());
+        for id in ids {
+            let Some(mut loaded) = self.plugins.lock().await.remove(&id) else {
                 continue;
-            }
-            match loaded
-                .instance
-                .call_on_event(&mut loaded.store, event_type, &payload)
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(guest_err)) => {
-                    tracing::warn!(plugin_id = %id, error = %guest_err, "Plugin on-event returned an error");
-                }
-                Err(trap) => {
-                    tracing::error!(plugin_id = %id, error = %trap, "Plugin trapped handling event; suspending");
-                    trapped.push(id.clone());
-                }
-            }
-        }
+            };
 
-        for id in trapped {
-            plugins.remove(&id);
+            let event_type = event_type.clone();
+            let payload = payload.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let outcome = if loaded.store.set_fuel(FUEL_PER_CALL).is_err() {
+                    CallOutcome::Trapped("fuel re-arm failed".to_string())
+                } else {
+                    match loaded
+                        .instance
+                        .call_on_event(&mut loaded.store, &event_type, &payload)
+                    {
+                        Ok(Ok(())) => CallOutcome::Ok,
+                        Ok(Err(guest_err)) => CallOutcome::GuestError(guest_err),
+                        Err(trap) => CallOutcome::Trapped(trap.to_string()),
+                    }
+                };
+                (loaded, outcome)
+            })
+            .await;
+
+            match outcome {
+                Ok((loaded, CallOutcome::Ok)) => {
+                    self.plugins.lock().await.insert(id, loaded);
+                }
+                Ok((loaded, CallOutcome::GuestError(guest_err))) => {
+                    tracing::warn!(plugin_id = %id, error = %guest_err, "Plugin on-event returned an error");
+                    self.plugins.lock().await.insert(id, loaded);
+                }
+                Ok((_loaded, CallOutcome::Trapped(trap))) => {
+                    tracing::error!(plugin_id = %id, error = %trap, "Plugin trapped handling event; suspending");
+                }
+                Err(join_err) => {
+                    tracing::error!(plugin_id = %id, error = %join_err, "Plugin on-event task panicked; suspending");
+                }
+            }
         }
 
         Ok(())
@@ -402,6 +581,101 @@ fn event_type_name(event: &Event) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `PluginPresenceProvider` for tests: returns whatever's in
+    /// `responses` and records every `user_id` it was actually called
+    /// with, so a test can assert enforcement happened *before* reaching
+    /// the provider (Decision 5, `step16.md`) rather than only that the
+    /// response differed.
+    #[derive(Default)]
+    struct MockPresenceProvider {
+        responses: HashMap<String, domain::PresenceStatus>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl PluginPresenceProvider for MockPresenceProvider {
+        async fn presence(&self, user_id: &str) -> Option<domain::PresenceStatus> {
+            self.calls.lock().await.push(user_id.to_string());
+            self.responses.get(user_id).copied()
+        }
+    }
+
+    fn no_presence_provider() -> Arc<dyn PluginPresenceProvider> {
+        Arc::new(MockPresenceProvider::default())
+    }
+
+    #[test]
+    fn verify_capability_grants_exact_matches_only() {
+        let pm = PermissionManager::new();
+        let granted = vec![PluginCapability::PresenceRead];
+        assert!(pm.verify_capability(&granted, &PluginCapability::PresenceRead));
+        assert!(!pm.verify_capability(&granted, &PluginCapability::SlackRead));
+        assert!(!pm.verify_capability(&[], &PluginCapability::PresenceRead));
+    }
+
+    #[test]
+    fn load_granted_capabilities_with_no_manifest_file_grants_nothing() {
+        let dir = std::env::temp_dir().join(format!("tw_manifest_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_path = dir.join("hello.wasm");
+        std::fs::write(&wasm_path, b"").unwrap();
+
+        let granted = load_granted_capabilities(&wasm_path, "hello");
+
+        assert!(granted.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_granted_capabilities_parses_a_real_manifest() {
+        let dir = std::env::temp_dir().join(format!("tw_manifest_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_path = dir.join("presence-checker.wasm");
+        std::fs::write(&wasm_path, b"").unwrap();
+        std::fs::write(
+            dir.join("presence-checker.toml"),
+            "capabilities = [\"presence-read\"]\n",
+        )
+        .unwrap();
+
+        let granted = load_granted_capabilities(&wasm_path, "presence-checker");
+
+        assert_eq!(granted, vec![PluginCapability::PresenceRead]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_granted_capabilities_on_a_malformed_manifest_grants_nothing_not_panics() {
+        let dir = std::env::temp_dir().join(format!("tw_manifest_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_path = dir.join("hello.wasm");
+        std::fs::write(&wasm_path, b"").unwrap();
+        std::fs::write(dir.join("hello.toml"), "not valid = = toml").unwrap();
+
+        let granted = load_granted_capabilities(&wasm_path, "hello");
+
+        assert!(granted.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_granted_capabilities_ignores_unknown_capability_names() {
+        let dir = std::env::temp_dir().join(format!("tw_manifest_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm_path = dir.join("hello.wasm");
+        std::fs::write(&wasm_path, b"").unwrap();
+        std::fs::write(
+            dir.join("hello.toml"),
+            "capabilities = [\"time-travel\", \"presence-read\"]\n",
+        )
+        .unwrap();
+
+        let granted = load_granted_capabilities(&wasm_path, "hello");
+
+        assert_eq!(granted, vec![PluginCapability::PresenceRead]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn discover_plugin_paths_filters_by_allow_list_and_extension() {
@@ -457,6 +731,7 @@ mod tests {
             },
             event_bus,
             PermissionManager::new(),
+            no_presence_provider(),
         )
         .expect("manager construction must succeed");
 
@@ -480,6 +755,7 @@ mod tests {
             },
             event_bus,
             PermissionManager::new(),
+            no_presence_provider(),
         )
         .expect("manager construction must succeed");
 
@@ -509,6 +785,11 @@ mod tests {
         // which is also the more correct sandboxing default for a plugin
         // that shouldn't have ambient env/clock/fs access in the first
         // place (`step14.md` Decision 3's minimal host-function scope).
+        // Rust converts `-` to `_` in library artifact file names, but not
+        // in the crate/directory name itself -- `examples/plugins/
+        // presence-checker/` builds `presence_checker.wasm`, so the two
+        // can't share one literal string for hyphenated plugin names.
+        let wasm_file_stem = name.replace('-', "_");
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -518,7 +799,7 @@ mod tests {
             .join("target")
             .join("wasm32-unknown-unknown")
             .join("debug")
-            .join(format!("{name}.wasm"))
+            .join(format!("{wasm_file_stem}.wasm"))
     }
 
     macro_rules! require_example_plugin {
@@ -555,6 +836,7 @@ mod tests {
             },
             event_bus,
             PermissionManager::new(),
+            no_presence_provider(),
         )
         .expect("manager construction must succeed");
 
@@ -594,6 +876,7 @@ mod tests {
             },
             event_bus,
             PermissionManager::new(),
+            no_presence_provider(),
         )
         .expect("manager construction must succeed");
 
@@ -638,6 +921,7 @@ mod tests {
             },
             event_bus,
             PermissionManager::new(),
+            no_presence_provider(),
         )
         .expect("manager construction must succeed");
 
@@ -660,6 +944,128 @@ mod tests {
             .expect("handle must not error even though the plugin traps internally");
 
         assert!(manager.loaded_plugin_ids().await.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn get_member_presence_reaches_the_provider_when_the_capability_is_granted() {
+        let wasm_path = require_example_plugin!("presence-checker");
+
+        let dir = std::env::temp_dir().join(format!(
+            "tw_plugin_host_presence_granted_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(&wasm_path, dir.join("presence_checker.wasm")).unwrap();
+        std::fs::write(
+            dir.join("presence_checker.toml"),
+            "capabilities = [\"presence-read\"]\n",
+        )
+        .unwrap();
+
+        let event_bus = Arc::new(events::InProcessEventBus::new(16)) as Arc<dyn EventBus>;
+        let mut responses = HashMap::new();
+        responses.insert("local-user".to_string(), domain::PresenceStatus::Active);
+        let presence_provider = Arc::new(MockPresenceProvider {
+            responses,
+            calls: Mutex::new(Vec::new()),
+        });
+
+        let manager = PluginHostManager::new(
+            PluginHostConfig {
+                directory: dir.clone(),
+                allowed_list: vec!["presence_checker".to_string()],
+            },
+            event_bus,
+            PermissionManager::new(),
+            Arc::clone(&presence_provider) as Arc<dyn PluginPresenceProvider>,
+        )
+        .expect("manager construction must succeed");
+
+        manager
+            .load_all()
+            .await
+            .expect("load_all of a real component must not error");
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec!["presence_checker".to_string()]
+        );
+
+        manager
+            .handle(Event::SystemAlert("test".into()))
+            .await
+            .expect("handle must not error");
+
+        // The critical assertion (`step16.md` Decision 5): the provider
+        // WAS reached, proving the granted capability actually let the
+        // call through, not just that some response came back.
+        assert_eq!(
+            presence_provider.calls.lock().await.as_slice(),
+            ["local-user".to_string()]
+        );
+        // No trap -- the plugin is still loaded.
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec!["presence_checker".to_string()]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn get_member_presence_is_denied_before_reaching_the_provider_without_the_capability() {
+        let wasm_path = require_example_plugin!("presence-checker");
+
+        let dir = std::env::temp_dir().join(format!(
+            "tw_plugin_host_presence_denied_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(&wasm_path, dir.join("presence_checker.wasm")).unwrap();
+        // Deliberately no presence_checker.toml manifest -- secure default
+        // (`step16.md` Decision 2).
+
+        let event_bus = Arc::new(events::InProcessEventBus::new(16)) as Arc<dyn EventBus>;
+        let mut responses = HashMap::new();
+        responses.insert("local-user".to_string(), domain::PresenceStatus::Active);
+        let presence_provider = Arc::new(MockPresenceProvider {
+            responses,
+            calls: Mutex::new(Vec::new()),
+        });
+
+        let manager = PluginHostManager::new(
+            PluginHostConfig {
+                directory: dir.clone(),
+                allowed_list: vec!["presence_checker".to_string()],
+            },
+            event_bus,
+            PermissionManager::new(),
+            Arc::clone(&presence_provider) as Arc<dyn PluginPresenceProvider>,
+        )
+        .expect("manager construction must succeed");
+
+        manager
+            .load_all()
+            .await
+            .expect("load_all of a real component must not error");
+
+        manager
+            .handle(Event::SystemAlert("test".into()))
+            .await
+            .expect("handle must not error");
+
+        // The critical assertion (`step16.md` Decision 5): the provider was
+        // NEVER called -- proving denial happens before reaching it, not
+        // just that the guest happened to get a different response.
+        assert!(presence_provider.calls.lock().await.is_empty());
+        // No trap -- a denial is a normal `Err` return from
+        // get-member-presence, not a guest panic, so the plugin stays
+        // loaded.
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec!["presence_checker".to_string()]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -21,7 +21,7 @@ use integration::{
 };
 use ipc::{IpcClient, IpcRequest, IpcResponse, IpcServer, IpcStatusProvider, IpcStatusSnapshot};
 use logging::{init_logger, spans::application_span};
-use plugin_host::{PermissionManager, PluginHostConfig, PluginHostManager};
+use plugin_host::{PermissionManager, PluginHostConfig, PluginHostManager, PluginPresenceProvider};
 use registry::InMemoryUiRegistry;
 use secrets::{SecretProviderChain, SecretWriter};
 use std::collections::HashMap;
@@ -155,6 +155,27 @@ impl IpcStatusProvider for AppStatusProvider {
             calendar,
             unread_notifications,
         }
+    }
+}
+
+/// Supplies `get-member-presence` snapshots (`step16.md`) from the same
+/// `SharedReadModel` [`AppStatusProvider`] already reads -- no separate
+/// data source needed, `DashboardReadModel.team_presence` already has
+/// exactly this.
+struct AppPresenceProvider {
+    read_model: SharedReadModel,
+}
+
+#[async_trait]
+impl PluginPresenceProvider for AppPresenceProvider {
+    async fn presence(&self, user_id: &str) -> Option<PresenceStatus> {
+        self.read_model
+            .read()
+            .await
+            .team_presence
+            .iter()
+            .find(|member| member.user_id.0 == user_id)
+            .map(|member| member.status)
     }
 }
 
@@ -509,6 +530,9 @@ async fn main() -> Result<()> {
     //     `EventHandler` the same way the Projector is above, so every
     //     `Event` on the shared bus reaches each loaded plugin's
     //     `on-event` export.
+    let plugin_presence_provider: Arc<dyn PluginPresenceProvider> = Arc::new(AppPresenceProvider {
+        read_model: Arc::clone(&read_model),
+    });
     let plugin_host = Arc::new(PluginHostManager::new(
         PluginHostConfig {
             directory: config.plugins.directory.clone(),
@@ -516,6 +540,7 @@ async fn main() -> Result<()> {
         },
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
         PermissionManager::new(),
+        plugin_presence_provider,
     )?);
     if config.plugins.enabled {
         plugin_host.initialize()?;

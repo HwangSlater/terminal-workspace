@@ -22,14 +22,18 @@ wit_bindgen::generate!({
 // via their package/interface path -- re-exported here so plugin authors
 // write `plugin_sdk::log(...)` rather than reaching into this crate's
 // generated module layout, which isn't a stability guarantee.
-pub use workspace::plugins::host_services::{log, publish_event};
+pub use workspace::plugins::host_services::{
+    get_member_presence, log, publish_event, PresenceStatus,
+};
 
-/// Host capabilities a plugin's manifest can request. Defined, but
-/// **not yet enforced** by the host (`step14.md` Decision 3) — nothing in
-/// this phase's example plugin exercises any of these, since the only
-/// host functions that exist (`log`, `publish_event`) don't touch the
-/// filesystem or network. Wire real enforcement in `PermissionManager`
-/// once a real plugin actually needs one of these gated.
+/// Host capabilities a plugin's manifest can request. `PresenceRead` is
+/// **enforced for real** as of `step16.md` (`crates/plugin-host`'s
+/// `PermissionManager::verify_capability`, checked against a
+/// `<plugin-id>.toml` manifest) — the first of these to be. The other
+/// three remain defined but **not yet enforced**: nothing in any example
+/// plugin exercises filesystem/network access yet. Wire real enforcement
+/// for one of them once a real plugin actually needs it gated, the same
+/// way `PresenceRead` got wired once `get-member-presence` needed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginCapability {
     /// Connect to remote networks.
@@ -40,4 +44,6 @@ pub enum PluginCapability {
     FsWrite(String),
     /// Request Slack reading.
     SlackRead,
+    /// Query a team member's presence status (`get-member-presence`).
+    PresenceRead,
 }
