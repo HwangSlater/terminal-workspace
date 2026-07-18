@@ -18,7 +18,7 @@ cargo run -p app
 
 설정 파일을 손으로 작성할 필요가 없습니다 — 처음 실행하면 `config.toml`과 로컬 데이터베이스가 자동으로 만들어집니다 ([`docs/05-operations/configuration.md`](docs/05-operations/configuration.md) §4 참고).
 
-선택: `scripts/setup.ps1`(Windows) / `scripts/setup.sh`(Linux/macOS)는 한 번에 환경을 점검해주는 스크립트입니다 (`rustup` 존재 여부 확인 후 `cargo check --workspace` 실행) — 본격적으로 시작하기 전에 통과 여부를 명확히 확인하고 싶으실 때 사용하세요.
+선택: `scripts/setup.ps1`(Windows) / `scripts/setup.sh`(Linux/macOS)는 한 번에 환경을 점검해주는 스크립트입니다 — `rustup` 존재 여부 확인, (Linux/macOS는) 빠진 게 있으면 정확한 설치 명령어까지 알려준 뒤(아무것도 대신 설치하지는 않습니다), `cargo check --workspace` 실행까지 한 번에 해줍니다. 본격적으로 시작하기 전에 통과 여부를 명확히 확인하고 싶으실 때 사용하세요.
 
 ### Windows에서 실제로 빌드/실행하려면
 
