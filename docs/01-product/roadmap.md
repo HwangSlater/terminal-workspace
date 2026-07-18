@@ -5,6 +5,6 @@ v0.2 Presence — folded into v0.1 above (same adapter, same domain model; see `
 v0.3 GitHub — done (Phase 10, `step10.md`): PAT auth, polling, open-PR notifications, `Ctrl+R` repo picker.
 v0.4 Calendar — done (Phase 12, `step12.md`): secret iCal feed URL, `RRULE` recurrence expansion, `Ctrl+L` setup.
 v0.5 Plugins — done (Phase 14, `step14.md`, ADR-0017): WASM Component Model sandbox (`wasmtime`), fuel/memory limits, `log`/`publish-event` host functions. Deliberately narrow scope, deferred to a later phase: `get-member-presence`, real `PluginCapability` enforcement, and plugin-registered commands/UI (the unified registries from ADR-0010 exist but no plugin uses them yet).
-v1.0 Stable + public release with prebuilt binaries (Windows/macOS/Linux) — see product-requirements.md §2.1, §4
+v1.0 Stable + public release with prebuilt binaries (Windows/macOS/Linux) — see product-requirements.md §2.1, §4. Daemon mode & Local CLI Socket IPC done (Phase 15, `step15.md`): `termws slack-send`/`set-presence`/`status`, the running TUI process is the daemon. The only remaining v1.0.0 item per product-requirements.md §4 is the actual public release announcement/tag itself — every feature item on that list is now built.
 
 Note: the release pipeline itself (cargo-dist, ADR-0015) is already built and validated via pre-release tags, ahead of the v1.0 line above — it was deliberately built early (against the pre-TUI skeleton) so packaging/signing/CI issues surface before they're tangled up with feature work, not because prebuilt binaries are meant to ship publicly before v1.0.

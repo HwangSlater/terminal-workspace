@@ -1,0 +1,18 @@
+[package]
+name = "ipc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+commands = { path = "../commands" }
+common = { path = "../common" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+interprocess = { version = "2.4", features = ["tokio"] }
+
+[dev-dependencies]
+uuid.workspace = true

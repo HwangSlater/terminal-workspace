@@ -124,6 +124,7 @@ Unlike `01-product/` through `06-development/` above, this folder isn't topical 
 - [`step12.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step12.md) — Phase 12: Calendar integration (secret iCal feed URL over OAuth, `RRULE` expansion via `rrule`/`ical`, `Ctrl+L` setup, no picker overlay).
 - [`step13.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step13.md) — Phase 13: command bar `Tab` autocomplete (command heads + `/send` channel names, shell-style cycling) — plus two real UI bugs found and fixed along the way: the Calendar dock panel was still a static "not implemented" stub after Phase 12 shipped, and Team/Calendar were completely unreachable below the 120-column sidebar-collapse width.
 - [`step14.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step14.md) — Phase 14: plugin runtime (WASM Component Model via `wasmtime`/`wit-bindgen`, ADR-0017's scoped C-compiler exception, `cargo-component`-built example plugins proving load/lifecycle/fuel-limit/memory-limit end-to-end with real traps, not mocks).
+- [`step15.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step15.md) — Phase 15: Daemon mode & Local CLI Socket IPC (v1.0.0's last feature item) — the running TUI process is the daemon, `termws slack-send`/`set-presence`/`status` reach it over a Unix Domain Socket/Named Pipe (`interprocess` crate), verified end-to-end against a real running instance.
 
 ---
 

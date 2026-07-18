@@ -48,11 +48,11 @@ This means the Contributor Experience gap this section exists to manage has near
 
 ### v1.0.0 (Release)
 - Full Bounded Context isolation.
-- WASM Sandboxed Plugin runtime.
-- Multi-integration adapters (Slack, GitHub, Calendar).
-- Local `redb` embedded key-value caching (ADR-0014; superseded the original SQLite plan).
-- **Daemon mode & Local CLI Socket IPC**.
-- **Public release with prebuilt binaries** for all three Tier 1 platforms (`docs/06-development/platform-support.md`): Windows (`.msi`), macOS (tarball, `.dmg` planned), Linux (tarball, shell installer). The `cargo-dist` pipeline itself (ADR-0015, `step4.md` Phase 4) already exists and is validated via pre-release tags against the pre-TUI skeleton — what's left for v1.0.0 is the actual public announcement, gated on Phase 5 (TUI) landing first so there's something worth downloading.
+- WASM Sandboxed Plugin runtime. **Done** (Phase 14, `step14.md`, ADR-0002/0009/0017).
+- Multi-integration adapters (Slack, GitHub, Calendar). **Done** (Phases 6/10/12).
+- Local `redb` embedded key-value caching (ADR-0014; superseded the original SQLite plan). **Done** (Phase 3).
+- **Daemon mode & Local CLI Socket IPC**. **Done** (Phase 15, `step15.md`): the running interactive TUI process is the daemon (no separate headless process/service installation), reachable via `termws slack-send <channel> <text>`, `termws set-presence <status> [text]`, `termws status` over a Unix Domain Socket (Linux/macOS) / Named Pipe (Windows), per `docs/01-product/user-flows.md` §3's "Vim / Tmux Shell IPC" scenario.
+- **Public release with prebuilt binaries** for all three Tier 1 platforms (`docs/06-development/platform-support.md`): Windows (`.msi`), macOS (tarball, `.dmg` planned), Linux (tarball, shell installer). The `cargo-dist` pipeline itself (ADR-0015, `step4.md` Phase 4) already exists and is validated via pre-release tags against the pre-TUI skeleton — what's left for v1.0.0 is the actual public announcement, gated on Phase 5 (TUI) landing first so there's something worth downloading. Everything else in this list is now done; this is the only remaining v1.0.0 item.
 
 ---
 

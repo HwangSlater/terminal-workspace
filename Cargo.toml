@@ -15,6 +15,7 @@ members = [
     "crates/ui",
     "crates/plugin-host",
     "crates/plugin-sdk",
+    "crates/ipc",
     "crates/integration",
     "crates/scheduler",
     "crates/assistant"

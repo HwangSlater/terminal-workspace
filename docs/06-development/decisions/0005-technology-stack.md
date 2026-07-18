@@ -17,6 +17,7 @@ The Terminal Workspace requires a production-grade, highly performant, and long-
 | **Database** | `redb` (pure-Rust embedded KV store) | SQLite (rusqlite bundled), sled, rocksdb, raw file IO | No C compiler / build script required on any OS — `cargo build` just works. ACID transactions. See ADR-0014. | No relational queries (not needed by current access patterns — see ADR-0014). | Medium | Storage infrastructure |
 | **Logging** | Tracing | env_logger, log | Structured spans, context propagation (Correlation ID). | Complex initialization logic. | Low | All layers |
 | **Error Handling** | thiserror + anyhow | std::error::Error | `thiserror` for library domain errors; `anyhow` for app workflows. | Boilerplate declarations for custom error classes. | Low | All modules |
+| **Local IPC** | `interprocess` (Unix Domain Sockets / Named Pipes) | Hand-rolled `tokio::net::UnixListener` + `tokio::net::windows::named_pipe`, gRPC/D-Bus | Pure Rust (verified via `cargo tree -i cc` before adopting, per ADR-0014's practice), one API across platforms instead of two bespoke code paths for Windows named-pipe security semantics. See `step15.md`. | One more dependency; less control than hand-rolling if a very specific low-level behavior were ever needed. | Medium | `crates/ipc` only |
 
 ---
 

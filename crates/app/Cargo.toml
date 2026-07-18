@@ -30,6 +30,7 @@ logging = { path = "../logging" }
 ui = { path = "../ui" }
 plugin-host = { path = "../plugin-host" }
 plugin-sdk = { path = "../plugin-sdk" }
+ipc = { path = "../ipc" }
 integration = { path = "../integration" }
 scheduler = { path = "../scheduler" }
 assistant = { path = "../assistant" }

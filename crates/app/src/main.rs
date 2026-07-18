@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use commands::{
     Command, CommandDispatcher, InMemoryCommandDispatcher, Projector, SelectionApplier,
-    SlackSelectionApplier, WorkspaceCommandHandler,
+    SharedReadModel, SlackSelectionApplier, WorkspaceCommandHandler,
 };
 use common::Result;
 use config::AppConfig;
@@ -19,6 +19,7 @@ use integration::{
     IntegrationAdapter, IntegrationConnector, Picker, SlackAdapter, SlackConfig, SlackMessenger,
     SlackPicker,
 };
+use ipc::{IpcClient, IpcRequest, IpcResponse, IpcServer, IpcStatusProvider, IpcStatusSnapshot};
 use logging::{init_logger, spans::application_span};
 use plugin_host::{PermissionManager, PluginHostConfig, PluginHostManager};
 use registry::InMemoryUiRegistry;
@@ -103,8 +104,202 @@ fn to_event_status(status: ConnectionStatus) -> IntegrationConnectionStatus {
     }
 }
 
+/// Plain-English rendering of `ConnectionStatus` for `termws status` output
+/// (`step15.md` Decision 6) -- deliberately not reusing the TUI's Korean
+/// header strings (`crates/ui/src/render.rs`), since this is a separate,
+/// English-language CLI surface.
+fn connection_status_text(status: ConnectionStatus) -> String {
+    match status {
+        ConnectionStatus::Disconnected => "Disconnected".to_string(),
+        ConnectionStatus::Connecting => "Connecting".to_string(),
+        ConnectionStatus::Connected => "Connected".to_string(),
+        ConnectionStatus::Reconnecting => "Reconnecting".to_string(),
+        ConnectionStatus::Failed(reason) => format!("Failed: {reason}"),
+    }
+}
+
+/// Supplies `IpcRequest::Status` snapshots (`step15.md` Decision 4) by
+/// querying the same adapter handles and `SharedReadModel` `main` already
+/// holds -- a fresh `health_check()` per query rather than a cached status,
+/// since `termws status` is a one-shot, infrequent call where staleness
+/// would be a worse tradeoff than the (cheap, local) extra check.
+struct AppStatusProvider {
+    read_model: SharedReadModel,
+    slack_adapter: Arc<SlackAdapter>,
+    github_adapter: Arc<GitHubAdapter>,
+    calendar_adapter: Arc<CalendarAdapter>,
+}
+
+#[async_trait]
+impl IpcStatusProvider for AppStatusProvider {
+    async fn snapshot(&self) -> IpcStatusSnapshot {
+        let slack = self
+            .slack_adapter
+            .health_check()
+            .await
+            .map_or_else(|_| "Unknown".to_string(), connection_status_text);
+        let github = self
+            .github_adapter
+            .health_check()
+            .await
+            .map_or_else(|_| "Unknown".to_string(), connection_status_text);
+        let calendar = self
+            .calendar_adapter
+            .health_check()
+            .await
+            .map_or_else(|_| "Unknown".to_string(), connection_status_text);
+        let unread_notifications = self.read_model.read().await.unread_notifications.len();
+        IpcStatusSnapshot {
+            slack,
+            github,
+            calendar,
+            unread_notifications,
+        }
+    }
+}
+
+/// Result of trying to parse `argv` as a `termws <subcommand> ...`
+/// invocation (`step15.md` Decision 6).
+#[derive(Debug)]
+enum CliInvocation {
+    /// The first arg isn't one of the three recognized subcommand words at
+    /// all -- `main` falls through to its normal TUI bootstrap (e.g. no
+    /// args, or `--theme nord`, both real, valid non-subcommand
+    /// invocations already handled elsewhere).
+    NotASubcommand,
+    /// A recognized subcommand word, successfully parsed into a request.
+    Request(IpcRequest),
+    /// A recognized subcommand word, but with missing/invalid arguments
+    /// (e.g. `set-presence bogus`). Distinct from `NotASubcommand`
+    /// deliberately -- conflating the two was a real bug found while
+    /// testing this manually: `set-presence bogus` fell all the way
+    /// through to the full TUI bootstrap (config/storage/adapters) instead
+    /// of a clear usage error, and if another instance was already
+    /// running, surfaced as a confusing "Database already open" error
+    /// instead of "unknown presence status: bogus".
+    UsageError(String),
+}
+
+/// Parse `termws <subcommand> ...` (`step15.md` Decision 6). `args`
+/// excludes the binary name (`argv[0]`).
+fn parse_cli_subcommand(args: &[String]) -> CliInvocation {
+    match args.first().map(String::as_str) {
+        Some("slack-send") => {
+            let Some(channel_id) = args.get(1) else {
+                return CliInvocation::UsageError(
+                    "usage: termws slack-send <channel> <text>".to_string(),
+                );
+            };
+            let Some(text) = args.get(2..).filter(|rest| !rest.is_empty()) else {
+                return CliInvocation::UsageError(
+                    "usage: termws slack-send <channel> <text>".to_string(),
+                );
+            };
+            CliInvocation::Request(IpcRequest::Dispatch(Command::SendSlackMessage {
+                channel_id: channel_id.clone(),
+                text: text.join(" "),
+            }))
+        }
+        Some("set-presence") => {
+            let Some(raw_status) = args.get(1) else {
+                return CliInvocation::UsageError(
+                    "usage: termws set-presence <active|away|offline|meeting|lunch> [text]"
+                        .to_string(),
+                );
+            };
+            let Some(status) = parse_presence_status(raw_status) else {
+                return CliInvocation::UsageError(format!(
+                    "unknown presence status: {raw_status} \
+                     (expected one of: active, away, offline, meeting, lunch)"
+                ));
+            };
+            let custom_text = args
+                .get(2..)
+                .filter(|rest| !rest.is_empty())
+                .map(|rest| rest.join(" "));
+            CliInvocation::Request(IpcRequest::Dispatch(Command::SetPresence {
+                status,
+                custom_text,
+            }))
+        }
+        Some("status") => CliInvocation::Request(IpcRequest::Status),
+        _ => CliInvocation::NotASubcommand,
+    }
+}
+
+fn parse_presence_status(s: &str) -> Option<PresenceStatus> {
+    match s {
+        "active" => Some(PresenceStatus::Active),
+        "away" => Some(PresenceStatus::Away),
+        "offline" => Some(PresenceStatus::Offline),
+        "meeting" => Some(PresenceStatus::Meeting),
+        "lunch" => Some(PresenceStatus::Lunch),
+        _ => None,
+    }
+}
+
+/// The directory an `IpcServer`/`IpcClient` resolves the socket/pipe
+/// under (`step15.md` Decision 5) -- the same directory `config.toml`
+/// already lives in, rather than a second directory-resolution scheme.
+fn ipc_socket_dir() -> PathBuf {
+    config::resolve_config_path()
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
+}
+
+/// Run as a one-shot IPC client: connect to an already-running
+/// `terminal-workspace` instance, send `request`, print the response, and
+/// return the process exit code (`step15.md` Decision 1 -- there is no
+/// separate headless daemon to start; if nothing is listening, this fails
+/// clearly rather than hanging or silently doing nothing).
+async fn run_cli_client(request: IpcRequest) -> i32 {
+    let dir = ipc_socket_dir();
+    match IpcClient::send(&dir, ipc::DEFAULT_SOCKET_NAME, &request).await {
+        Ok(IpcResponse::Ok) => {
+            println!("OK");
+            0
+        }
+        Ok(IpcResponse::Status(snapshot)) => {
+            println!("Slack: {}", snapshot.slack);
+            println!("GitHub: {}", snapshot.github);
+            println!("Calendar: {}", snapshot.calendar);
+            println!("Unread notifications: {}", snapshot.unread_notifications);
+            0
+        }
+        Ok(IpcResponse::Error(message)) => {
+            eprintln!("Error: {message}");
+            1
+        }
+        Err(e) => {
+            eprintln!(
+                "Could not reach a running terminal-workspace instance: {e}\n\
+                 Is it running? (`cargo run -p app` / the installed binary, in another terminal)"
+            );
+            1
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 0. `termws <subcommand> ...` (`step15.md`, `product-requirements.md`
+    //    §4 "Daemon mode & Local CLI Socket IPC") -- checked before any of
+    //    the normal bootstrap below (config load, storage, adapters) runs,
+    //    since a one-shot CLI-client invocation shouldn't pay any of that
+    //    cost: it just needs to talk to an already-running instance and
+    //    exit. `args()` excludes argv[0] (the binary path) to match every
+    //    other arg-parsing entry point in this file (`resolve_config_path`,
+    //    `merge_cli`).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match parse_cli_subcommand(&args) {
+        CliInvocation::Request(request) => std::process::exit(run_cli_client(request).await),
+        CliInvocation::UsageError(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+        CliInvocation::NotASubcommand => {}
+    }
+
     // 1. Load layered configuration (Default -> config.toml -> Env -> CLI).
     //    Zero Configuration: creates the config directory/file on first run
     //    if none exists yet (see docs/05-operations/configuration.md §4).
@@ -265,6 +460,38 @@ async fn main() -> Result<()> {
     let notification_repo = Arc::clone(&storage) as Arc<dyn NotificationRepository>;
     let (projector, read_model) = Projector::new(&presence_repo, &notification_repo).await?;
 
+    // 7b. Bind the local CLI socket/pipe (`step15.md`, ADR from
+    //     `product-requirements.md` §4) -- the running TUI process *is*
+    //     the daemon (Decision 1), reachable from a one-shot `termws
+    //     slack-send`/`set-presence`/`status` invocation (step 0 above, in
+    //     a *different* process). A bind failure (most commonly: another
+    //     instance is already running and holds the name) is logged and
+    //     otherwise ignored -- IPC is a convenience on top of the TUI, not
+    //     a requirement for it to work.
+    let ipc_dir = ipc_socket_dir();
+    match IpcServer::bind(&ipc_dir, ipc::DEFAULT_SOCKET_NAME) {
+        Ok(server) => {
+            let status_provider: Arc<dyn IpcStatusProvider> = Arc::new(AppStatusProvider {
+                read_model: Arc::clone(&read_model),
+                slack_adapter: Arc::clone(&slack_adapter),
+                github_adapter: Arc::clone(&github_adapter),
+                calendar_adapter: Arc::clone(&calendar_adapter),
+            });
+            let dispatcher_for_ipc = Arc::clone(&dispatcher);
+            tokio::spawn(async move {
+                server.serve(dispatcher_for_ipc, status_provider).await;
+            });
+            info!("IPC socket bound; `termws slack-send`/`set-presence`/`status` can reach this instance.");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to bind IPC socket (another instance may already be running) -- \
+                 the TUI itself is unaffected, but termws CLI subcommands will not reach it."
+            );
+        }
+    }
+
     // 8. Wire event reliability (retry/backoff + Dead Letter Queue — see
     //    docs/06-development/decisions/0003-event-bus.md's Phase 3
     //    amendment) and register the Projector as a handler.
@@ -343,4 +570,119 @@ async fn main() -> Result<()> {
 
     info!("Terminal Workspace exited cleanly.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn no_args_is_not_a_subcommand() {
+        assert!(matches!(
+            parse_cli_subcommand(&args(&[])),
+            CliInvocation::NotASubcommand
+        ));
+    }
+
+    #[test]
+    fn an_existing_cli_flag_is_not_mistaken_for_a_subcommand() {
+        // `--theme nord` is a real, existing merge_cli flag (config crate)
+        // -- must keep falling through to the normal TUI bootstrap, not be
+        // misread as an unrecognized subcommand.
+        assert!(matches!(
+            parse_cli_subcommand(&args(&["--theme", "nord"])),
+            CliInvocation::NotASubcommand
+        ));
+    }
+
+    #[test]
+    fn status_parses_to_a_status_request() {
+        assert!(matches!(
+            parse_cli_subcommand(&args(&["status"])),
+            CliInvocation::Request(IpcRequest::Status)
+        ));
+    }
+
+    #[test]
+    fn slack_send_with_channel_and_multi_word_text_parses_correctly() {
+        match parse_cli_subcommand(&args(&["slack-send", "#general", "hello", "there"])) {
+            CliInvocation::Request(IpcRequest::Dispatch(Command::SendSlackMessage {
+                channel_id,
+                text,
+            })) => {
+                assert_eq!(channel_id, "#general");
+                assert_eq!(text, "hello there");
+            }
+            other => panic!("expected a SendSlackMessage dispatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slack_send_missing_text_is_a_usage_error_not_a_fallthrough() {
+        // The real bug found manually testing this (step15.md Implementation
+        // Notes): this used to fall through to `NotASubcommand`, which meant
+        // the full TUI bootstrap ran and, if another instance already held
+        // the storage lock, failed with a confusing unrelated error instead
+        // of a clear usage message.
+        assert!(matches!(
+            parse_cli_subcommand(&args(&["slack-send", "#general"])),
+            CliInvocation::UsageError(_)
+        ));
+    }
+
+    #[test]
+    fn slack_send_missing_channel_is_a_usage_error() {
+        assert!(matches!(
+            parse_cli_subcommand(&args(&["slack-send"])),
+            CliInvocation::UsageError(_)
+        ));
+    }
+
+    #[test]
+    fn set_presence_with_a_valid_status_and_no_text_parses_correctly() {
+        match parse_cli_subcommand(&args(&["set-presence", "away"])) {
+            CliInvocation::Request(IpcRequest::Dispatch(Command::SetPresence {
+                status,
+                custom_text,
+            })) => {
+                assert_eq!(status, PresenceStatus::Away);
+                assert_eq!(custom_text, None);
+            }
+            other => panic!("expected a SetPresence dispatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_presence_with_a_valid_status_and_custom_text_parses_correctly() {
+        match parse_cli_subcommand(&args(&["set-presence", "lunch", "back", "at", "1"])) {
+            CliInvocation::Request(IpcRequest::Dispatch(Command::SetPresence {
+                status,
+                custom_text,
+            })) => {
+                assert_eq!(status, PresenceStatus::Lunch);
+                assert_eq!(custom_text, Some("back at 1".to_string()));
+            }
+            other => panic!("expected a SetPresence dispatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_presence_with_an_unknown_status_word_is_a_usage_error_not_a_fallthrough() {
+        assert!(matches!(
+            parse_cli_subcommand(&args(&["set-presence", "bogus"])),
+            CliInvocation::UsageError(_)
+        ));
+    }
+
+    #[test]
+    fn set_presence_missing_status_is_a_usage_error() {
+        assert!(matches!(
+            parse_cli_subcommand(&args(&["set-presence"])),
+            CliInvocation::UsageError(_)
+        ));
+    }
 }
