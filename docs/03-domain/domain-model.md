@@ -2,6 +2,8 @@
 
 This document defines the Aggregate Roots, Entities, Value Objects, and Repository interfaces for each Bounded Context.
 
+> **Implementation Status**: mostly accurate — the six repository traits below (`NotificationRepository`, `PresenceRepository`, `SettingsRepository`, `PluginRepository`, `WorkspaceRepository`, `FailedEventRepository`) all genuinely exist in `crates/domain/src/lib.rs` with near-identical method signatures, and are Architecture Freeze v1-frozen (`docs/06-development/development.md` §3). Two small naming drifts: every method here returns `Result<T, RepositoryError>`, but the real code returns `common::Result<T>` (`WorkspaceError`) — there is no separate `RepositoryError` type. `PluginRepository::register_plugin` is spelled `save_plugin_manifest` in the real trait.
+
 ---
 
 ## 1. Domain Entities & Value Objects

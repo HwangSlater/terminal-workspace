@@ -2,6 +2,8 @@
 
 This document details the CQRS design pattern implemented in the Terminal Workspace. State updates are strictly segregated into Write Commands and Read Projections.
 
+> **Implementation Status**: the CQRS **pattern** in §1 (Command -> Dispatcher -> Handler -> Domain Event -> Event Bus -> Projector -> Read Model -> UI rerender) is real and matches `crates/commands`/`crates/events` closely — including §3's `CommandHandler<C>` trait, which the real `commands::CommandHandler<C>` matches almost exactly (`type Output` + a single `common::Result<Self::Output>`, vs. this page's separate `Response`/`Error` associated types). §2 and §4's **concrete contents are not real**, though: the actual `Command` enum (`crates/commands/src/lib.rs`) has entirely different variants — `SetPresence`, `SendSlackMessage`, `Connect { source, token }`, `ApplySlackSelection`, `ApplySelection { source, items }`, `MarkNotificationRead`, `SyncAllAdapters` — not `CreateCalendarEvent`/`CreateTask`/`SubmitAiQuery` (Calendar is read-only with no create-event command, per `step12.md`; there is no Task context or AI Assistant command at all — `crates/assistant` is an unwired stub, see `docs/03-domain/assistant.md`'s own status note). The real `DashboardReadModel` only has `unread_notifications: Vec<NotificationItem>` and `team_presence: Vec<MemberPresence>` — no `current_workspace_layout` or `assistant_chat_history` field exists.
+
 ---
 
 ## 1. CQRS Execution Path

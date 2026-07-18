@@ -2,6 +2,12 @@
 
 This document details the boundaries, context mappings, and interaction definitions of the Domain-Driven Design (DDD) Bounded Contexts.
 
+> **Implementation Status**: this is a **conceptual DDD context map**, not a claim about crate boundaries — the actual workspace is organized by technical layer (`domain`, `commands`, `events`, `storage`, `integration`, `ui`, `plugin-host`/`plugin-sdk`, `ipc`, ...), not by these 8 contexts, so there's no 1:1 crate to check "isolation" against (relevant to `product-requirements.md` §4's "Full Bounded Context isolation" v1.0.0 line, which this project can't concretely verify against this document as written). Per-context reality:
+> - **Workspace, Notification, Presence, Integration**: real, in effect — their responsibilities as described exist in the code (`crates/domain`, `crates/commands`, `crates/integration`), just not as separate crates.
+> - **Plugin Context**: real as of Phase 14 (`step14.md`) — `crates/plugin-host`/`plugin-sdk`. "Interacts strictly through the Unified Registries" is not yet true, though: plugins don't register commands or UI panels yet (deliberately deferred, `step14.md`'s scope note).
+> - **Scheduler Context, Assistant Context**: **not built** — `crates/scheduler`/`crates/assistant` are unwired stubs; see those crates' own domain docs (`docs/03-domain/scheduler.md`, `assistant.md`) for their own status notes.
+> - **Task Context**: **does not exist at all** — no crate, no stub, nothing. `domain::IntegrationSource` does have `Jira`/`Gmail` variants reserved for future integrations, but every place that matches on them is an explicit no-op (`IntegrationSource::Jira => {}` in `crates/ui/src/lib.rs`), not a Task context implementation.
+
 ---
 
 ## 1. Context Map

@@ -2,6 +2,8 @@
 
 This document details the Scheduler Bounded Context, which governs reminders, timers, local agenda logging, and Pomodoro trackers.
 
+> **Implementation Status**: **nothing on this page is built.** `crates/scheduler/src/lib.rs` is a ~25-line stub: an `AgendaScheduler` struct holding an unused `event_bus` handle (`#[allow(dead_code)]`) and a single `run_loop(&self) -> Result<()>` method that only logs `"Scheduler time loop started."` and returns immediately — no deadline computation, no sleep loop, no persistence. None of `SchedulerEvent`/`TriggerPolicy`/`PomodoroState`/`RecurrenceRule` exist, and the `workspace.redb` `scheduler_events` table this page describes was never created (also worth noting: this page predates ADR-0014's SQLite→`redb` switch, so its data-layer assumption is doubly stale). `AgendaScheduler` is never constructed anywhere outside its own crate — not wired into `crates/app/src/main.rs`, no TUI panel. This is not on the v1.0.0 release scope (`product-requirements.md` §4); treat this whole document as a future-phase design sketch, not current behavior.
+
 ---
 
 ## 1. Domain Entities & Value Objects

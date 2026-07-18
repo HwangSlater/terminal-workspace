@@ -1,24 +1,5 @@
 # Commands
 
-status away
-status active
-status lunch
-status meeting
+> **Implementation Status**: this page is an early, never-filled-in outline — the space-separated syntax below (`status away`, `team watch`, `github prs`, ...) was never built, and none of `team`/`notify`/`dashboard` exist as commands at all. The real in-TUI command bar (`:` to open, `crates/ui/src/keyboard.rs`, `step9.md`/`step13.md`) uses slash-commands instead: `/send <channel> <text>` (Slack), `/away`/`/active`/`/offline`/`/meeting`/`/lunch [text]` (presence), with `Tab` autocomplete on command heads and `/send`'s channel argument. GitHub PRs and Calendar reminders aren't queried via a command at all — they appear automatically in the Notification panel once connected (`Ctrl+G`/`Ctrl+L`). Separately, Phase 15 (`step15.md`) added a **CLI-level** (not in-TUI) command surface — `termws slack-send <channel> <text>`, `termws set-presence <status> [text]`, `termws status` — for scripting against an already-running instance from another terminal; see `step15.md` and the README's usage section for the real, current command syntax on both surfaces.
 
-team
-team watch
-
-notify list
-notify mute
-
-dashboard
-dashboard compact
-
-github prs
-calendar today
-
-Each command should define:
-- Arguments
-- Examples
-- Exit codes
-- Error handling
+---

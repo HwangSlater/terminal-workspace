@@ -47,7 +47,7 @@ This means the Contributor Experience gap this section exists to manage has near
 - **Zero-Config Startup and local file fallback secrets**.
 
 ### v1.0.0 (Release)
-- Full Bounded Context isolation.
+- Full Bounded Context isolation. **Not concretely checkable as written** — see `docs/03-domain/bounded-context.md`'s Implementation Status note: the real workspace is organized by technical layer (crate per layer), not by the 8 DDD contexts that document maps, so there's no 1:1 boundary to verify "isolation" against. What *is* true: `Scheduler`/`Assistant`/`Task` contexts remain unbuilt (stub crates or nonexistent), so isolating them is moot until they exist.
 - WASM Sandboxed Plugin runtime. **Done** (Phase 14, `step14.md`, ADR-0002/0009/0017).
 - Multi-integration adapters (Slack, GitHub, Calendar). **Done** (Phases 6/10/12).
 - Local `redb` embedded key-value caching (ADR-0014; superseded the original SQLite plan). **Done** (Phase 3).

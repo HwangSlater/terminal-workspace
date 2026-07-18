@@ -2,6 +2,8 @@
 
 This document details the capability authorization system that validates and intercepts resource usage by guest plugins.
 
+> **Implementation Status (Phase 14, `step14.md` Decision 3)**: **nothing on this page is built.** The real `PermissionManager::verify_capability` (`crates/plugin-host/src/lib.rs`) is a stub that always returns `true`, honestly labeled as such in its own doc comment — no permission map, no `plugin.toml` manifest file/schema, no WASI `preopened_dir` filesystem restriction, no manifest-approval database record (which would be `redb`, not SQLite, per ADR-0014 — this page predates that decision too). `PluginCapability` (`crates/plugin-sdk/src/lib.rs`) defines four variants (`NetworkConnect`, `FsRead`, `FsWrite`, `SlackRead`) as a plain Rust enum a plugin's manifest *could* eventually use, but nothing reads or enforces them yet. This was a deliberate scope decision, not an oversight: `step14.md`'s Decision 3 chose to ship the sandbox/lifecycle/resource-limit plumbing first and defer capability enforcement until a real plugin actually needs one of these gated (the example plugins request none of them). Treat this whole document as a design sketch for that future phase, not a description of current behavior.
+
 ---
 
 ## 1. Capability Permission Map

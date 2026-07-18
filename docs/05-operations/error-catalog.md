@@ -2,6 +2,14 @@
 
 This document catalogues all system errors, recovery mechanisms, and recovery policies.
 
+> **Implementation Status**: this whole page is a **design sketch that was never built as specified** — the real error handling took a different, simpler shape, and some of the recovery protocols below are partially real under different names while others don't exist at all.
+>
+> - **No `ErrorCode` enum, no `ERR_*` class codes anywhere.** The real error type is `common::WorkspaceError` (`crates/common/src/lib.rs`) — six `String`-payload variants (`Storage`, `Integration`, `Plugin`, `Configuration`, `Security`, `Internal`), not a catalog of specific named codes. There is no `error.log` file; errors surface through the unified `tracing` logging pipeline (`docs/05-operations/logging.md`).
+> - **Storage is `redb`, not SQL** (ADR-0014, superseding whatever this page assumed) — "DB rebuild" on lock/corruption isn't a real trigger; `redb`'s failure modes and this project's actual response to them aren't documented here at all yet.
+> - **Rate limiting is partially real, under different names**: Slack/GitHub adapters do recognize `429`/rate-limit headers and back off via a shared consecutive-failure state machine (`crates/integration/src/polling.rs`, `step9.md`/`step10.md`) — but there's no literal `INTEGRATION_RATE_LIMITED` code, no `Retry-After`-driven 30-second-start exponential backoff as specifically described, and the TUI shows this as the existing `Reconnecting` connection status (yellow "재연결 중...", `crates/ui/src/render.rs`), not a `[Throttled]` indicator.
+> - **Plugin trap handling is real, but simpler than described** (Phase 14, `step14.md`): `crates/plugin-host/src/lib.rs` does catch a WASM trap (fuel exhaustion, OOM, guest panic), log it via `tracing` (with the guest's own wasm backtrace, not a fixed `PLUGIN_PANIC`/`PLUGIN_CPU_LIMIT_EXCEEDED` code), and drop the plugin instance from its loaded set (the `Suspended` state exists in effect, if not by that literal name). What's **not** real: no `CommandRegistry` removal step (plugins don't register commands yet — `step14.md`'s deliberately narrow scope), no `SystemAlert` event published on a plugin trap, and no `/plugin reload <id>` command (no plugin-facing commands exist at all yet). A trapped plugin stays unloaded until the next full restart.
+> - **Auth failures**: real (a missing/invalid Slack/GitHub token surfaces as a `WorkspaceError::Integration`, and the in-app setup overlays — `Ctrl+S`/`Ctrl+G` — are exactly the "prompt setup modal" this page describes), but again not through a named `SLACK_AUTH_FAILED`/`GITHUB_AUTH_FAILED` code.
+
 ---
 
 ## 1. System Error Classifications

@@ -2,6 +2,8 @@
 
 This document details the Assistant Bounded Context, which orchestrates local LLM integrations, conversational streams, and contextual tools.
 
+> **Implementation Status**: **nothing on this page is built.** `crates/assistant/src/lib.rs` is a ~25-line stub: an `AssistantManager` struct with a single `ask(&self, _query: &str) -> Result<String>` method that ignores its input and always returns the literal string `"AI Assistant stub response."`. None of `Conversation`/`Message`/`ToolDefinition`, the agent tool-call flow, or the five listed tools exist. `AssistantManager` is never constructed anywhere outside its own crate — not wired into `crates/app/src/main.rs`, no TUI panel, no `/ask` command. This is not on the v1.0.0 release scope (`product-requirements.md` §4); treat this whole document as a future-phase design sketch, not current behavior.
+
 ---
 
 ## 1. Domain Entities & Value Objects
