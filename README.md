@@ -66,7 +66,7 @@ GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSand
 | `Ctrl+P` | Slack 채널/사용자 선택 |
 | `Ctrl+Q` | 종료 |
 
-Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표시됩니다. 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](step5.md)를 참고하세요.
+Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표시됩니다. 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](docs/07-implementation-log/step5.md)를 참고하세요.
 
 ### Slack 연동
 
@@ -80,13 +80,13 @@ Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표
 
 헤더에 Slack 연결 상태(연결됨/재연결 중/연결 안 됨 등)가 실시간으로 표시됩니다 — 폴링이 백그라운드에서 끊기거나 복구돼도 키를 누르지 않아도 바로 반영됩니다.
 
-자세한 내용은 [`docs/04-extensions/integrations/slack.md`](docs/04-extensions/integrations/slack.md), [`step7.md`](step7.md), [`step8.md`](step8.md)를 참고하세요.
+자세한 내용은 [`docs/04-extensions/integrations/slack.md`](docs/04-extensions/integrations/slack.md), [`step7.md`](docs/07-implementation-log/step7.md), [`step8.md`](docs/07-implementation-log/step8.md)를 참고하세요.
 
 ---
 
 ## 진행 현황
 
-이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`step2.md`](step2.md), [`step3.md`](step3.md), [`step4.md`](step4.md), [`step5.md`](step5.md), [`step6.md`](step6.md), [`step7.md`](step7.md), [`step8.md`](step8.md), [`step9.md`](step9.md)를 참고하세요.
+이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step2.md` ~ `step9.md`를 참고하세요.
 
 ## 문서
 

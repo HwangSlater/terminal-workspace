@@ -2,7 +2,7 @@
 
 Welcome to the central portal for the Terminal-first Developer Workspace. This document structures the complete specification suite, establishes reading hierarchies, and declares the **Architecture Freeze v1** guidelines.
 
-`docs/` is organized into six numbered folders, one per category below, so the reading order in §1 matches the physical layout on disk — `01-product/` through `06-development/`. `decisions/` (ADRs) lives under `06-development/`, and per-integration specs (`slack.md`, `github.md`, etc.) live under `04-extensions/integrations/`.
+`docs/` is organized into numbered folders, one per category below, so the reading order in §1 matches the physical layout on disk — `01-product/` through `06-development/`, plus `07-implementation-log/` (chronological, not topical — see §2.7). `decisions/` (ADRs) lives under `06-development/`, and per-integration specs (`slack.md`, `github.md`, etc.) live under `04-extensions/integrations/`.
 
 ---
 
@@ -106,6 +106,19 @@ To understand the system design, we recommend reading the specifications in the 
   14. [ADR 0014: Storage Engine Reconsideration (SQLite → redb)](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0014-storage-engine-reconsideration.md) — supersedes ADR-0004's engine choice.
   15. [ADR 0015: Release Packaging via cargo-dist](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0015-release-packaging.md)
   16. [ADR 0016: Extending `enum Event` with `IntegrationStatusChanged`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0016-event-enum-extension.md)
+
+### 🗓️ 7. Implementation Log (`07-implementation-log/`)
+
+Unlike `01-product/` through `06-development/` above, this folder isn't topical — it's **chronological**: one design document per implementation phase, written *before* that phase's code (per this project's Document-First workflow), then amended in place with an "Implementation Notes" section describing what actually happened once it was built. Read topical docs first for what the system does; read these for why a given phase was scoped the way it was and what changed between the plan and the result.
+
+- [`step2.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step2.md) — Phase 2: core infrastructure (Event Bus, Registry, Config, Secrets, Logging).
+- [`step3.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step3.md) — Phase 3: Storage + CQRS write path.
+- [`step4.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step4.md) — Phase 4: `cargo-dist` release packaging (ADR-0015).
+- [`step5.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step5.md) — Phase 5: interactive TUI shell, CQRS read path.
+- [`step6.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step6.md) — Phase 6: Slack integration (polling, Bot Token).
+- [`step7.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step7.md) — Phase 7: in-app Slack setup (`Ctrl+S`), OS keyring + encrypted-file storage.
+- [`step8.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step8.md) — Phase 8: in-app channel/user picker (`Ctrl+P`).
+- [`step9.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step9.md) — Phase 9: command bar dispatch (`/send`, presence shortcuts), live connection status (ADR-0016).
 
 ---
 
