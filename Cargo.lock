@@ -2476,6 +2476,7 @@ dependencies = [
  "common",
  "crossterm",
  "domain",
+ "events",
  "integration",
  "ratatui",
  "registry",

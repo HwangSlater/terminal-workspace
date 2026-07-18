@@ -16,6 +16,7 @@ use crossterm::event::{Event as CrosstermEvent, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use events::{Event as DomainEvent, EventBus, IntegrationConnectionStatus};
 use integration::SlackPicker;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -23,7 +24,7 @@ use registry::UiRegistry;
 use state::{PickerRow, SlackPickerStatus, SlackSetupStatus};
 use std::io::Stdout;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 type Backend = CrosstermBackend<Stdout>;
 
@@ -47,6 +48,16 @@ pub struct TuiRenderer {
     /// through `Command`/`CommandHandler` (see `SlackSelectionApplier`'s
     /// doc comment in `crates/commands` for the full reasoning).
     slack_picker: Arc<dyn SlackPicker>,
+    /// Subscribed to in `run_loop` so the render loop redraws on background
+    /// changes (a new message, a status change) instead of only ever on a
+    /// keypress/resize (`step9.md`, ADR-0016) — before this phase
+    /// `TuiRenderer` never read from the bus at all, only `Projector` did.
+    event_bus: Arc<dyn EventBus>,
+    /// Slack's status as of construction (`SlackAdapter::health_check`,
+    /// read once in `crates/app/src/main.rs` before the bus has published
+    /// anything) — seeds `WorkspaceState.slack_connection_status`; kept
+    /// current after that purely by the `event_bus` subscription.
+    initial_slack_status: IntegrationConnectionStatus,
 }
 
 impl TuiRenderer {
@@ -57,12 +68,16 @@ impl TuiRenderer {
         read_model: SharedReadModel,
         command_dispatcher: Arc<dyn CommandDispatcher>,
         slack_picker: Arc<dyn SlackPicker>,
+        event_bus: Arc<dyn EventBus>,
+        initial_slack_status: IntegrationConnectionStatus,
     ) -> Self {
         Self {
             ui_registry,
             read_model,
             command_dispatcher,
             slack_picker,
+            event_bus,
+            initial_slack_status,
         }
     }
 
@@ -71,12 +86,18 @@ impl TuiRenderer {
     pub async fn run_loop(&self) -> Result<()> {
         install_panic_hook();
         let mut terminal = setup_terminal()?;
-        let mut state = WorkspaceState::default();
+        let mut state = WorkspaceState {
+            slack_connection_status: self.initial_slack_status.clone(),
+            ..WorkspaceState::default()
+        };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         spawn_input_reader(tx);
+        let mut event_rx = self.event_bus.subscribe();
 
-        let result = self.event_loop(&mut terminal, &mut state, &mut rx).await;
+        let result = self
+            .event_loop(&mut terminal, &mut state, &mut rx, &mut event_rx)
+            .await;
 
         restore_terminal(&mut terminal)?;
         result
@@ -87,36 +108,72 @@ impl TuiRenderer {
         terminal: &mut Terminal<Backend>,
         state: &mut WorkspaceState,
         rx: &mut mpsc::UnboundedReceiver<InputEvent>,
+        event_rx: &mut broadcast::Receiver<DomainEvent>,
     ) -> Result<()> {
         self.draw(terminal, state).await?;
 
-        while let Some(event) = rx.recv().await {
-            if let InputEvent::Key(key) = event {
-                match handle_key(state, key) {
-                    KeyOutcome::DispatchToPane(action) => {
-                        self.apply_pane_action(state, action).await;
+        loop {
+            tokio::select! {
+                input = rx.recv() => {
+                    let Some(input) = input else { break; };
+                    if let InputEvent::Key(key) = input {
+                        match handle_key(state, key) {
+                            KeyOutcome::DispatchToPane(action) => {
+                                self.apply_pane_action(state, action).await;
+                            }
+                            KeyOutcome::SubmitSlackToken(token) => {
+                                self.submit_slack_token(terminal, state, token).await?;
+                            }
+                            KeyOutcome::OpenSlackPicker => {
+                                self.open_slack_picker(terminal, state).await?;
+                            }
+                            KeyOutcome::SubmitSlackSelection(channel_ids, watched_user_ids) => {
+                                self.submit_slack_selection(terminal, state, channel_ids, watched_user_ids)
+                                    .await?;
+                            }
+                            KeyOutcome::SubmitCommand(command) => {
+                                self.submit_command(terminal, state, command).await?;
+                            }
+                            KeyOutcome::Handled | KeyOutcome::Ignored => {}
+                        }
+                        if state.should_quit {
+                            break;
+                        }
                     }
-                    KeyOutcome::SubmitSlackToken(token) => {
-                        self.submit_slack_token(terminal, state, token).await?;
-                    }
-                    KeyOutcome::OpenSlackPicker => {
-                        self.open_slack_picker(terminal, state).await?;
-                    }
-                    KeyOutcome::SubmitSlackSelection(channel_ids, watched_user_ids) => {
-                        self.submit_slack_selection(terminal, state, channel_ids, watched_user_ids)
-                            .await?;
-                    }
-                    KeyOutcome::Handled | KeyOutcome::Ignored => {}
+                    // `InputEvent::Resize` carries no data to apply to
+                    // `state` — `ratatui::Terminal::draw` re-queries the
+                    // backend's current size on every call
+                    // (`Terminal::autoresize`), so simply redrawing is
+                    // enough to pick up the new dimensions.
+                    self.draw(terminal, state).await?;
                 }
-                if state.should_quit {
-                    break;
+                received = event_rx.recv() => {
+                    match received {
+                        Ok(DomainEvent::IntegrationStatusChanged { status, .. }) => {
+                            state.slack_connection_status = status;
+                            self.draw(terminal, state).await?;
+                        }
+                        Ok(_) => {
+                            // Some other event (new message, presence
+                            // change) may have just updated
+                            // DashboardReadModel via Projector -- redraw so
+                            // it's visible now, not only on the user's next
+                            // keypress.
+                            self.draw(terminal, state).await?;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // Missed some events under load; whatever state
+                            // they'd have produced is still reachable from
+                            // the next event or keypress -- nothing to
+                            // reconcile specifically here.
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            // Bus is gone; the input loop (Ctrl+Q) is still
+                            // the way this function returns, not this arm.
+                        }
+                    }
                 }
             }
-            // `InputEvent::Resize` carries no data to apply to `state` —
-            // `ratatui::Terminal::draw` re-queries the backend's current
-            // size on every call (`Terminal::autoresize`), so simply
-            // redrawing is enough to pick up the new dimensions.
-            self.draw(terminal, state).await?;
         }
         Ok(())
     }
@@ -229,6 +286,23 @@ impl TuiRenderer {
             Ok(()) => SlackPickerStatus::Saved,
             Err(e) => SlackPickerStatus::Failed(e.to_string()),
         };
+        Ok(())
+    }
+
+    /// Dispatches a command bar line that parsed successfully (`/send`,
+    /// `/away`, ... — `step9.md`). A failure is surfaced the same way an
+    /// unresolved `/send` target is (`state.cmd_buffer.last_error`), not a
+    /// silent drop — the user typed a deliberate command, they should know
+    /// if it didn't work.
+    async fn submit_command(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+        command: Command,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+        let result = self.command_dispatcher.dispatch(command).await;
+        state.cmd_buffer.last_error = result.err().map(|e| e.to_string());
         Ok(())
     }
 

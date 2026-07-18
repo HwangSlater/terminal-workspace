@@ -10,7 +10,7 @@ use domain::{
     IntegrationSource, MemberPresence, NotificationId, NotificationItem, PresenceStatus,
     PriorityLevel, UserId,
 };
-use events::{Event, EventBus};
+use events::{Event, EventBus, IntegrationConnectionStatus};
 use secrecy::ExposeSecret;
 use secrets::{SecretProvider, SecretWriter};
 use serde::Deserialize;
@@ -187,6 +187,14 @@ impl SlackConnector for SlackAdapter {
             state.status = ConnectionStatus::Connecting;
             state.consecutive_failures = 0;
         }
+        // Instant feedback for the setup overlay (step7.md) rather than
+        // waiting for the first poll cycle to publish anything.
+        let _ = event_bus
+            .publish(Event::IntegrationStatusChanged {
+                source: IntegrationSource::Slack,
+                status: IntegrationConnectionStatus::Connecting,
+            })
+            .await;
         // Idempotent whether this is the first connection or a reconnect
         // with a replacement token: stop whatever poll loop (if any) is
         // already running before starting a fresh one, so a reconnect
@@ -383,18 +391,27 @@ impl SlackPoller {
         loop {
             let (result, retry_after) = self.poll_once(&event_bus, &token).await;
 
-            let (status, prev_was_failed) = {
+            let (status, prev_status) = {
                 let mut state = self.state.write().await;
                 let prev_status = state.status.clone();
                 let (failures, status) =
                     next_status(&prev_status, state.consecutive_failures, result);
                 state.consecutive_failures = failures;
                 state.status = status.clone();
-                (status, matches!(prev_status, ConnectionStatus::Failed(_)))
+                (status, prev_status)
             };
 
+            if status != prev_status {
+                let _ = event_bus
+                    .publish(Event::IntegrationStatusChanged {
+                        source: IntegrationSource::Slack,
+                        status: to_event_status(&status),
+                    })
+                    .await;
+            }
+
             if let ConnectionStatus::Failed(reason) = &status {
-                if !prev_was_failed {
+                if !matches!(prev_status, ConnectionStatus::Failed(_)) {
                     let _ = event_bus
                         .publish(Event::SystemAlert(format!(
                             "Slack integration failed: {reason}"
@@ -450,6 +467,19 @@ fn next_status(
             };
             (failures, status)
         }
+    }
+}
+
+/// Maps this crate's own `ConnectionStatus` to the structurally-identical
+/// but separately-defined `events::IntegrationConnectionStatus` (ADR-0016
+/// explains why `crates/events` can't just re-export this crate's type).
+fn to_event_status(status: &ConnectionStatus) -> IntegrationConnectionStatus {
+    match status {
+        ConnectionStatus::Disconnected => IntegrationConnectionStatus::Disconnected,
+        ConnectionStatus::Connecting => IntegrationConnectionStatus::Connecting,
+        ConnectionStatus::Connected => IntegrationConnectionStatus::Connected,
+        ConnectionStatus::Reconnecting => IntegrationConnectionStatus::Reconnecting,
+        ConnectionStatus::Failed(reason) => IntegrationConnectionStatus::Failed(reason.clone()),
     }
 }
 
@@ -999,6 +1029,56 @@ mod tests {
         assert_eq!(
             adapter.health_check().await.unwrap(),
             ConnectionStatus::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_publishes_an_integration_status_changed_event() {
+        let (adapter, _writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8));
+        let mut rx = event_bus.subscribe();
+
+        adapter
+            .connect(
+                Arc::clone(&event_bus) as Arc<dyn EventBus>,
+                "xoxb-test".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let event = rx
+            .try_recv()
+            .expect("connect() must publish a status event");
+        match event {
+            Event::IntegrationStatusChanged { source, status } => {
+                assert_eq!(source, IntegrationSource::Slack);
+                assert_eq!(status, IntegrationConnectionStatus::Connecting);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_event_status_maps_every_variant() {
+        assert_eq!(
+            to_event_status(&ConnectionStatus::Disconnected),
+            IntegrationConnectionStatus::Disconnected
+        );
+        assert_eq!(
+            to_event_status(&ConnectionStatus::Connecting),
+            IntegrationConnectionStatus::Connecting
+        );
+        assert_eq!(
+            to_event_status(&ConnectionStatus::Connected),
+            IntegrationConnectionStatus::Connected
+        );
+        assert_eq!(
+            to_event_status(&ConnectionStatus::Reconnecting),
+            IntegrationConnectionStatus::Reconnecting
+        );
+        assert_eq!(
+            to_event_status(&ConnectionStatus::Failed("x".into())),
+            IntegrationConnectionStatus::Failed("x".into())
         );
     }
 

@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 
 /// Strongly-typed CQRS system write commands.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     /// Mutate developer status.
     SetPresence {
@@ -344,6 +344,12 @@ impl EventHandler for Projector {
             Event::SystemAlert(_) | Event::PluginCustomEvent { .. } => {
                 // Not surfaced in the read model yet — no panel renders
                 // system alerts or plugin events in Phase 5's scope.
+            }
+            Event::IntegrationStatusChanged { .. } => {
+                // Not a DashboardReadModel concern — crates/ui subscribes
+                // to the EventBus directly for this one (step9.md, ADR-0016)
+                // so the header can update without waiting for a redraw
+                // trigger the Projector would otherwise gate on.
             }
         }
         Ok(())

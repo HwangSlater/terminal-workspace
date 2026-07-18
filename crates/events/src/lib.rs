@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 use common::Result;
-use domain::{FailedEventRecord, FailedEventRepository, MemberPresence, NotificationItem};
+use domain::{
+    FailedEventRecord, FailedEventRepository, IntegrationSource, MemberPresence, NotificationItem,
+};
 use logging::{spans::event_span, TraceContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -36,6 +38,36 @@ pub enum Event {
         /// Serialized event payload.
         payload_json: String,
     },
+
+    /// An integration adapter's connection status changed. Added in
+    /// ADR-0016 (Phase 9) so `crates/ui` can show it live via an `EventBus`
+    /// subscription instead of only-as-of-the-last-keypress polling.
+    IntegrationStatusChanged {
+        /// Which integration this status belongs to.
+        source: IntegrationSource,
+        /// The new status.
+        status: IntegrationConnectionStatus,
+    },
+}
+
+/// Connection status for an integration adapter, decoupled from any
+/// specific adapter crate's own status type. **Not** a re-export of
+/// `integration::ConnectionStatus` — `crates/events` cannot depend on
+/// `crates/integration`, which already depends on `crates/events` for
+/// `EventBus`/`Event` (see ADR-0016). Adapters map their own status type
+/// into this one at the point of publishing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntegrationConnectionStatus {
+    /// Never configured, or configuration was cleared.
+    Disconnected,
+    /// Credential found; the first sync attempt hasn't completed yet.
+    Connecting,
+    /// Last sync attempt succeeded.
+    Connected,
+    /// Recovering from consecutive failures.
+    Reconnecting,
+    /// Exceeded the failure threshold; the reason is included for display.
+    Failed(String),
 }
 
 /// Abstract Event Handler processing inbound Event Enum messages.
@@ -175,6 +207,7 @@ fn event_type_name(event: &Event) -> &'static str {
         Event::CalendarReminderTriggered(_) => "CalendarReminderTriggered",
         Event::SystemAlert(_) => "SystemAlert",
         Event::PluginCustomEvent { .. } => "PluginCustomEvent",
+        Event::IntegrationStatusChanged { .. } => "IntegrationStatusChanged",
     }
 }
 

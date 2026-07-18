@@ -56,6 +56,11 @@ Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표
 2. 앱을 실행하고 `Ctrl+S`를 눌러 Bot Token을 붙여넣은 뒤 Enter — 저장과 동시에 바로 연결을 시도합니다. 토큰은 OS 키체인(Windows 자격 증명 관리자 / macOS 키체인 / Linux Secret Service)에 영구 저장되고, 없으면 로컬 암호화 파일로 대체 저장됩니다. 설정 파일(`config.toml`)에는 절대 들어가지 않습니다.
 3. 메시지를 받을 채널에 봇을 초대하세요 (`/invite @봇이름`) — 봇이 없는 채널은 애초에 메시지를 못 읽습니다.
 4. `Ctrl+P`를 눌러 채널/팀원 목록을 불러오고, `j`/`k`로 이동, `Space`로 선택, `Enter`로 저장하세요 — `config.toml`에 바로 반영되고 폴링도 재시작 없이 바로 적용됩니다.
+5. 명령줄(`:`)에서 바로 메시지를 보내거나 상태를 바꿀 수 있습니다 (`Ctrl+P`로 불러온 채널 이름 기준):
+   - `/send #채널이름 메시지` — Slack 메시지 전송
+   - `/away`, `/active`, `/offline`, `/meeting`, `/lunch [메시지]` — 내 상태 변경
+
+헤더에 Slack 연결 상태(연결됨/재연결 중/연결 안 됨 등)가 실시간으로 표시됩니다 — 폴링이 백그라운드에서 끊기거나 복구돼도 키를 누르지 않아도 바로 반영됩니다.
 
 자세한 내용은 [`docs/04-extensions/integrations/slack.md`](docs/04-extensions/integrations/slack.md), [`step7.md`](step7.md), [`step8.md`](step8.md)를 참고하세요.
 
@@ -63,7 +68,7 @@ Slack을 연동하면 팀·알림 패널에 실제 메시지/프레즌스가 표
 
 ## 진행 현황
 
-이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`step2.md`](step2.md), [`step3.md`](step3.md), [`step4.md`](step4.md), [`step5.md`](step5.md), [`step6.md`](step6.md), [`step7.md`](step7.md), [`step8.md`](step8.md)를 참고하세요.
+이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`step2.md`](step2.md), [`step3.md`](step3.md), [`step4.md`](step4.md), [`step5.md`](step5.md), [`step6.md`](step6.md), [`step7.md`](step7.md), [`step8.md`](step8.md), [`step9.md`](step9.md)를 참고하세요.
 
 ## 문서
 

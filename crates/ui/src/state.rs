@@ -1,5 +1,6 @@
 //! `docs/03-domain/workspace-state.md`.
 
+use events::IntegrationConnectionStatus;
 use registry::UiDockSlot;
 use std::collections::HashMap;
 
@@ -131,6 +132,11 @@ pub struct CommandBufferState {
     pub history: Vec<String>,
     /// Position while scrolling through `history`; `None` means "not browsing history".
     pub history_index: Option<usize>,
+    /// Set when the last submitted line looked like a command attempt
+    /// (leading `/`) but failed to parse or resolve (e.g. `/send #unknown`)
+    /// — shown inline so a deliberate command attempt doesn't silently do
+    /// nothing. Plain chat-style text (no leading `/`) never sets this.
+    pub last_error: Option<String>,
 }
 
 /// `docs/03-domain/workspace-state.md`'s `WorkspaceState`. `DockSlot` is not
@@ -154,6 +160,9 @@ pub struct WorkspaceState {
     pub slack_setup: SlackSetupState,
     /// Slack channel/user picker overlay's fetched rows and selection.
     pub slack_picker: SlackPickerState,
+    /// Slack's connection status, kept current by an `EventBus` subscription
+    /// in the run loop (`step9.md`, ADR-0016) — not polled, genuinely live.
+    pub slack_connection_status: IntegrationConnectionStatus,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
     /// Selected index within the focused pane's list (Team/Notification).
@@ -174,6 +183,10 @@ impl Default for WorkspaceState {
             active_overlay: OverlayKind::default(),
             slack_setup: SlackSetupState::default(),
             slack_picker: SlackPickerState::default(),
+            // Placeholder until `TuiRenderer::run_loop` overwrites it with
+            // the real value from `SlackAdapter::health_check` at boot —
+            // `WorkspaceState::default()` has no way to reach that itself.
+            slack_connection_status: IntegrationConnectionStatus::Disconnected,
             active_theme: "default-dark".to_string(),
             selected_index: 0,
             should_quit: false,

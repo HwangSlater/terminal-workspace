@@ -10,6 +10,7 @@ domain = { path = "../domain" }
 commands = { path = "../commands" }
 registry = { path = "../registry" }
 integration = { path = "../integration" }
+events = { path = "../events" }
 ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true

@@ -8,7 +8,9 @@ use commands::{
 use common::Result;
 use config::AppConfig;
 use domain::{FailedEventRepository, NotificationRepository, PresenceRepository, PresenceStatus};
-use events::{EventBus, EventDispatcher, EventHandler, InProcessEventBus};
+use events::{
+    EventBus, EventDispatcher, EventHandler, InProcessEventBus, IntegrationConnectionStatus,
+};
 use integration::{
     ConnectionStatus, IntegrationAdapter, SlackAdapter, SlackConfig, SlackConnector,
     SlackMessenger, SlackPicker,
@@ -54,6 +56,20 @@ impl SlackSelectionApplier for ConfigFileSlackSelectionApplier {
         self.slack_adapter
             .update_selection(event_bus, channel_ids, watched_user_ids)
             .await
+    }
+}
+
+/// Maps `integration::ConnectionStatus` to the structurally-identical but
+/// separately-defined `events::IntegrationConnectionStatus` (ADR-0016) —
+/// used once at boot to seed `TuiRenderer`'s initial header status before
+/// anything's been published to the event bus yet.
+fn to_event_status(status: ConnectionStatus) -> IntegrationConnectionStatus {
+    match status {
+        ConnectionStatus::Disconnected => IntegrationConnectionStatus::Disconnected,
+        ConnectionStatus::Connecting => IntegrationConnectionStatus::Connecting,
+        ConnectionStatus::Connected => IntegrationConnectionStatus::Connected,
+        ConnectionStatus::Reconnecting => IntegrationConnectionStatus::Reconnecting,
+        ConnectionStatus::Failed(reason) => IntegrationConnectionStatus::Failed(reason),
     }
 }
 
@@ -167,13 +183,18 @@ async fn main() -> Result<()> {
     // 10. Enter the interactive TUI shell (Phase 5) — runs until Ctrl+Q.
     //     Passing `dispatcher` (Phase 7) is what lets the setup overlay's
     //     `Ctrl+S` actually mutate anything — before this the TUI was pure
-    //     CQRS read side with no write path of its own.
+    //     CQRS read side with no write path of its own. `event_bus` +
+    //     the initial status (Phase 9) let the header stay live via a
+    //     direct EventBus subscription instead of polling on redraw.
+    let initial_slack_status = to_event_status(slack_adapter.health_check().await?);
     let ui_registry = Arc::new(InMemoryUiRegistry::new());
     let renderer = TuiRenderer::new(
         ui_registry,
         read_model,
         Arc::clone(&dispatcher),
         slack_picker,
+        Arc::clone(&event_bus) as Arc<dyn EventBus>,
+        initial_slack_status,
     );
     renderer.run_loop().await?;
 

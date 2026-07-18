@@ -105,6 +105,7 @@ To understand the system design, we recommend reading the specifications in the 
   13. [ADR 0013: Rule Engine Integration](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0013-rule-engine.md)
   14. [ADR 0014: Storage Engine Reconsideration (SQLite → redb)](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0014-storage-engine-reconsideration.md) — supersedes ADR-0004's engine choice.
   15. [ADR 0015: Release Packaging via cargo-dist](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0015-release-packaging.md)
+  16. [ADR 0016: Extending `enum Event` with `IntegrationStatusChanged`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/06-development/decisions/0016-event-enum-extension.md)
 
 ---
 

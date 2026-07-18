@@ -4,6 +4,7 @@
 use crate::state::{FocusMode, OverlayKind, SlackPickerStatus, SlackSetupStatus, WorkspaceState};
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, PresenceStatus};
+use events::IntegrationConnectionStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -77,6 +78,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 Ctrl+1~4             패널로 바로 이동 (팀/알림/캘린더/로그)\n\
                 j/k, ↑/↓             선택한 패널 안에서 위아래 이동\n\
                 :                    명령줄 입력\n\
+                  /send #채널 메시지   Slack 메시지 보내기\n\
+                  /away, /active,\n\
+                  /offline, /meeting,\n\
+                  /lunch [메시지]      내 상태 변경\n\
                 Ctrl+S               Slack 연결 설정\n\
                 Ctrl+P               Slack 채널/사용자 선택\n\
                 Esc                  닫기 / Normal 모드로 복귀\n\
@@ -268,15 +273,30 @@ fn dock_block<'a>(title: &'a str, slot: UiDockSlot, state: &WorkspaceState) -> B
         .border_style(style)
 }
 
-fn render_header(frame: &mut Frame, area: Rect, _state: &WorkspaceState) {
+fn render_header(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let (status_text, status_color) = slack_status_label(&state.slack_connection_status);
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             "Terminal Workspace",
             Style::default().add_modifier(Modifier::BOLD),
         ),
+        Span::raw("  |  "),
+        Span::styled(status_text, Style::default().fg(status_color)),
         Span::raw("  |  도움말: ?   종료: Ctrl+Q"),
     ]));
     frame.render_widget(header, area);
+}
+
+/// Kept current purely by the `EventBus` subscription in `crates/ui/src/lib.rs`'s
+/// event loop (`step9.md`, ADR-0016) — not polled, genuinely live.
+fn slack_status_label(status: &IntegrationConnectionStatus) -> (&'static str, Color) {
+    match status {
+        IntegrationConnectionStatus::Disconnected => ("Slack: 연결 안 됨", Color::DarkGray),
+        IntegrationConnectionStatus::Connecting => ("Slack: 연결 중...", Color::Yellow),
+        IntegrationConnectionStatus::Connected => ("Slack: 연결됨", Color::Green),
+        IntegrationConnectionStatus::Reconnecting => ("Slack: 재연결 중...", Color::Yellow),
+        IntegrationConnectionStatus::Failed(_) => ("Slack: 연결 실패", Color::Red),
+    }
 }
 
 fn render_team_panel(
@@ -364,6 +384,18 @@ fn render_bottom_dock_placeholder(frame: &mut Frame, area: Rect) {
 }
 
 fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    // A command-parse/dispatch error (`step9.md`) stays visible even after
+    // Esc leaves Input mode -- the user typed a deliberate command and
+    // should be able to read what went wrong, not have it vanish the
+    // instant the buffer closes.
+    if let Some(error) = &state.cmd_buffer.last_error {
+        let text = format!(":{}  {error}", state.cmd_buffer.raw_text);
+        frame.render_widget(
+            Paragraph::new(text).style(Style::default().fg(Color::Red)),
+            area,
+        );
+        return;
+    }
     let text = match state.focus_mode {
         FocusMode::Input => format!(":{}", state.cmd_buffer.raw_text),
         _ => String::new(),
@@ -381,7 +413,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{PickerRow, SlackPickerState, SlackSetupState};
+    use crate::state::{CommandBufferState, PickerRow, SlackPickerState, SlackSetupState};
     use commands::DashboardReadModel;
     use domain::{MemberPresence, PresenceStatus, UserId};
     use ratatui::backend::TestBackend;
@@ -685,5 +717,53 @@ mod tests {
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "invalid_auth"));
+    }
+
+    #[test]
+    fn header_shows_connected_status() {
+        let state = WorkspaceState {
+            slack_connection_status: IntegrationConnectionStatus::Connected,
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "Slack: 연결됨"));
+    }
+
+    #[test]
+    fn header_shows_reconnecting_status() {
+        let state = WorkspaceState {
+            slack_connection_status: IntegrationConnectionStatus::Reconnecting,
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "재연결"));
+    }
+
+    #[test]
+    fn header_shows_disconnected_status_by_default() {
+        let text = draw(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+        );
+        assert!(contains_ignoring_whitespace(&text, "연결 안"));
+    }
+
+    #[test]
+    fn command_bar_shows_a_parse_error_even_after_leaving_input_mode() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Normal,
+            cmd_buffer: CommandBufferState {
+                last_error: Some("'nope' 채널을 찾을 수 없습니다".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(
+            &text,
+            "채널을 찾을 수 없습니다"
+        ));
     }
 }
