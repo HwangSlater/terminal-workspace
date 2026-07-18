@@ -34,6 +34,7 @@ ipc = { path = "../ipc" }
 integration = { path = "../integration" }
 scheduler = { path = "../scheduler" }
 assistant = { path = "../assistant" }
+notifications = { path = "../notifications" }
 
 async-trait.workspace = true
 uuid = { workspace = true, features = ["v4"] }

@@ -1,0 +1,16 @@
+[package]
+name = "notifications"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+common = { path = "../common" }
+domain = { path = "../domain" }
+events = { path = "../events" }
+notify-rust.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

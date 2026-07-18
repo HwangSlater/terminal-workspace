@@ -18,7 +18,8 @@ members = [
     "crates/ipc",
     "crates/integration",
     "crates/scheduler",
-    "crates/assistant"
+    "crates/assistant",
+    "crates/notifications"
 ]
 # Example plugins are built independently via `cargo component build`
 # (`step14.md` Decision 2), targeting wasm32 with `crate-type = ["cdylib"]`
@@ -51,6 +52,7 @@ redb = "2"
 reqwest = { version = "0.11", features = ["json"] }
 keyring = { version = "4", default-features = false, features = ["v1", "windows-native-keyring-store", "apple-native-keyring-store", "zbus-secret-service-keyring-store"] }
 aes-gcm = "0.11"
+notify-rust = "4.18"
 
 # Shared Workspace Lints
 [workspace.lints.rust]

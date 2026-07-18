@@ -21,6 +21,7 @@ use integration::{
 };
 use ipc::{IpcClient, IpcRequest, IpcResponse, IpcServer, IpcStatusProvider, IpcStatusSnapshot};
 use logging::{init_logger, spans::application_span};
+use notifications::DesktopNotifier;
 use plugin_host::{PermissionManager, PluginHostConfig, PluginHostManager, PluginPresenceProvider};
 use registry::InMemoryUiRegistry;
 use scheduler::AgendaScheduler;
@@ -572,6 +573,16 @@ async fn main() -> Result<()> {
             .await;
         info!("Plugin host started.");
     }
+
+    // 8c. Desktop notifications (`step21.md`) -- the whole reason this
+    //     exists: know about a Slack DM/GitHub PR/Calendar reminder/
+    //     Pomodoro session-end even while working in a different terminal
+    //     or app entirely, not only when actually looking at this TUI.
+    //     Registered as an `EventHandler` the same way the Projector and
+    //     plugin host are above; always-on, no config toggle this phase.
+    event_dispatcher
+        .register_handler(Arc::new(DesktopNotifier::new()) as Arc<dyn EventHandler>)
+        .await;
 
     event_dispatcher.start();
 
