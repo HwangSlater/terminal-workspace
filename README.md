@@ -60,12 +60,13 @@ GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSand
 
 | 키 | 동작 |
 | :--- | :--- |
-| `Tab` / `Shift+Tab` | 패널 포커스를 순서대로 이동 |
-| `Ctrl+1` ~ `Ctrl+4` | 팀 / 알림 / 캘린더 / 로그 패널로 바로 이동 |
+| `Tab` / `Shift+Tab` | 패널 포커스를 순서대로 이동 (팀 → 알림 → 캘린더) |
+| `Ctrl+1` ~ `Ctrl+3` | 팀 / 알림 / 캘린더 패널로 바로 이동 |
+| `Ctrl+4` | 로그 보기 — 최근 기록 전체를 보여주는 오버레이를 바로 엶 |
 | `j`/`k`, `↑`/`↓` | 포커스된 패널 안에서 위아래로 선택 이동 |
 | `:` | 명령줄 입력 모드로 전환 |
 | `?` | 도움말 팝업 열기 |
-| `Esc` | 명령줄/도움말 닫고 Normal 모드로 복귀 |
+| `Esc` | 명령줄/도움말/오버레이 닫고 Normal 모드로 복귀 |
 | `Ctrl+S` | Slack 연결 설정 |
 | `Ctrl+P` | Slack 채널/사용자 선택 |
 | `Ctrl+G` | GitHub 연결 설정 |
@@ -136,13 +137,38 @@ cargo run -p app -- status
 
 자세한 내용은 [`docs/01-product/user-flows.md`](docs/01-product/user-flows.md) §3, [`step15.md`](docs/07-implementation-log/step15.md)를 참고하세요.
 
+### Pomodoro 타이머 (Phase 18)
+
+명령줄에서 `/pomodoro start [작업분] [휴식분]`(기본 25/5분), `/pomodoro pause`(일시정지/재개 토글), `/pomodoro reset`으로 조작합니다. 실행 중에는 헤더에 남은 시간이 실시간으로 표시되고(`🍅 24:35 (Work)`), 작업/휴식 세션이 끝나면 터미널 벨이 울리고 자동으로 다음 모드로 전환됩니다.
+
+자세한 내용은 [`step18.md`](docs/07-implementation-log/step18.md)를 참고하세요.
+
+### 로그 보기 (Phase 17, Phase 19/20에서 오버레이로 재설계)
+
+`Ctrl+4`를 누르면 앱 자체의 로그 기록(최근 200줄, 비밀값은 자동으로 가려짐)을 큰 오버레이로 볼 수 있습니다. `ERROR`/`WARN` 줄은 색으로 구분되어 눈에 띕니다. 처음엔 화면 하단에 항상 떠 있는 1줄짜리 패널이었는데, 실제로는 최근 한 줄만 보여서 쓸모가 거의 없다는 게 확인되어(80칸 최소 터미널에서 실측) 지금의 온디맨드 오버레이 방식으로 바뀌었습니다.
+
+자세한 내용은 [`step17.md`](docs/07-implementation-log/step17.md), [`step19.md`](docs/07-implementation-log/step19.md)를 참고하세요.
+
+### 알림을 놓치지 않으려면 (Phase 21, Phase 22)
+
+Slack DM, GitHub PR 리뷰 요청, Calendar 리마인드, Pomodoro 세션 종료 — 이 4가지는 다른 터미널이나 다른 앱을 보고 있어도 알아챌 수 있도록 두 가지 채널로 알려줍니다:
+
+- **데스크톱(OS) 토스트 알림**: Windows/macOS/Linux 어디서든 화면에 시스템 팝업이 뜹니다 (Windows에서 실제 동작 확인됨; Linux/macOS는 다음 실제 CI 실행에서 확인 예정).
+- **터미널 탭/창 제목**: 안 읽은 알림이 있으면 탭 제목이 `Terminal Workspace (3)`처럼 바뀝니다 — 다른 탭에서 작업 중이어도 탭 바에서 바로 보입니다.
+
+둘 다 별도 설정 없이 항상 켜져 있고, 실패해도(예: 알림 데몬이 없는 헤드리스 Linux) 앱 자체는 영향받지 않습니다. `Ctrl+Q`로 종료하면 탭 제목은 원래대로 돌아갑니다.
+
+자세한 내용은 [`step21.md`](docs/07-implementation-log/step21.md), [`step22.md`](docs/07-implementation-log/step22.md)를 참고하세요.
+
 ---
 
 ## 진행 현황
 
 이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시), Phase 10(두 번째 연동인 GitHub — 폴링, 연결 설정, 저장소 피커까지 한 단계에 구현), Phase 11(연동 2개로 반복되던 패턴을 `Command::Connect`/`ApplySelection` 등으로 일반화 — Calendar 붙이기 전에 정리), Phase 12(세 번째 연동인 Calendar — OAuth 대신 비공개 iCal 주소, 반복 일정 인식), Phase 13(명령줄 Tab 자동완성 — 명령어/채널명, Calendar 패널 실데이터 연결 + 좁은 화면 패널 전환 버그 수정), Phase 14(WASM Component Model 기반 플러그인 런타임 — 샌드박스 생명주기, fuel/메모리 제한, `cargo-component`로 빌드한 실제 예제 플러그인 3종으로 검증), Phase 15(데몬 모드 & 로컬 CLI 소켓 IPC — `termws slack-send`/`set-presence`/`status`, v1.0.0의 마지막 기능 항목)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step2.md` ~ `step15.md`를 참고하세요.
 
-v1.0.0 릴리스 스코프(`docs/01-product/product-requirements.md` §4) 중 기능 항목은 모두 구현되었습니다 — 남은 것은 실제 공개 릴리스 태그/발표뿐입니다.
+v1.0.0 릴리스 스코프(`docs/01-product/product-requirements.md` §4) 중 기능 항목은 모두 구현되었습니다 — 원래 계획에는 실제 공개 릴리스 태그/발표만 남아 있었습니다.
+
+**v1.0.0 스코프 밖에서 이후에 추가된 것들** (실사용 피드백 기반): Phase 16(플러그인 `get-member-presence` + 실제 capability 강제), Phase 17(로그 패널 — 이후 Phase 19/20에서 오버레이로 재설계), Phase 18(Pomodoro 타이머), Phase 19(UI 전반 재검토 — 색상 코딩, 패널 카운트 표시, 도움말 문서 보완), Phase 20(80칸 최소 터미널에서 헤더가 잘리던 실제 버그 수정), Phase 21(데스크톱 OS 알림), Phase 22(터미널 탭/창 제목에 안 읽음 개수 표시). 남은 건 여전히 AI Assistant 패널과 실제 공개 릴리스입니다 — 진행 상황은 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step16.md` ~ `step22.md`를 참고하세요.
 
 ## 문서
 
