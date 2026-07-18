@@ -5,10 +5,16 @@
 .DESCRIPTION
   Confirms `rustup` is installed and runs `cargo check --workspace` so a new
   contributor gets an unambiguous "you're ready to build" or "here's what's
-  wrong" answer. No native/C toolchain install is needed for this workspace
-  today — every dependency (including storage, via `redb`) is pure Rust; see
+  wrong" answer. Storage (`redb`) and every crate except `crates/plugin-host`
+  are pure Rust and need nothing beyond `rustup`; see
   docs/06-development/platform-support.md and ADR-0014 for why this script
-  used to do a lot more than this.
+  used to do a lot more than this. Since Phase 14 (ADR-0017),
+  `crates/plugin-host` (`wasmtime`) needs a real C compiler -- MSVC Build
+  Tools or the README's WinLibs MinGW -- and `cargo check --workspace` below
+  will fail with a clear `cc`/linker error if neither is present. This
+  script doesn't pre-detect that (Windows has no single reliable "is there a
+  C compiler on PATH" check the way `command -v cc` does on Linux/macOS) --
+  see platform-support.md §3.1 if `cargo check` fails here.
 
 .EXAMPLE
   .\scripts\setup.ps1

@@ -2,7 +2,7 @@
 
 This document details the UI state context governing active viewports, split panels, focal nodes, and custom terminal buffers.
 
-> **Implementation Status (Phase 5, amended Phase 7/8/9/10)**: Implemented in `crates/ui`. One deviation from the original sketch: `DockSlot` is not a new enum — it reuses `registry::UiDockSlot` (already `Left`/`Center`/`Right`/`Bottom` per ADR-0012) rather than duplicating the same four variants under a different name. `docking_registry`/`active_panel_focus` key off that shared type. Fields added since the original Phase 5 sketch: `selected_index`/`should_quit` (Phase 5, omitted from the first draft below but present from the start of the real implementation); `active_overlay`/`slack_setup`/`slack_picker` (Phase 7/8 — the `Ctrl+S` token-entry and `Ctrl+P` channel/user-picker overlays; `step7.md`, `step8.md`); `slack_connection_status` (Phase 9, `step9.md`); `github_setup`/`github_picker`/`github_connection_status` (Phase 10, `step10.md` — `Ctrl+G`/`Ctrl+R`, structurally identical to their Slack counterparts). The sketch below is kept current, not historical.
+> **Implementation Status (Phase 5, amended Phase 7/8/9/10/12)**: Implemented in `crates/ui`. One deviation from the original sketch: `DockSlot` is not a new enum — it reuses `registry::UiDockSlot` (already `Left`/`Center`/`Right`/`Bottom` per ADR-0012) rather than duplicating the same four variants under a different name. `docking_registry`/`active_panel_focus` key off that shared type. Fields added since the original Phase 5 sketch: `selected_index`/`should_quit` (Phase 5, omitted from the first draft below but present from the start of the real implementation); `active_overlay`/`slack_setup`/`slack_picker` (Phase 7/8 — the `Ctrl+S` token-entry and `Ctrl+P` channel/user-picker overlays; `step7.md`, `step8.md`); `slack_connection_status` (Phase 9, `step9.md`); `github_setup`/`github_picker`/`github_connection_status` (Phase 10, `step10.md` — `Ctrl+G`/`Ctrl+R`, structurally identical to their Slack counterparts); `calendar_setup`/`calendar_connection_status` (Phase 12, `step12.md` — `Ctrl+L` only, no picker overlay since Calendar's secret-URL auth model has no "list my calendars" discovery call). The sketch below is kept current, not historical.
 
 ---
 
@@ -25,6 +25,8 @@ pub struct WorkspaceState {
     pub github_setup: GitHubSetupState,
     pub github_picker: GitHubPickerState,
     pub github_connection_status: IntegrationConnectionStatus,
+    pub calendar_setup: CalendarSetupState,
+    pub calendar_connection_status: IntegrationConnectionStatus,
     pub active_theme: String,
     pub selected_index: usize,
     pub should_quit: bool,
@@ -71,17 +73,18 @@ pub struct CommandBufferState {
 
 ---
 
-## 3. Overlay State (Phase 7/8/10)
+## 3. Overlay State (Phase 7/8/10/12)
 
 Which dialog `FocusMode::Overlay` is currently showing, and each dialog's own state:
 
 ```rust
 pub enum OverlayKind {
     Help,
-    SlackSetup,    // Ctrl+S — step7.md
-    SlackPicker,   // Ctrl+P — step8.md
-    GitHubSetup,   // Ctrl+G — step10.md
-    GitHubPicker,  // Ctrl+R — step10.md
+    SlackSetup,     // Ctrl+S — step7.md
+    SlackPicker,    // Ctrl+P — step8.md
+    GitHubSetup,    // Ctrl+G — step10.md
+    GitHubPicker,   // Ctrl+R — step10.md
+    CalendarSetup,  // Ctrl+L — step12.md (no picker variant — see below)
 }
 
 pub struct SlackSetupState {
@@ -116,6 +119,19 @@ pub struct GitHubPickerState {
     pub status: GitHubPickerStatus,
 }
 pub enum GitHubPickerStatus { Idle, Loading, Loaded, Saving, Saved, Failed(String) }
+
+// Calendar's setup state (Phase 12, step12.md) is structurally identical
+// to Slack's/GitHub's -- CalendarSetupState/CalendarSetupStatus mirror
+// GitHubSetupState/GitHubSetupStatus field-for-field, even though the
+// "token" is actually a secret iCal feed URL. There is no
+// CalendarPickerState/CalendarPickerStatus at all: the secret-URL auth
+// model has no "list my calendars" discovery call, so there's nothing
+// for a picker to list (step12.md Decision 1's consequence).
+pub struct CalendarSetupState {
+    pub token_input: String,
+    pub status: CalendarSetupStatus,
+}
+pub enum CalendarSetupStatus { Idle, Connecting, Connected, Failed(String) }
 ```
 
 ---
@@ -123,5 +139,5 @@ pub enum GitHubPickerStatus { Idle, Loading, Loaded, Saving, Saved, Failed(Strin
 ## 4. State Mutation Rules
 1. **Focus Shift**: Tab key increments the `focused_dock` Slot clockwise. Arrow keys steer selection within the active focused panel.
 2. **Dynamic Docking**: When a plugin registers a panel, it specifies the target `DockSlot`. If a panel already occupies the target slot, it is appended to the slot's array and rendered as a Tab within that slot container.
-3. **State Querying (CQRS)**: The TUI renders states based on the active `WorkspaceState` and `DashboardReadModel`. `SlackSetupState`/`SlackPickerState`/`GitHubSetupState`/`GitHubPickerState` submit through the CQRS write path when confirmed (`Command::Connect`/`ApplySlackSelection`/`ApplySelection` — the last two generalized in `step11.md` from separate per-integration variants once GitHub proved which shapes actually repeat) — `WorkspaceState` itself is never queried or dispatched *as* a command, only used to render and to capture in-progress input.
-4. **Connection status**: `slack_connection_status`/`github_connection_status` are kept current purely by an `EventBus` subscription in `crates/ui`'s run loop (`step9.md`, ADR-0016), routed by `Event::IntegrationStatusChanged`'s `source` field — never polled.
+3. **State Querying (CQRS)**: The TUI renders states based on the active `WorkspaceState` and `DashboardReadModel`. `SlackSetupState`/`SlackPickerState`/`GitHubSetupState`/`GitHubPickerState`/`CalendarSetupState` submit through the CQRS write path when confirmed (`Command::Connect`/`ApplySlackSelection`/`ApplySelection` — the last two generalized in `step11.md` from separate per-integration variants once GitHub proved which shapes actually repeat) — `WorkspaceState` itself is never queried or dispatched *as* a command, only used to render and to capture in-progress input.
+4. **Connection status**: `slack_connection_status`/`github_connection_status`/`calendar_connection_status` are kept current purely by an `EventBus` subscription in `crates/ui`'s run loop (`step9.md`, ADR-0016), routed by `Event::IntegrationStatusChanged`'s `source` field — never polled.

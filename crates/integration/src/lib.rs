@@ -6,10 +6,12 @@ use events::EventBus;
 use secrets::SecretProvider;
 use std::sync::Arc;
 
+pub mod calendar;
 pub mod github;
 pub(crate) mod polling;
 pub mod slack;
 
+pub use calendar::{CalendarAdapter, CalendarConfig};
 pub use github::{GitHubAdapter, GitHubConfig};
 pub use slack::{
     PickerChannel, PickerUser, SlackAdapter, SlackConfig, SlackMessenger, SlackPicker,

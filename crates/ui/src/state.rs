@@ -22,7 +22,7 @@ pub enum FocusMode {
 }
 
 /// Which dialog is showing while `focus_mode == FocusMode::Overlay`
-/// (`step7.md`, `step8.md`, `step10.md`).
+/// (`step7.md`, `step8.md`, `step10.md`, `step12.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum OverlayKind {
     /// Static keybinding reference.
@@ -36,6 +36,11 @@ pub enum OverlayKind {
     GitHubSetup,
     /// Repository picker (`Ctrl+R`, `step10.md`).
     GitHubPicker,
+    /// In-app Calendar secret iCal URL entry (`Ctrl+L`, `step12.md`). No
+    /// picker overlay exists for Calendar — there's no "list my calendars"
+    /// discovery call under the secret-URL auth model (`step12.md`
+    /// Decision 1's consequence).
+    CalendarSetup,
 }
 
 /// One selectable row in the Slack channel/user picker (`step8.md`) — a
@@ -167,6 +172,36 @@ pub struct GitHubPickerState {
     pub status: GitHubPickerStatus,
 }
 
+/// Outcome of the last `Command::Connect` dispatch, shown inline in the
+/// Calendar setup overlay. Structurally identical to
+/// [`GitHubSetupStatus`]/[`SlackSetupStatus`] — same "duplicate structure
+/// per integration" choice (`step10.md` Decision 1).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CalendarSetupStatus {
+    /// No connection attempt made yet this overlay session.
+    #[default]
+    Idle,
+    /// `Command::Connect` dispatched, awaiting the result.
+    Connecting,
+    /// The command returned successfully.
+    Connected,
+    /// The command returned an error; the message is shown to the user.
+    Failed(String),
+}
+
+/// Text input + last outcome for the Calendar setup overlay (`step12.md`).
+/// The "token" here is the calendar's secret iCal feed URL, not a short
+/// bearer string — masked the same way regardless, since it's still a
+/// bearer credential (leaking it grants read access to the calendar).
+#[derive(Debug, Clone, Default)]
+pub struct CalendarSetupState {
+    /// URL as typed so far — rendered masked, never shown in the clear or
+    /// pushed into the command bar's history.
+    pub token_input: String,
+    /// Result of the most recent connection attempt, if any.
+    pub status: CalendarSetupStatus,
+}
+
 /// `docs/03-domain/workspace-state.md`'s `ActiveLayout`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActiveLayout {
@@ -235,6 +270,12 @@ pub struct WorkspaceState {
     /// GitHub's connection status, kept current the same way
     /// `slack_connection_status` is (`step10.md`).
     pub github_connection_status: IntegrationConnectionStatus,
+    /// Calendar setup overlay's text input and last connection outcome.
+    pub calendar_setup: CalendarSetupState,
+    /// Calendar's connection status, kept current the same way
+    /// `slack_connection_status` is (`step12.md`). No picker state exists
+    /// for Calendar (`step12.md` Decision 1's consequence).
+    pub calendar_connection_status: IntegrationConnectionStatus,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
     /// Selected index within the focused pane's list (Team/Notification).
@@ -263,6 +304,9 @@ impl Default for WorkspaceState {
             github_picker: GitHubPickerState::default(),
             // Same placeholder reasoning as slack_connection_status above.
             github_connection_status: IntegrationConnectionStatus::Disconnected,
+            calendar_setup: CalendarSetupState::default(),
+            // Same placeholder reasoning as slack_connection_status above.
+            calendar_connection_status: IntegrationConnectionStatus::Disconnected,
             active_theme: "default-dark".to_string(),
             selected_index: 0,
             should_quit: false,

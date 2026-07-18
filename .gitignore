@@ -1,4 +1,8 @@
 /target
+# Example plugins (examples/plugins/*) are excluded from the root workspace
+# (Cargo.toml's `exclude`, step14.md) and build into their own separate
+# target/ directories -- not covered by the anchored /target pattern above.
+examples/plugins/*/target/
 **/*.rs.bk
 Cargo.lock.orig
 .DS_Store

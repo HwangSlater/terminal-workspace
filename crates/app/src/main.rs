@@ -15,10 +15,12 @@ use events::{
     EventBus, EventDispatcher, EventHandler, InProcessEventBus, IntegrationConnectionStatus,
 };
 use integration::{
-    ConnectionStatus, GitHubAdapter, GitHubConfig, IntegrationAdapter, IntegrationConnector,
-    Picker, SlackAdapter, SlackConfig, SlackMessenger, SlackPicker,
+    CalendarAdapter, CalendarConfig, ConnectionStatus, GitHubAdapter, GitHubConfig,
+    IntegrationAdapter, IntegrationConnector, Picker, SlackAdapter, SlackConfig, SlackMessenger,
+    SlackPicker,
 };
 use logging::{init_logger, spans::application_span};
+use plugin_host::{PermissionManager, PluginHostConfig, PluginHostManager};
 use registry::InMemoryUiRegistry;
 use secrets::{SecretProviderChain, SecretWriter};
 use std::collections::HashMap;
@@ -171,6 +173,23 @@ async fn main() -> Result<()> {
             base_config: Mutex::new(config.clone()),
         });
 
+    // 4c. Calendar's equivalent of step 4 (`step12.md`) — always
+    //     constructed for the same "the setup overlay needs something to
+    //     connect through" reason. No messenger, no picker, no selection
+    //     applier: Calendar is read-only with no "list my calendars"
+    //     discovery call under the secret-URL auth model (`step12.md`
+    //     Decision 1's consequence), so there is nothing beyond a
+    //     connector to wire up here.
+    let calendar_adapter = Arc::new(CalendarAdapter::new(
+        CalendarConfig {
+            lookahead_hours: config.integrations.calendar.lookahead_hours,
+            sync_interval_secs: config.integrations.calendar.sync_interval_secs,
+        },
+        Arc::clone(&secret_chain) as Arc<dyn SecretWriter>,
+    ));
+    calendar_adapter.initialize(secret_chain.as_ref()).await?;
+    let calendar_connector = Arc::clone(&calendar_adapter) as Arc<dyn IntegrationConnector>;
+
     // 5. Wire the CQRS write path: Command -> WorkspaceCommandHandler ->
     //    Storage + EventBus (see docs/06-development/decisions/0007-cqrs.md).
     //    Connectors/selection-appliers are keyed registries (`step11.md`)
@@ -180,6 +199,7 @@ async fn main() -> Result<()> {
     let mut connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>> = HashMap::new();
     connectors.insert(IntegrationSource::Slack, slack_connector);
     connectors.insert(IntegrationSource::GitHub, github_connector);
+    connectors.insert(IntegrationSource::Calendar, calendar_connector);
     let mut selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>> =
         HashMap::new();
     selection_appliers.insert(IntegrationSource::GitHub, github_selection_applier);
@@ -225,6 +245,18 @@ async fn main() -> Result<()> {
         info!("GitHub adapter started.");
     }
 
+    // 6c. Calendar's equivalent of step 6 (`step12.md`), same reasoning.
+    let calendar_already_connected = !matches!(
+        calendar_adapter.health_check().await?,
+        ConnectionStatus::Disconnected
+    );
+    if config.integrations.calendar.enabled || calendar_already_connected {
+        calendar_adapter
+            .start(Arc::clone(&event_bus) as Arc<dyn EventBus>)
+            .await?;
+        info!("Calendar adapter started.");
+    }
+
     // 7. Wire the CQRS read path (Phase 5): Projector keeps a
     //    DashboardReadModel current for the TUI to render from — closes
     //    the read path docs/06-development/decisions/0007-cqrs.md deferred
@@ -241,6 +273,32 @@ async fn main() -> Result<()> {
     event_dispatcher
         .register_handler(Arc::new(projector) as Arc<dyn EventHandler>)
         .await;
+
+    // 8b. Plugin runtime (`step14.md`, ADR-0002/0009/0017): default-off,
+    //     mirroring every integration's `enabled` toggle (Decision 4) —
+    //     nothing under `crates/plugin-host` loads or runs unless a
+    //     contributor both flips `[plugins].enabled` and points
+    //     `directory`/`allowed_list` at a real plugin. Registered as an
+    //     `EventHandler` the same way the Projector is above, so every
+    //     `Event` on the shared bus reaches each loaded plugin's
+    //     `on-event` export.
+    let plugin_host = Arc::new(PluginHostManager::new(
+        PluginHostConfig {
+            directory: config.plugins.directory.clone(),
+            allowed_list: config.plugins.allowed_list.clone(),
+        },
+        Arc::clone(&event_bus) as Arc<dyn EventBus>,
+        PermissionManager::new(),
+    )?);
+    if config.plugins.enabled {
+        plugin_host.initialize()?;
+        plugin_host.load_all().await?;
+        event_dispatcher
+            .register_handler(Arc::clone(&plugin_host) as Arc<dyn EventHandler>)
+            .await;
+        info!("Plugin host started.");
+    }
+
     event_dispatcher.start();
 
     // 9. Prove the write path end-to-end with a startup presence command.
@@ -260,6 +318,7 @@ async fn main() -> Result<()> {
     //     direct EventBus subscription instead of polling on redraw.
     let initial_slack_status = to_event_status(slack_adapter.health_check().await?);
     let initial_github_status = to_event_status(github_adapter.health_check().await?);
+    let initial_calendar_status = to_event_status(calendar_adapter.health_check().await?);
     let ui_registry = Arc::new(InMemoryUiRegistry::new());
     let mut pickers: HashMap<IntegrationSource, Arc<dyn Picker>> = HashMap::new();
     pickers.insert(IntegrationSource::GitHub, github_picker);
@@ -272,8 +331,15 @@ async fn main() -> Result<()> {
         Arc::clone(&event_bus) as Arc<dyn EventBus>,
         initial_slack_status,
         initial_github_status,
+        initial_calendar_status,
     );
     renderer.run_loop().await?;
+
+    // 11. Give every loaded plugin a chance to flush/clean up
+    //     (`plugin-lifecycle.md`'s `Active -> Terminated -> Unloaded`
+    //     transition) before the process exits. A no-op when the plugin
+    //     runtime was never enabled (empty plugin set).
+    plugin_host.shutdown_all().await;
 
     info!("Terminal Workspace exited cleanly.");
     Ok(())

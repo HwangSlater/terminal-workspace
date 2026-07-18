@@ -121,6 +121,9 @@ Unlike `01-product/` through `06-development/` above, this folder isn't topical 
 - [`step9.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step9.md) — Phase 9: command bar dispatch (`/send`, presence shortcuts), live connection status (ADR-0016).
 - [`step10.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step10.md) — Phase 10: GitHub integration (polling, `Ctrl+G` setup, `Ctrl+R` repo picker — full treatment in one phase, not spread across multiple phases like Slack's).
 - [`step11.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step11.md) — Phase 11: integration registry generalization (`Command::Connect`/`ApplySelection`, keyed connector/picker/applier registries) — done ahead of Calendar (v0.4) rather than after, since Calendar wasn't going to be the last integration.
+- [`step12.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step12.md) — Phase 12: Calendar integration (secret iCal feed URL over OAuth, `RRULE` expansion via `rrule`/`ical`, `Ctrl+L` setup, no picker overlay).
+- [`step13.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step13.md) — Phase 13: command bar `Tab` autocomplete (command heads + `/send` channel names, shell-style cycling) — plus two real UI bugs found and fixed along the way: the Calendar dock panel was still a static "not implemented" stub after Phase 12 shipped, and Team/Calendar were completely unreachable below the 120-column sidebar-collapse width.
+- [`step14.md`](file:///c:/Users/pc/Desktop/terminal-workspace-docs/docs/07-implementation-log/step14.md) — Phase 14: plugin runtime (WASM Component Model via `wasmtime`/`wit-bindgen`, ADR-0017's scoped C-compiler exception, `cargo-component`-built example plugins proving load/lifecycle/fuel-limit/memory-limit end-to-end with real traps, not mocks).
 
 ---
 

@@ -2,6 +2,8 @@
 
 This document details the WebAssembly Interface Type (WIT) schemas defining the host imports and guest exports for the plugin boundary.
 
+> **Implementation Status (Phase 14, `step14.md`, ADR-0017)**: the real contract lives at `crates/plugin-sdk/wit/plugin-sdk.wit`, trimmed from the draft below to this phase's confirmed host-function scope (`step14.md` Decision 3): `host-services` exposes only `log` and `publish-event`. The `types` interface (`presence-status`/`notification`) and `get-member-presence` shown in §1 below are **not** in the real file — nothing in this phase's example plugin (`examples/plugins/hello`) reads host state, and adding them speculatively would repeat the "don't build for hypothetical future needs" mistake this project has otherwise avoided. Add them back (and wire real `PluginCapability` enforcement, `crates/plugin-host`'s `PermissionManager`) once a real plugin actually needs to read presence. §2's code sketches also have the wrong file paths — see `crates/plugin-sdk/src/lib.rs` (guest) and `crates/plugin-host/src/lib.rs` (host, inside a `mod bindings` — the macro's generated code collides with `common::Result` at crate-root scope otherwise) for the real invocations.
+
 ---
 
 ## 1. WebAssembly Interface Type Definition (`plugin-sdk.wit`)

@@ -3,13 +3,20 @@
 //! diagram, not a new design.
 
 use crate::state::{
-    FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind, SlackPickerState,
-    SlackPickerStatus, SlackSetupStatus, WorkspaceState,
+    CalendarSetupStatus, FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind,
+    SlackPickerState, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
 };
 use commands::Command;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::{IntegrationSource, PresenceStatus};
 use registry::UiDockSlot;
+
+/// Every recognized command head, in the same order `parse_command`
+/// matches them — the single source of truth `compute_suggestions`
+/// (`step13.md`) filters against, so the two can't drift apart.
+const COMMAND_HEADS: &[&str] = &[
+    "/send", "/away", "/active", "/offline", "/meeting", "/lunch",
+];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
 /// focus clockwise/counter-clockwise through visible layout panes").
@@ -100,6 +107,7 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
             OverlayKind::SlackPicker => capture_slack_picker_input(state, key),
             OverlayKind::GitHubSetup => capture_github_setup_input(state, key),
             OverlayKind::GitHubPicker => capture_github_picker_input(state, key),
+            OverlayKind::CalendarSetup => capture_calendar_setup_input(state, key),
         },
         FocusMode::Normal => {
             if let Some(outcome) = try_global_shortcut(state, key) {
@@ -148,6 +156,12 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.active_overlay = OverlayKind::GitHubPicker;
             state.github_picker.status = GitHubPickerStatus::Loading;
             Some(KeyOutcome::OpenPicker(IntegrationSource::GitHub))
+        }
+        (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::CalendarSetup;
+            state.calendar_setup.status = CalendarSetupStatus::Idle;
+            Some(KeyOutcome::Handled)
         }
         (KeyCode::Tab, _) => {
             focus_dock(state, 1);
@@ -298,6 +312,31 @@ fn capture_github_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyO
     }
 }
 
+/// Text capture for the Calendar setup overlay's secret-URL field. Mirrors
+/// `capture_github_setup_input`/`capture_slack_setup_input` exactly
+/// (`step12.md`) — the field holds a URL instead of a short token, but the
+/// capture semantics (append/backspace-from-the-end, submit on non-empty
+/// `Enter`) don't care about that distinction.
+fn capture_calendar_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let setup = &mut state.calendar_setup;
+    match key.code {
+        KeyCode::Char(c) => {
+            setup.token_input.push(c);
+            KeyOutcome::Handled
+        }
+        KeyCode::Backspace => {
+            setup.token_input.pop();
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter if !setup.token_input.is_empty() => {
+            let token = std::mem::take(&mut setup.token_input);
+            setup.status = CalendarSetupStatus::Connecting;
+            KeyOutcome::SubmitToken(IntegrationSource::Calendar, token)
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
 /// Navigation + selection for the GitHub repo picker overlay (`step10.md`).
 /// Simpler than `capture_slack_picker_input`: one list, not a combined
 /// channels-then-users index space, so there's no split-index arithmetic to
@@ -348,6 +387,7 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
             let buf = &mut state.cmd_buffer;
             buf.raw_text.insert(buf.cursor_position, c);
             buf.cursor_position += c.len_utf8();
+            refresh_suggestions(state);
             None
         }
         KeyCode::Backspace => {
@@ -357,6 +397,11 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
                 buf.raw_text.remove(new_pos);
                 buf.cursor_position = new_pos;
             }
+            refresh_suggestions(state);
+            None
+        }
+        KeyCode::Tab => {
+            apply_next_suggestion(state);
             None
         }
         KeyCode::Enter => {
@@ -366,6 +411,8 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
             let text = std::mem::take(&mut state.cmd_buffer.raw_text);
             state.cmd_buffer.cursor_position = 0;
             state.cmd_buffer.history_index = None;
+            state.cmd_buffer.autocomplete_suggestions = Vec::new();
+            state.cmd_buffer.selected_suggestion_index = None;
 
             let result = parse_command(&text, &state.slack_picker);
             state.cmd_buffer.history.push(text);
@@ -390,6 +437,88 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
             None
         }
         _ => None,
+    }
+}
+
+/// Recomputes `autocomplete_suggestions` fresh from the current text/cursor
+/// (`step13.md`) — called after every edit so candidates never go stale,
+/// and resets `selected_suggestion_index` so a fresh `Tab` always starts
+/// cycling from the first candidate rather than wherever a previous,
+/// now-irrelevant cycle left off.
+fn refresh_suggestions(state: &mut WorkspaceState) {
+    state.cmd_buffer.autocomplete_suggestions = compute_suggestions(
+        &state.cmd_buffer.raw_text,
+        state.cmd_buffer.cursor_position,
+        &state.slack_picker,
+    );
+    state.cmd_buffer.selected_suggestion_index = None;
+}
+
+/// `Tab`: advances to the next candidate (wrapping) and splices it into
+/// `raw_text` at the current word's boundaries. Deliberately does **not**
+/// recompute `autocomplete_suggestions` from the post-splice text — once
+/// the word has been replaced with a full candidate (e.g. `/a` → `/active`),
+/// re-deriving candidates from `/active` would only ever match itself,
+/// silently breaking cycling to `/away`. The candidate list is frozen from
+/// the last real edit; only the cursor/replacement position is
+/// recalculated each press (`word_start` is safe to call against
+/// already-completed text, since none of the candidates contain spaces —
+/// the word boundary itself doesn't move just because the word's content
+/// changed).
+fn apply_next_suggestion(state: &mut WorkspaceState) {
+    let buf = &mut state.cmd_buffer;
+    if buf.autocomplete_suggestions.is_empty() {
+        return;
+    }
+    let next_index = match buf.selected_suggestion_index {
+        Some(i) => (i + 1) % buf.autocomplete_suggestions.len(),
+        None => 0,
+    };
+    buf.selected_suggestion_index = Some(next_index);
+
+    let start = word_start(&buf.raw_text, buf.cursor_position);
+    let replacement = buf.autocomplete_suggestions[next_index].clone();
+    buf.raw_text
+        .replace_range(start..buf.cursor_position, &replacement);
+    buf.cursor_position = start + replacement.len();
+}
+
+/// The byte offset where the word under/before `cursor` begins — the last
+/// space before `cursor`, or `0`. Pure and cheap enough to call on every
+/// `Tab` press rather than caching it (`step13.md`).
+fn word_start(text: &str, cursor: usize) -> usize {
+    text[..cursor].rfind(' ').map_or(0, |i| i + 1)
+}
+
+/// Completion candidates for the word ending at `cursor`, or `[]` if that
+/// word isn't in a completable position. Two modes (`step13.md` Decision
+/// 1): the first word (a command head, prefix-matched against
+/// `COMMAND_HEADS`) or `/send`'s second word (a channel name, prefix-
+/// matched case-insensitively against `picker.channels`, same case
+/// sensitivity `resolve_channel_id` already uses). Anything else — the
+/// free-text message body, presence custom-text, non-`/send` second
+/// words — has no finite candidate set and yields nothing.
+fn compute_suggestions(text: &str, cursor: usize, picker: &SlackPickerState) -> Vec<String> {
+    let up_to_cursor = &text[..cursor];
+    let words: Vec<&str> = up_to_cursor.split(' ').collect();
+    let current_word = words.last().copied().unwrap_or("");
+
+    match words.len() {
+        1 if current_word.starts_with('/') => COMMAND_HEADS
+            .iter()
+            .filter(|head| head.starts_with(current_word))
+            .map(|head| (*head).to_string())
+            .collect(),
+        2 if words[0] == "/send" && current_word.starts_with('#') => {
+            let prefix = &current_word[1..];
+            picker
+                .channels
+                .iter()
+                .filter(|c| c.label.to_lowercase().starts_with(&prefix.to_lowercase()))
+                .map(|c| format!("#{}", c.label))
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -884,6 +1013,59 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_l_opens_the_calendar_setup_overlay() {
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::CalendarSetup);
+    }
+
+    #[test]
+    fn calendar_setup_overlay_captures_typed_characters() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('u'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('r'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_setup.token_input, "url");
+    }
+
+    #[test]
+    fn calendar_setup_enter_with_a_url_submits_and_clears_the_input() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitToken(IntegrationSource::Calendar, "x".to_string())
+        );
+        assert_eq!(state.calendar_setup.token_input, "");
+        assert_eq!(
+            state.calendar_setup.status,
+            crate::state::CalendarSetupStatus::Connecting
+        );
+    }
+
+    #[test]
+    fn calendar_setup_enter_with_no_url_does_not_submit() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+    }
+
+    #[test]
     fn ctrl_r_opens_the_github_picker_overlay() {
         let mut state = WorkspaceState::default();
         let outcome = handle_key(&mut state, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
@@ -956,5 +1138,171 @@ mod tests {
                 vec!["owner/repo-two".to_string()]
             )
         );
+    }
+
+    fn picker_with_channels(labels: &[&str]) -> SlackPickerState {
+        SlackPickerState {
+            channels: labels
+                .iter()
+                .map(|label| PickerRow {
+                    id: format!("C_{label}"),
+                    label: (*label).to_string(),
+                    selected: false,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn compute_suggestions_matches_command_heads_by_prefix() {
+        let picker = SlackPickerState::default();
+        let mut candidates = compute_suggestions("/a", 2, &picker);
+        candidates.sort();
+        assert_eq!(candidates, vec!["/active".to_string(), "/away".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_is_empty_for_a_full_word_that_matches_nothing() {
+        let picker = SlackPickerState::default();
+        assert!(compute_suggestions("/xyz", 4, &picker).is_empty());
+    }
+
+    #[test]
+    fn compute_suggestions_matches_send_channel_argument_by_prefix() {
+        let picker = picker_with_channels(&["general", "general-eng", "random"]);
+        let mut candidates = compute_suggestions("/send #gen", 10, &picker);
+        candidates.sort();
+        assert_eq!(
+            candidates,
+            vec!["#general".to_string(), "#general-eng".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_suggestions_channel_matching_is_case_insensitive() {
+        let picker = picker_with_channels(&["General"]);
+        let candidates = compute_suggestions("/send #gen", 10, &picker);
+        assert_eq!(candidates, vec!["#General".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_does_not_offer_channels_for_non_send_commands() {
+        let picker = picker_with_channels(&["general"]);
+        assert!(compute_suggestions("/away #gen", 10, &picker).is_empty());
+    }
+
+    #[test]
+    fn compute_suggestions_does_not_offer_channels_past_the_argument_position() {
+        // Third word (the free-text message body) is never completable.
+        let picker = picker_with_channels(&["general"]);
+        let text = "/send #general #gen";
+        assert!(compute_suggestions(text, text.len(), &picker).is_empty());
+    }
+
+    #[test]
+    fn word_start_finds_the_last_space_before_the_cursor() {
+        assert_eq!(word_start("/send #general", "/send #general".len()), 6);
+        assert_eq!(word_start("/active", "/active".len()), 0);
+        assert_eq!(word_start("", 0), 0);
+    }
+
+    #[test]
+    fn tab_with_no_candidates_is_a_noop() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        for c in "hello".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let outcome = handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.cmd_buffer.raw_text, "hello");
+    }
+
+    #[test]
+    fn first_tab_completes_to_the_first_candidate() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        for c in "/a".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        // COMMAND_HEADS declares "send", "away", "active", "offline",
+        // "meeting", "lunch" in that order -- "/a" prefix-matches "away"
+        // before "active" since filtering preserves array order.
+        assert_eq!(state.cmd_buffer.raw_text, "/away");
+        assert_eq!(state.cmd_buffer.cursor_position, "/away".len());
+    }
+
+    #[test]
+    fn consecutive_tabs_cycle_through_candidates_and_wrap() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        for c in "/a".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/away");
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/active");
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        // Wraps back to the first candidate, not stuck or advancing past
+        // the end of the list.
+        assert_eq!(state.cmd_buffer.raw_text, "/away");
+    }
+
+    #[test]
+    fn typing_between_tabs_starts_a_fresh_cycle() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        for c in "/a".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/away");
+        // Typing "y" after completion changes the word under the cursor to
+        // "/awayy" -- no longer a real command, so the next Tab has
+        // nothing to offer rather than continuing the stale cycle.
+        handle_key(&mut state, key(KeyCode::Char('y'), KeyModifiers::NONE));
+        let outcome = handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.cmd_buffer.raw_text, "/awayy");
+    }
+
+    #[test]
+    fn tab_completes_a_channel_name_for_send() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            slack_picker: picker_with_channels(&["general"]),
+            ..Default::default()
+        };
+        for c in "/send #gen".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/send #general");
+    }
+
+    #[test]
+    fn enter_clears_autocomplete_state() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        for c in "/away".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(!state.cmd_buffer.autocomplete_suggestions.is_empty());
+        handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.cmd_buffer.autocomplete_suggestions.is_empty());
+        assert_eq!(state.cmd_buffer.selected_suggestion_index, None);
     }
 }

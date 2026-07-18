@@ -1,0 +1,40 @@
+// Plugin SDK WIT contract (ADR-0009, `step14.md`). Trimmed from the
+// original draft in `docs/04-extensions/plugin-sdk.md` to this phase's
+// confirmed host-function scope (`step14.md` Decision 3): `log` and
+// `publish-event` only. `get-member-presence` and the `notification`/
+// `presence-status` types it needed are deliberately not included here —
+// nothing in this phase's example plugin uses them, and adding them
+// speculatively would repeat the "don't build for hypothetical future
+// needs" mistake this project has otherwise avoided. Add them back (and
+// wire real `PluginCapability` enforcement alongside) once a real plugin
+// actually needs to read host state or touch the filesystem/network.
+package workspace:plugins;
+
+interface host-services {
+    /// Publish a custom event back to the Host Event Bus. Maps to the
+    /// already-frozen `Event::PluginCustomEvent { plugin-id, payload-json }`
+    /// on the host side -- `event-type` and `payload` are JSON-enveloped
+    /// into `payload-json` as `{"event_type":.., "payload":..}` since that
+    /// variant has no separate event-type field of its own (`step14.md`).
+    publish-event: func(event-type: string, payload: string) -> result<_, string>;
+
+    /// Print a message through the host's unified `tracing` logger.
+    /// `level` is one of "trace"/"debug"/"info"/"warn"/"error".
+    log: func(level: string, message: string);
+}
+
+world developer-workspace-plugin {
+    import host-services;
+
+    /// Called once after the component is instantiated. `config` is the
+    /// plugin's own TOML/JSON configuration, passed through verbatim by
+    /// the host.
+    export initialize: func(config: string) -> result<_, string>;
+
+    /// Called once per relevant `Event` published on the host's Event Bus,
+    /// JSON-serialized (`docs/02-architecture/events.md`).
+    export on-event: func(event-type: string, payload: string) -> result<_, string>;
+
+    /// Called once before the host unloads the plugin instance.
+    export shutdown: func() -> result<_, string>;
+}

@@ -17,3 +17,12 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 reqwest.workspace = true
 secrecy.workspace = true
+# Pure-Rust ICS parsing (ical) + RFC5545 RRULE expansion (rrule) for
+# the Calendar adapter (step12.md Decision 2) -- recurring events (e.g.
+# a daily standup) need real recurrence-rule expansion, not a hand-rolled
+# parser. Default features trimmed: `ical`'s "vcard" (contact format, not
+# calendar events) isn't used; `rrule`'s "exrule"/"by-easter" aren't
+# needed for standard weekly/daily/monthly recurrence.
+ical = { version = "0.11.0", default-features = false, features = ["ical"] }
+rrule = { version = "0.14.0", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

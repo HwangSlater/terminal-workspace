@@ -2,7 +2,7 @@
 
 The Terminal Workspace is configured via a single **TOML** file (`config.toml`) situated in the user's standard configuration directory. TOML was selected for its clean syntax, strong typing support, and seamless integration with Rust's `serde` framework.
 
-> **Implementation Status (Phase 2, amended Phase 6/10)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), and now (Phase 10) a real nested `[integrations.github]` section (`enabled`, `sync_interval_secs`, `repositories` — see `docs/04-extensions/integrations/github.md`), replacing the flat `github_enabled` toggle from Phase 6-9. Both were breaking changes to the on-disk schema — acceptable pre-v1.0 with no public users yet (`step6.md`, `step10.md`); a user with an old `config.toml` gets defaults for the new fields (parses without crashing, per each phase's `#[serde(default)]` lesson) rather than the old flat value carrying over. The richer schema shown in §1 beyond Slack/GitHub (`[plugins]`, `[keybindings]`, etc.) remains the target shape for later phases, not built yet.
+> **Implementation Status (Phase 2, amended Phase 6/10/12/14)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), a real nested `[integrations.github]` section (`enabled`, `sync_interval_secs`, `repositories` — see `docs/04-extensions/integrations/github.md`, Phase 10, replacing the flat `github_enabled` toggle from Phase 6-9), a real nested `[integrations.calendar]` section (`enabled`, `sync_interval_secs`, `lookahead_hours` — see `docs/04-extensions/integrations/calendar.md`, Phase 12; no `calendar_ids` list, since the secret-URL auth model only supports one calendar per connection — the aspirational multi-id sketch below was written before that constraint was known), and a real top-level `[plugins]` table (`enabled`, `directory`, `allowed_list` — see `docs/04-extensions/plugin-lifecycle.md`, Phase 14/`step14.md`/ADR-0017; `directory`'s default is resolved at runtime from the host's home directory, not the literal `~` shown in §1's aspirational sketch, since no Rust path API expands `~` on its own). Each was a breaking change to the on-disk schema — acceptable pre-v1.0 with no public users yet (`step6.md`, `step10.md`, `step12.md`, `step14.md`); a user with an old `config.toml` gets defaults for the new fields (parses without crashing, per each phase's `#[serde(default)]` lesson) rather than the old flat value carrying over. The richer schema shown in §1 beyond Slack/GitHub/Calendar/Plugins (`[keybindings]`, etc.) remains the target shape for later phases, not built yet.
 
 ---
 
@@ -36,11 +36,13 @@ repositories = [
     "rust-lang/rust"
 ]
 
-# Google Calendar Settings
+# Google Calendar Settings (Phase 12) -- one secret iCal feed URL per
+# connection (Ctrl+L), not a calendar id list; see
+# docs/04-extensions/integrations/calendar.md for why.
 [integrations.calendar]
 enabled = true
-sync_interval_secs = 300
-calendar_ids = ["primary"]
+sync_interval_secs = 900
+lookahead_hours = 24
 
 # Active Plugin Configuration
 [plugins]

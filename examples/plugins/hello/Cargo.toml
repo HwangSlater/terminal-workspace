@@ -1,0 +1,18 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wit-bindgen-rt = { version = "0.41.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "workspace:hello-plugin"
+
+[package.metadata.component.target]
+path = "../../../crates/plugin-sdk/wit"
+world = "developer-workspace-plugin"

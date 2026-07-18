@@ -2,6 +2,8 @@
 
 This document defines the lifecycle states, WebAssembly hook transitions, and runtime boundary controls managed by the `PluginManager`.
 
+> **Implementation Status (Phase 14, `step14.md`)**: the real type is `PluginHostManager` (`crates/plugin-host/src/lib.rs`), not `PluginManager`. §3's fuel (1,000,000/call) and memory (64MB) limits are implemented exactly as specified and verified against real traps from two deliberately-broken example plugins (`examples/plugins/looper`, `examples/plugins/memhog`) — not just asserted. Two things below are **not yet built**: the specific `PLUGIN_CPU_LIMIT_EXCEEDED` error code (the real implementation logs a `WorkspaceError::Plugin` with a free-form message and a real `tracing` error including the guest's own wasm backtrace, which turned out to be more useful for debugging than a fixed code) and the `Suspended -> Active` "manual reload command" transition (a trapped plugin's instance is dropped and stays unloaded until the next full `load_all()` — no `/plugin reload <id>`-style command exists yet, since no plugin-registered command surface exists yet either, per `step14.md`'s deliberately narrow scope).
+
 ---
 
 ## 1. Lifecycle State Diagram

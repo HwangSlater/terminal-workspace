@@ -19,6 +19,12 @@ members = [
     "crates/scheduler",
     "crates/assistant"
 ]
+# Example plugins are built independently via `cargo component build`
+# (`step14.md` Decision 2), targeting wasm32 with `crate-type = ["cdylib"]`
+# -- not part of `cargo check --workspace`'s native-target build, so they
+# stay out of the root workspace rather than needing per-crate
+# `--exclude`/target juggling in every workspace-wide cargo invocation.
+exclude = ["examples/plugins/hello", "examples/plugins/looper", "examples/plugins/memhog"]
 
 [workspace.package]
 version = "0.1.0"

@@ -16,3 +16,6 @@ crossterm.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
+
+[dev-dependencies]
+uuid.workspace = true

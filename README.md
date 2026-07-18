@@ -30,10 +30,12 @@ error: error calling dlltool 'dlltool.exe': program not found
 
 GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSanders.WinLibs.POSIX.UCRT` — 설치 프로그램 없이 압축 해제만 하는 방식이라 가볍고 빠릅니다). LLVM 기반 MinGW은 Rust가 기대하는 `libgcc`/`libgcc_eh`가 없어 링크가 실패하니 피하세요. 설치 후 해당 `mingw64\bin` 폴더를 PATH에 추가하고 새 터미널에서 다시 시도하세요.
 
+이 MinGW 설치는 `crates/plugin-host`(Phase 14, 플러그인 런타임)를 빌드할 때도 그대로 씁니다 — `wasmtime`이 진짜 C 컴파일러를 요구하기 때문입니다(ADR-0017). 플러그인 작업을 안 하신다면 `cargo check -p <크레이트>`로 개별 크레이트만 빌드해서 이 요구사항을 피할 수 있습니다.
+
 ### macOS
 
 1. Rust 설치: <https://rustup.rs>
-2. Xcode Command Line Tools가 필요합니다 (Rust가 아니라 macOS에서 뭘 빌드하든 필요한 최소 링커) — 이미 있는지 `xcode-select -p`로 확인, 없으면 `xcode-select --install`.
+2. Xcode Command Line Tools가 필요합니다 (Rust가 아니라 macOS에서 뭘 빌드하든 필요한 최소 링커이자 실제 C 컴파일러 clang) — 이미 있는지 `xcode-select -p`로 확인, 없으면 `xcode-select --install`. `crates/plugin-host`(Phase 14, `wasmtime`)도 이걸로 충분합니다 — macOS는 별도로 더 설치할 게 없습니다(ADR-0017).
 3. `git clone` 후 `cargo run -p app` — 그 외 추가 설치는 없습니다. Slack 토큰은 macOS 키체인(Keychain Services)에 자동으로 저장됩니다.
 
 ### Linux
@@ -45,6 +47,8 @@ GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSand
    - Arch: `sudo pacman -S base-devel openssl pkgconf`
 
    (OpenSSL 소스를 직접 컴파일하는 게 아니라 시스템에 이미 있는 라이브러리를 찾아 연결하는 것뿐이라, 위 패키지들은 보통 데스크톱 배포판엔 이미 있습니다.)
+
+   위 `build-essential`/`gcc` 패키지는 원래 이 프로젝트에서 "링커만 있으면 됨, 진짜 컴파일러는 불필요"였는데, Phase 14부터는 `crates/plugin-host`(`wasmtime`) 때문에 진짜 C 컴파일러가 필요해졌습니다(ADR-0017) — 위 명령어를 그대로 쓰면 되지만, 이전엔 "어차피 있는 패키지라 곁다리로 충분"했던 것이 이제는 실제 요구사항이라는 점만 다릅니다.
 3. `git clone` 후 `cargo run -p app`.
 4. Slack 토큰 저장: 데스크톱 환경이면(GNOME/KDE 등) DBus Secret Service(gnome-keyring/kwallet)에 자동 저장됩니다 — **빌드 시점에 `libdbus` 같은 걸 따로 설치할 필요는 없습니다** (순수 Rust DBus 클라이언트를 씁니다). 헤드리스/서버 환경처럼 Secret Service가 아예 없는 경우엔 자동으로 로컬 암호화 파일(`~/.config/terminal-workspace/secrets.enc`)로 대체 저장되니 별도 조치가 필요 없습니다.
 
@@ -66,9 +70,10 @@ GCC 기반 MinGW-w64를 설치하면 해결됩니다 (`winget install BrechtSand
 | `Ctrl+P` | Slack 채널/사용자 선택 |
 | `Ctrl+G` | GitHub 연결 설정 |
 | `Ctrl+R` | GitHub 저장소 선택 |
+| `Ctrl+L` | Calendar 연결 설정 |
 | `Ctrl+Q` | 종료 |
 
-Slack/GitHub을 연동하면 팀·알림 패널에 실제 메시지/프레즌스/PR 알림이 표시됩니다. 캘린더·CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](docs/07-implementation-log/step5.md)를 참고하세요.
+Slack/GitHub/Calendar를 연동하면 팀·알림 패널에 실제 메시지/프레즌스/PR/일정 알림이 표시됩니다. CI/CD·AI 어시스턴트 패널은 아직 준비 중입니다 — 왜 이렇게 범위를 나눴는지는 [`step5.md`](docs/07-implementation-log/step5.md)를 참고하세요.
 
 ### Slack 연동
 
@@ -79,6 +84,7 @@ Slack/GitHub을 연동하면 팀·알림 패널에 실제 메시지/프레즌스
 5. 명령줄(`:`)에서 바로 메시지를 보내거나 상태를 바꿀 수 있습니다 (`Ctrl+P`로 불러온 채널 이름 기준):
    - `/send #채널이름 메시지` — Slack 메시지 전송
    - `/away`, `/active`, `/offline`, `/meeting`, `/lunch [메시지]` — 내 상태 변경
+   - 명령어나 `#채널이름` 입력 중 `Tab`을 누르면 자동완성됩니다 (셸처럼 연속으로 누르면 다음 후보로 순환).
 
 헤더에 Slack 연결 상태(연결됨/재연결 중/연결 안 됨 등)가 실시간으로 표시됩니다 — 폴링이 백그라운드에서 끊기거나 복구돼도 키를 누르지 않아도 바로 반영됩니다.
 
@@ -93,11 +99,31 @@ Slack/GitHub을 연동하면 팀·알림 패널에 실제 메시지/프레즌스
 
 자세한 내용은 [`docs/04-extensions/integrations/github.md`](docs/04-extensions/integrations/github.md), [`step10.md`](docs/07-implementation-log/step10.md)를 참고하세요.
 
+### Calendar 연동
+
+1. Google Calendar → 설정 → 연동하려는 캘린더 선택 → "캘린더 통합" → **비공개 iCal 형식 주소**를 복사하세요. OAuth 앱 등록이나 로그인 절차가 필요 없습니다 — 이 주소 자체가 토큰입니다.
+2. 앱을 실행하고 `Ctrl+L`을 눌러 주소를 붙여넣은 뒤 Enter — 저장과 동시에 바로 연결을 시도합니다. Slack/GitHub과 동일하게 OS 키체인(또는 암호화 파일 폴백)에 영구 저장되고, `config.toml`에는 절대 들어가지 않습니다.
+3. 연결하면 앞으로 24시간(`lookahead_hours`로 조절 가능) 이내에 시작하는 일정이 알림 패널에 표시됩니다 — 매일/매주 반복되는 일정(스탠드업 등)도 정확히 인식합니다.
+4. 캘린더 목록을 불러오는 피커는 없습니다 — 이 인증 방식 자체에 "내 캘린더 목록 조회" API가 없어서, 연결 하나당 캘린더 하나만 지원합니다.
+
+자세한 내용은 [`docs/04-extensions/integrations/calendar.md`](docs/04-extensions/integrations/calendar.md), [`step12.md`](docs/07-implementation-log/step12.md)를 참고하세요.
+
+### 플러그인 (Phase 14, 실험적)
+
+WebAssembly Component Model(WIT) 기반 샌드박스 플러그인 런타임입니다 — 기본적으로 꺼져 있고, 커맨드/UI 등록 같은 확장 지점은 아직 없이 "로드 → 초기화 → 이벤트 전달 → 종료"라는 생명주기와 자원 제한(CPU/메모리)만 증명하는 단계입니다.
+
+1. `config.toml`의 `[plugins]`에서 `enabled = true`로 켜고, `directory`(플러그인 `.wasm` 파일이 있는 폴더)와 `allowed_list`(로드를 허용할 플러그인 id 목록)를 채우세요 — 둘 다 명시적으로 지정해야 실제로 로드됩니다.
+2. 플러그인 작성자는 [`cargo-component`](https://github.com/bytecodealliance/cargo-component)(`cargo install cargo-component`)로 빌드합니다 — `examples/plugins/hello`가 최소 예제입니다 (`initialize`/`on-event`/`shutdown` 세 개만 구현, host 쪽에는 `log`/`publish-event` 두 함수만 노출).
+3. 매 이벤트 처리마다 CPU 100만 명령어(fuel), 인스턴스당 메모리 64MB로 제한됩니다 — 초과하면 해당 플러그인만 트랩되어 내려가고(`Suspended`), 워크스페이스 전체는 영향받지 않습니다. `examples/plugins/looper`(무한 루프)와 `examples/plugins/memhog`(과다 할당)가 이 두 제한이 실제로 걸리는지 증명하는 테스트용 예제입니다.
+4. **컨트리뷰터 한정 요구사항**: 플러그인 런타임(`wasmtime`)은 진짜 C 컴파일러가 필요합니다 — 위 "Windows에서 실제로 빌드/실행하려면"/macOS/Linux 절 참고(ADR-0017). 프리빌드 릴리스 바이너리를 쓰는 최종 사용자는 전혀 영향받지 않습니다.
+
+자세한 내용은 [`docs/04-extensions/plugin-lifecycle.md`](docs/04-extensions/plugin-lifecycle.md), [`docs/06-development/decisions/0017-plugin-runtime-c-compiler-exception.md`](docs/06-development/decisions/0017-plugin-runtime-c-compiler-exception.md), [`step14.md`](docs/07-implementation-log/step14.md)를 참고하세요.
+
 ---
 
 ## 진행 현황
 
-이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시), Phase 10(두 번째 연동인 GitHub — 폴링, 연결 설정, 저장소 피커까지 한 단계에 구현), Phase 11(연동 2개로 반복되던 패턴을 `Command::Connect`/`ApplySelection` 등으로 일반화 — Calendar 붙이기 전에 정리)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step2.md` ~ `step11.md`를 참고하세요.
+이 프로젝트는 아키텍처 우선(Architecture First) 방식으로 개발 중입니다. Phase 2(핵심 인프라: Event Bus, Registry, Config, Secrets, Logging), Phase 3(Storage + CQRS 쓰기 경로), Phase 4(cargo-dist 릴리스 패키징), Phase 5(대화형 TUI 셸), Phase 6(첫 실제 연동인 Slack), Phase 7(앱 안에서 바로 Slack 연결 설정 + OS 키체인 영구 저장), Phase 8(채널/사용자 UI 피커), Phase 9(명령줄 `/send`·상태 변경 + 실시간 연결상태 표시), Phase 10(두 번째 연동인 GitHub — 폴링, 연결 설정, 저장소 피커까지 한 단계에 구현), Phase 11(연동 2개로 반복되던 패턴을 `Command::Connect`/`ApplySelection` 등으로 일반화 — Calendar 붙이기 전에 정리), Phase 12(세 번째 연동인 Calendar — OAuth 대신 비공개 iCal 주소, 반복 일정 인식), Phase 13(명령줄 Tab 자동완성 — 명령어/채널명, Calendar 패널 실데이터 연결 + 좁은 화면 패널 전환 버그 수정), Phase 14(WASM Component Model 기반 플러그인 런타임 — 샌드박스 생명주기, fuel/메모리 제한, `cargo-component`로 빌드한 실제 예제 플러그인 3종으로 검증)까지 구현되어 있습니다 — 각 단계가 무엇을 다루고 왜 그렇게 했는지는 [`docs/07-implementation-log/`](docs/07-implementation-log/)의 `step2.md` ~ `step14.md`를 참고하세요.
 
 ## 문서
 

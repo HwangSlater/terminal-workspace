@@ -5,7 +5,4 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
-common = { path = "../common" }
-domain = { path = "../domain" }
-async-trait.workspace = true
-serde.workspace = true
+wit-bindgen = "0.59.0"

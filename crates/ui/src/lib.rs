@@ -23,7 +23,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use registry::UiRegistry;
 use state::{
-    GitHubPickerStatus, GitHubSetupStatus, PickerRow, SlackPickerStatus, SlackSetupStatus,
+    CalendarSetupStatus, GitHubPickerStatus, GitHubSetupStatus, PickerRow, SlackPickerStatus,
+    SlackSetupStatus,
 };
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -71,6 +72,8 @@ pub struct TuiRenderer {
     initial_slack_status: IntegrationConnectionStatus,
     /// GitHub's equivalent of `initial_slack_status` (`step10.md`).
     initial_github_status: IntegrationConnectionStatus,
+    /// Calendar's equivalent of `initial_slack_status` (`step12.md`).
+    initial_calendar_status: IntegrationConnectionStatus,
 }
 
 impl TuiRenderer {
@@ -86,6 +89,7 @@ impl TuiRenderer {
         event_bus: Arc<dyn EventBus>,
         initial_slack_status: IntegrationConnectionStatus,
         initial_github_status: IntegrationConnectionStatus,
+        initial_calendar_status: IntegrationConnectionStatus,
     ) -> Self {
         Self {
             ui_registry,
@@ -96,6 +100,7 @@ impl TuiRenderer {
             event_bus,
             initial_slack_status,
             initial_github_status,
+            initial_calendar_status,
         }
     }
 
@@ -107,6 +112,7 @@ impl TuiRenderer {
         let mut state = WorkspaceState {
             slack_connection_status: self.initial_slack_status.clone(),
             github_connection_status: self.initial_github_status.clone(),
+            calendar_connection_status: self.initial_calendar_status.clone(),
             ..WorkspaceState::default()
         };
 
@@ -186,9 +192,10 @@ impl TuiRenderer {
                             match source {
                                 IntegrationSource::Slack => state.slack_connection_status = status,
                                 IntegrationSource::GitHub => state.github_connection_status = status,
-                                IntegrationSource::Calendar
-                                | IntegrationSource::Gmail
-                                | IntegrationSource::Jira => {}
+                                IntegrationSource::Calendar => {
+                                    state.calendar_connection_status = status;
+                                }
+                                IntegrationSource::Gmail | IntegrationSource::Jira => {}
                             }
                             self.draw(terminal, state).await?;
                         }
@@ -222,7 +229,13 @@ impl TuiRenderer {
         let len = match state.focused_dock {
             registry::UiDockSlot::Left => model.team_presence.len(),
             registry::UiDockSlot::Center => model.unread_notifications.len(),
-            registry::UiDockSlot::Right | registry::UiDockSlot::Bottom => 0,
+            // Right dock (Calendar) shows only the Calendar-sourced subset
+            // of unread_notifications (render::render_calendar_panel) --
+            // was always 0 while that panel was a static placeholder with
+            // nothing to navigate; now it has real rows. Shares the same
+            // filter render.rs uses so the two can't drift apart.
+            registry::UiDockSlot::Right => render::calendar_notifications(&model).len(),
+            registry::UiDockSlot::Bottom => 0,
         };
         drop(model);
         if len == 0 {
@@ -270,7 +283,13 @@ impl TuiRenderer {
                     Err(e) => GitHubSetupStatus::Failed(e.to_string()),
                 };
             }
-            IntegrationSource::Calendar | IntegrationSource::Gmail | IntegrationSource::Jira => {}
+            IntegrationSource::Calendar => {
+                state.calendar_setup.status = match result {
+                    Ok(()) => CalendarSetupStatus::Connected,
+                    Err(e) => CalendarSetupStatus::Failed(e.to_string()),
+                };
+            }
+            IntegrationSource::Gmail | IntegrationSource::Jira => {}
         }
         Ok(())
     }

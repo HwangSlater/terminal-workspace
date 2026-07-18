@@ -2,6 +2,8 @@
 
 This document details the system architecture of the Terminal Workspace. The project is designed with a **Clean Architecture** approach using **Rust** and **Tokio** as the core async runtime to ensure memory safety, high performance, high cohesion, and low coupling.
 
+> **Implementation Status (Phase 14, `step14.md`, ADR-0017)**: this is an early, aspirational sketch — the real crate layout (`crates/*`, a flat Cargo workspace, not the nested `core/`/`plugins/sdk/` tree shown below) has diverged since Phase 2. The "Plugin Manager" box is real as of Phase 14: `crates/plugin-host`'s `PluginHostManager` discovers `.wasm` Component-Model plugins, sandboxes each with `wasmtime` (fuel + memory limits, `docs/04-extensions/plugin-lifecycle.md`), and — matching the "Distribute Events -> Plugin Manager" edge below — is registered as an `EventHandler` on the same `EventDispatcher`/`EventBus` every other handler uses (`crates/app/src/main.rs`). The plugin SDK lives at `crates/plugin-sdk` (WIT contract only; see its own Implementation Status note in `docs/04-extensions/plugin-sdk.md` for why individual plugin crates don't depend on it directly).
+
 ## Architectural Overview
 
 The system uses an **Event-Driven Architecture (EDA)** with a central **Event Bus**. Every integration (Slack, GitHub, Calendar, Gmail, Jira) runs as an isolated async service that publishes events to and consumes events from the Event Bus. The Presentation Layer (TUI) acts as a passive consumer of UI state updates and a producer of commands.

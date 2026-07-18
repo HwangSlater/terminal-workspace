@@ -5,6 +5,15 @@
 # present (see docs/06-development/platform-support.md's Phase 6/7 update
 # and the README's macOS/Linux sections), then runs `cargo check --workspace`.
 #
+# Phase 14 (ADR-0017) update: `cargo check --workspace` now includes
+# `crates/plugin-host`, which needs a real C *compiler* (`wasmtime`'s `cc`
+# build-dependency), not just a linker. The `cc`/`gcc`/`clang` checks below
+# already detect a real compiler when present (a linker alone, without one
+# of these, wouldn't satisfy either requirement) -- no new detection logic
+# was needed, only this comment update to describe why the check matters
+# now on Linux specifically (Phase 6/7's OpenSSL-linking requirement never
+# needed a compiler; Phase 14's does).
+#
 # Deliberately does NOT install anything on your behalf (no `sudo apt
 # install ...` run by this script) -- an earlier version of this project's
 # setup tooling auto-installed native toolchains, and that caused real

@@ -2,11 +2,11 @@
 //! layout this implements (Phase 5 subset — see `step5.md`).
 
 use crate::state::{
-    FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind, SlackPickerStatus,
-    SlackSetupStatus, WorkspaceState,
+    CalendarSetupStatus, FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind,
+    SlackPickerStatus, SlackSetupStatus, WorkspaceState,
 };
 use commands::DashboardReadModel;
-use domain::{IntegrationSource, PresenceStatus};
+use domain::{IntegrationSource, NotificationItem, PresenceStatus};
 use events::IntegrationConnectionStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -46,7 +46,24 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
 
     let collapse_sidebars = area.width < SIDEBAR_COLLAPSE_WIDTH;
     if collapse_sidebars {
-        render_notification_panel(frame, rows[1], state, model);
+        // Below the width where all three body panels fit side by side,
+        // only one is shown at a time -- which one follows `focused_dock`
+        // (already what `Tab`/`Shift+Tab`/`Ctrl+1~4` move) instead of
+        // being hardcoded to the Notification panel regardless of what the
+        // user last focused. Team/Calendar were previously unreachable at
+        // all on a narrow terminal; this was a real usability gap, not a
+        // deliberate simplification.
+        match state.focused_dock {
+            UiDockSlot::Left => render_team_panel(frame, rows[1], state, model),
+            UiDockSlot::Right => render_calendar_panel(frame, rows[1], state, model),
+            // Bottom (Log) already has its own always-visible row below
+            // the body -- there's nothing Log-specific to show in this
+            // swappable slot, so it falls back to Notification, same as
+            // the Center dock itself.
+            UiDockSlot::Center | UiDockSlot::Bottom => {
+                render_notification_panel(frame, rows[1], state, model);
+            }
+        }
     } else {
         let body = Layout::default()
             .direction(Direction::Horizontal)
@@ -58,7 +75,7 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
             .split(rows[1]);
         render_team_panel(frame, body[0], state, model);
         render_notification_panel(frame, body[1], state, model);
-        render_right_dock_placeholder(frame, body[2]);
+        render_calendar_panel(frame, body[2], state, model);
     }
 
     render_bottom_dock_placeholder(frame, rows[2]);
@@ -72,6 +89,7 @@ pub fn render(frame: &mut Frame, state: &WorkspaceState, model: &DashboardReadMo
             OverlayKind::SlackPicker => render_slack_picker_overlay(frame, area, state),
             OverlayKind::GitHubSetup => render_github_setup_overlay(frame, area, state),
             OverlayKind::GitHubPicker => render_github_picker_overlay(frame, area, state),
+            OverlayKind::CalendarSetup => render_calendar_setup_overlay(frame, area, state),
         }
     }
 }
@@ -121,6 +139,10 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 key: "/away, /active, /offline, /meeting, /lunch [메시지]",
                 description: "내 상태 변경",
             },
+            HelpEntry {
+                key: "Tab",
+                description: "명령어/채널 자동완성 (연속 Tab: 다음 후보)",
+            },
         ],
     ),
     (
@@ -148,6 +170,13 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 description: "저장소 선택",
             },
         ],
+    ),
+    (
+        "Calendar 연동",
+        &[HelpEntry {
+            key: "Ctrl+L",
+            description: "연결 설정 (비공개 iCal 주소)",
+        }],
     ),
     (
         "기타",
@@ -333,6 +362,34 @@ fn render_github_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     );
 }
 
+/// In-app Calendar secret iCal URL entry (`step12.md`). Mirrors
+/// `render_github_setup_overlay`/`render_slack_setup_overlay` exactly —
+/// the field holds a URL rather than a short token, but it's still a
+/// bearer credential and gets the same masked treatment. No picker overlay
+/// exists for Calendar (`step12.md` Decision 1's consequence).
+fn render_calendar_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(60, 30, area);
+    frame.render_widget(Clear, popup);
+
+    let masked: String = "*".repeat(state.calendar_setup.token_input.chars().count());
+    let status_line = match &state.calendar_setup.status {
+        CalendarSetupStatus::Idle => "비공개 iCal 주소를 입력하고 Enter를 누르세요.".to_string(),
+        CalendarSetupStatus::Connecting => "연결 중...".to_string(),
+        CalendarSetupStatus::Connected => "연결됨.".to_string(),
+        CalendarSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
+    };
+    let text = format!("URL: {masked}\n\n{status_line}\n\nEsc: 닫기");
+
+    let block = Block::default()
+        .title("Calendar 연결 설정")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
 /// GitHub repository picker (`step10.md`). Simpler than
 /// `render_slack_picker_overlay`: one list, no channel/user section split.
 fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
@@ -467,6 +524,8 @@ fn render_header(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
         connection_status_label("Slack", &state.slack_connection_status);
     let (github_text, github_color) =
         connection_status_label("GitHub", &state.github_connection_status);
+    let (calendar_text, calendar_color) =
+        connection_status_label("Calendar", &state.calendar_connection_status);
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             "Terminal Workspace",
@@ -476,6 +535,8 @@ fn render_header(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
         Span::styled(slack_text, Style::default().fg(slack_color)),
         Span::raw("  |  "),
         Span::styled(github_text, Style::default().fg(github_color)),
+        Span::raw("  |  "),
+        Span::styled(calendar_text, Style::default().fg(calendar_color)),
         Span::raw("  |  도움말: ?   종료: Ctrl+Q"),
     ]));
     frame.render_widget(header, area);
@@ -567,12 +628,62 @@ fn render_notification_panel(
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn render_right_dock_placeholder(frame: &mut Frame, area: Rect) {
-    let block = Block::default().title("캘린더").borders(Borders::ALL);
-    let placeholder = Paragraph::new("(캘린더 연동이 아직 구현되지 않았습니다)")
-        .block(block)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(placeholder, area);
+/// The Calendar-sourced subset of `unread_notifications` — shared between
+/// this panel's render and `crate::lib`'s `apply_pane_action` (which needs
+/// the same count to know how far `j`/`k` can move the Right dock's
+/// selection), so the filter is written once instead of the two call sites
+/// silently drifting out of sync with each other.
+pub(crate) fn calendar_notifications(model: &DashboardReadModel) -> Vec<&NotificationItem> {
+    model
+        .unread_notifications
+        .iter()
+        .filter(|n| n.source == IntegrationSource::Calendar)
+        .collect()
+}
+
+/// Upcoming Calendar reminders. Was a static "not implemented" stub that
+/// never got updated once Calendar actually shipped (`step12.md`) — the
+/// data was already flowing into `DashboardReadModel.unread_notifications`
+/// (via the shared `Projector`, same as Slack/GitHub), this panel just
+/// never read it. Filters by `IntegrationSource::Calendar` rather than
+/// getting its own `DashboardReadModel` field, mirroring how the
+/// Notification panel already mixes all three sources together — the
+/// underlying data model didn't need to change, only this render function.
+fn render_calendar_panel(
+    frame: &mut Frame,
+    area: Rect,
+    state: &WorkspaceState,
+    model: &DashboardReadModel,
+) {
+    let block = dock_block("캘린더", UiDockSlot::Right, state);
+    let items = calendar_notifications(model);
+
+    if items.is_empty() {
+        let text = if state.calendar_connection_status == IntegrationConnectionStatus::Disconnected
+        {
+            "(Calendar 연동이 연결되지 않았습니다 — Ctrl+L)"
+        } else {
+            "(다가오는 일정이 없습니다)"
+        };
+        let empty = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let line = format!("{} — {}", item.title, item.body);
+            let style = if state.focused_dock == UiDockSlot::Right && i == state.selected_index {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(list_items).block(block), area);
 }
 
 fn render_bottom_dock_placeholder(frame: &mut Frame, area: Rect) {
@@ -596,11 +707,37 @@ fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
         );
         return;
     }
-    let text = match state.focus_mode {
-        FocusMode::Input => format!(":{}", state.cmd_buffer.raw_text),
-        _ => String::new(),
-    };
-    frame.render_widget(Paragraph::new(text), area);
+    if state.focus_mode != FocusMode::Input {
+        frame.render_widget(Paragraph::new(""), area);
+        return;
+    }
+
+    let mut spans = vec![Span::raw(format!(":{}", state.cmd_buffer.raw_text))];
+    // Tab-completion hint (`step13.md`) -- extends the command bar the same
+    // way the `last_error` branch above already does, rather than a new
+    // layout row or overlay (Decision 3: not enough candidates at once to
+    // justify either).
+    if !state.cmd_buffer.autocomplete_suggestions.is_empty() {
+        spans.push(Span::styled(
+            "  (Tab: ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        for (i, candidate) in state.cmd_buffer.autocomplete_suggestions.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(", ", Style::default().fg(Color::DarkGray)));
+            }
+            let style = if state.cmd_buffer.selected_suggestion_index == Some(i) {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(candidate.clone(), style));
+        }
+        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
@@ -615,9 +752,22 @@ mod tests {
     use super::*;
     use crate::state::{CommandBufferState, PickerRow, SlackPickerState, SlackSetupState};
     use commands::DashboardReadModel;
-    use domain::{MemberPresence, PresenceStatus, UserId};
+    use domain::{MemberPresence, NotificationId, PresenceStatus, PriorityLevel, UserId};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn sample_notification_for(source: IntegrationSource, title: &str) -> NotificationItem {
+        NotificationItem {
+            id: NotificationId(uuid::Uuid::new_v4()),
+            source,
+            title: title.to_string(),
+            body: String::new(),
+            timestamp_ms: 0,
+            priority: PriorityLevel::Medium,
+            is_read: false,
+            action_link: None,
+        }
+    }
 
     /// Per `docs/05-operations/testing.md` §4: draw into a `TestBackend`
     /// virtual buffer and assert on its contents instead of a real terminal.
@@ -692,14 +842,52 @@ mod tests {
     }
 
     #[test]
-    fn collapses_sidebars_below_120_columns() {
-        let text = draw(
-            100,
-            30,
-            &WorkspaceState::default(),
-            &DashboardReadModel::default(),
-        );
+    fn collapses_to_a_single_panel_below_120_columns() {
+        // Center focus (Ctrl+2) shows Notification -- proven separately
+        // from the default-focus case below since WorkspaceState::default()
+        // focuses Left, not Center.
+        let state = WorkspaceState {
+            focused_dock: UiDockSlot::Center,
+            ..Default::default()
+        };
+        let text = draw(100, 30, &state, &DashboardReadModel::default());
         assert!(!contains_ignoring_whitespace(&text, "아직 팀원이 없습니다"));
+        assert!(contains_ignoring_whitespace(&text, "알림"));
+    }
+
+    #[test]
+    fn collapsed_panel_follows_focused_dock_instead_of_always_showing_notifications() {
+        // Team/Calendar were previously unreachable at all below 120
+        // columns -- this is the actual bug fix, not just a rename of the
+        // test above. Tab/Shift+Tab/Ctrl+1~4 already move `focused_dock`;
+        // the collapsed body now honors it instead of ignoring it.
+        let team_state = WorkspaceState {
+            focused_dock: UiDockSlot::Left,
+            ..Default::default()
+        };
+        let team_text = draw(100, 30, &team_state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(
+            &team_text,
+            "아직 팀원이 없습니다"
+        ));
+
+        let calendar_state = WorkspaceState {
+            focused_dock: UiDockSlot::Right,
+            ..Default::default()
+        };
+        let calendar_text = draw(100, 30, &calendar_state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&calendar_text, "Ctrl+L"));
+    }
+
+    #[test]
+    fn collapsed_bottom_focus_falls_back_to_notification_panel() {
+        // Log already has its own always-visible row -- Bottom focus has
+        // nothing Log-specific to show in the swappable body slot.
+        let state = WorkspaceState {
+            focused_dock: UiDockSlot::Bottom,
+            ..Default::default()
+        };
+        let text = draw(100, 30, &state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "알림"));
     }
 
@@ -722,8 +910,56 @@ mod tests {
             &WorkspaceState::default(),
             &DashboardReadModel::default(),
         );
-        assert!(contains_ignoring_whitespace(&text, "구현되지"));
+        assert!(contains_ignoring_whitespace(&text, "연결되지"));
         assert!(contains_ignoring_whitespace(&text, "않았습니다"));
+    }
+
+    #[test]
+    fn calendar_panel_shows_upcoming_reminders() {
+        let model = DashboardReadModel {
+            unread_notifications: vec![
+                sample_notification_for(IntegrationSource::Slack, "slack msg"),
+                sample_notification_for(IntegrationSource::Calendar, "Design Review"),
+            ],
+            ..Default::default()
+        };
+        let state = WorkspaceState {
+            focused_dock: UiDockSlot::Right,
+            selected_index: 0,
+            ..Default::default()
+        };
+        // The Notification panel legitimately shows the Slack item too (it
+        // mixes every source by design) -- a whole-screen "must not
+        // contain 'slack msg'" assertion would be checking the wrong
+        // panel. The actual per-source isolation is proven directly
+        // against the filter below, not by scraping rendered text.
+        let text = draw(140, 30, &state, &model);
+        assert!(contains_ignoring_whitespace(&text, "Design Review"));
+    }
+
+    #[test]
+    fn calendar_notifications_filters_out_other_sources() {
+        let model = DashboardReadModel {
+            unread_notifications: vec![
+                sample_notification_for(IntegrationSource::Slack, "slack msg"),
+                sample_notification_for(IntegrationSource::GitHub, "github pr"),
+                sample_notification_for(IntegrationSource::Calendar, "Design Review"),
+            ],
+            ..Default::default()
+        };
+        let filtered = calendar_notifications(&model);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].title, "Design Review");
+    }
+
+    #[test]
+    fn calendar_panel_reports_disconnected_when_not_connected() {
+        let state = WorkspaceState {
+            calendar_connection_status: IntegrationConnectionStatus::Disconnected,
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "Ctrl+L"));
     }
 
     #[test]
@@ -809,8 +1045,19 @@ mod tests {
             focus_mode: FocusMode::Overlay,
             ..Default::default()
         };
-        let text = draw(140, 40, &state, &DashboardReadModel::default());
-        for category in ["탐색", "명령줄", "Slack 연동", "GitHub 연동", "기타"] {
+        // Tall enough that all 6 categories' rows fit in the popup (60% of
+        // height) without List clipping the later ones -- a real risk that
+        // grows every time a category is added, unlike Paragraph/Wrap
+        // overflow which at least still occupies buffer rows.
+        let text = draw(140, 55, &state, &DashboardReadModel::default());
+        for category in [
+            "탐색",
+            "명령줄",
+            "Slack 연동",
+            "GitHub 연동",
+            "Calendar 연동",
+            "기타",
+        ] {
             assert!(
                 contains_ignoring_whitespace(&text, category),
                 "missing help category: {category}"
@@ -820,6 +1067,7 @@ mod tests {
         // show up under their heading, not just the headings themselves.
         assert!(contains_ignoring_whitespace(&text, "Ctrl+S"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+G"));
+        assert!(contains_ignoring_whitespace(&text, "Ctrl+L"));
     }
 
     #[test]
@@ -988,6 +1236,49 @@ mod tests {
     }
 
     #[test]
+    fn calendar_setup_overlay_renders_masked_url_not_the_raw_value() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            calendar_setup: crate::state::CalendarSetupState {
+                token_input: "https://secret.example/cal.ics".to_string(),
+                status: CalendarSetupStatus::Idle,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(!text.contains("https://secret.example/cal.ics"));
+        assert!(contains_ignoring_whitespace(&text, "Calendar 연결 설정"));
+        let mask = "*".repeat("https://secret.example/cal.ics".chars().count());
+        assert!(text.contains(&mask));
+    }
+
+    #[test]
+    fn calendar_setup_overlay_shows_the_failure_reason() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            calendar_setup: crate::state::CalendarSetupState {
+                token_input: String::new(),
+                status: CalendarSetupStatus::Failed("feed unreachable".to_string()),
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "feed unreachable"));
+    }
+
+    #[test]
+    fn header_shows_calendar_connected_status() {
+        let state = WorkspaceState {
+            calendar_connection_status: IntegrationConnectionStatus::Connected,
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "Calendar: 연결됨"));
+    }
+
+    #[test]
     fn github_setup_overlay_shows_the_failure_reason() {
         let state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
@@ -1082,5 +1373,39 @@ mod tests {
             &text,
             "채널을 찾을 수 없습니다"
         ));
+    }
+
+    #[test]
+    fn command_bar_shows_the_autocomplete_hint_when_suggestions_exist() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            cmd_buffer: CommandBufferState {
+                raw_text: "/a".to_string(),
+                autocomplete_suggestions: vec!["/away".to_string(), "/active".to_string()],
+                selected_suggestion_index: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "/away"));
+        assert!(contains_ignoring_whitespace(&text, "/active"));
+    }
+
+    #[test]
+    fn command_bar_shows_no_hint_when_there_are_no_suggestions() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            cmd_buffer: CommandBufferState {
+                raw_text: "hello".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // "Tab:" alone isn't a safe marker -- the footer legitimately
+        // shows "Tab:다음 패널" regardless of the command bar's state. The
+        // hint's own opening paren is what actually distinguishes it.
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(!contains_ignoring_whitespace(&text, "(Tab:"));
     }
 }

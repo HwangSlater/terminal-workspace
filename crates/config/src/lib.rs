@@ -15,6 +15,10 @@ pub struct AppConfig {
     /// Enabled integrations switch.
     #[serde(default)]
     pub integrations: IntegrationsToggle,
+    /// Plugin runtime settings (`docs/04-extensions/plugin-lifecycle.md`,
+    /// `step14.md`).
+    #[serde(default)]
+    pub plugins: PluginsSettings,
 }
 
 /// Core runtime configuration fields.
@@ -28,8 +32,8 @@ pub struct CoreSettings {
     pub log_level: String,
 }
 
-/// Per-integration settings. `slack` (Phase 6) and `github` (Phase 10) are
-/// both real nested tables.
+/// Per-integration settings. `slack` (Phase 6), `github` (Phase 10), and
+/// `calendar` (Phase 12) are all real nested tables.
 ///
 /// Every field here is `#[serde(default)]`: a `config.toml` written before
 /// a given field existed (or before the `[integrations.slack]` table
@@ -45,6 +49,9 @@ pub struct IntegrationsToggle {
     /// GitHub integration settings (`docs/04-extensions/integrations/github.md`, `step10.md`).
     #[serde(default)]
     pub github: GitHubSettings,
+    /// Calendar integration settings (`docs/04-extensions/integrations/calendar.md`, `step12.md`).
+    #[serde(default)]
+    pub calendar: CalendarSettings,
 }
 
 /// `[integrations.slack]` settings. The Bot Token itself is never here —
@@ -110,6 +117,87 @@ fn default_github_sync_interval() -> u64 {
     60
 }
 
+/// `[integrations.calendar]` settings. The secret iCal feed URL itself is
+/// never here — it's resolved via `SecretProviderChain` (ADR-0006), same as
+/// Slack's Bot Token / GitHub's PAT (`step12.md` Decision 1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarSettings {
+    /// Whether the Calendar adapter starts at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Seconds between poll cycles. Higher than Slack/GitHub's defaults —
+    /// no point polling faster than Google's own feed cache refreshes.
+    #[serde(default = "default_calendar_sync_interval")]
+    pub sync_interval_secs: u64,
+    /// Only occurrences starting within this many hours become a
+    /// notification (`step12.md` Decision 3).
+    #[serde(default = "default_calendar_lookahead_hours")]
+    pub lookahead_hours: u64,
+}
+
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sync_interval_secs: default_calendar_sync_interval(),
+            lookahead_hours: default_calendar_lookahead_hours(),
+        }
+    }
+}
+
+fn default_calendar_sync_interval() -> u64 {
+    900
+}
+
+fn default_calendar_lookahead_hours() -> u64 {
+    24
+}
+
+/// `[plugins]` settings (`docs/04-extensions/plugin-lifecycle.md`,
+/// `step14.md`). Default-off (`step14.md` Decision 4), same as every
+/// integration's `enabled` toggle -- nothing under `crates/plugin-host`
+/// runs, loads, or requires its C-compiler-built `wasmtime` dependency to
+/// do anything at runtime unless a contributor both flips this on and
+/// points `directory`/`allowed_list` at a real plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginsSettings {
+    /// Whether the plugin runtime loads anything at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory scanned for `<plugin_id>.wasm` Component-Model binaries.
+    #[serde(default = "default_plugins_directory")]
+    pub directory: PathBuf,
+    /// Only plugin ids in this list are loaded, even if present in
+    /// `directory` -- explicit opt-in per plugin, not just per feature.
+    #[serde(default)]
+    pub allowed_list: Vec<String>,
+}
+
+impl Default for PluginsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: default_plugins_directory(),
+            allowed_list: Vec::new(),
+        }
+    }
+}
+
+/// `~/.local/share/terminal-workspace/plugins`, resolved the same
+/// cross-platform way `standard_config_path` resolves its home directory
+/// (`USERPROFILE` on Windows, `HOME` elsewhere) rather than hard-coding a
+/// literal `~`, which no Rust path API expands on its own.
+fn default_plugins_directory() -> PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("terminal-workspace")
+        .join("plugins")
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -130,7 +218,13 @@ impl Default for AppConfig {
                     sync_interval_secs: default_github_sync_interval(),
                     repositories: Vec::new(),
                 },
+                calendar: CalendarSettings {
+                    enabled: false,
+                    sync_interval_secs: default_calendar_sync_interval(),
+                    lookahead_hours: default_calendar_lookahead_hours(),
+                },
             },
+            plugins: PluginsSettings::default(),
         }
     }
 }
@@ -245,6 +339,19 @@ watched_user_ids = []
 enabled = false
 sync_interval_secs = 60
 repositories = []
+
+[integrations.calendar]
+enabled = false
+sync_interval_secs = 900
+lookahead_hours = 24
+
+# [plugins] is deliberately omitted here: `directory`'s default depends on
+# the resolving machine's home directory (see `default_plugins_directory`),
+# so there's no single literal value that would be correct to bake into
+# this constant across every OS. `#[serde(default)]` on `AppConfig::plugins`
+# already gives a first-run user the same effective defaults
+# (`enabled = false`, empty `allowed_list`) as if this table were written
+# out explicitly.
 "#;
 
 /// Builds an `AppConfig` by layering Default -> File -> Environment -> CLI,
@@ -525,6 +632,11 @@ mod tests {
         assert!(!config.integrations.github.enabled);
         assert_eq!(config.integrations.github.sync_interval_secs, 60);
         assert!(config.integrations.github.repositories.is_empty());
+        assert!(!config.integrations.calendar.enabled);
+        assert_eq!(config.integrations.calendar.sync_interval_secs, 900);
+        assert_eq!(config.integrations.calendar.lookahead_hours, 24);
+        assert!(!config.plugins.enabled);
+        assert!(config.plugins.allowed_list.is_empty());
     }
 
     #[test]
@@ -602,6 +714,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_real_calendar_config() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations.calendar]
+            enabled = true
+            sync_interval_secs = 600
+            lookahead_hours = 48
+        "#;
+        let config = AppConfig::parse(toml).expect("valid Calendar config must parse");
+        assert!(config.integrations.calendar.enabled);
+        assert_eq!(config.integrations.calendar.sync_interval_secs, 600);
+        assert_eq!(config.integrations.calendar.lookahead_hours, 48);
+    }
+
+    #[test]
+    fn a_pre_phase_12_config_toml_without_calendar_table_still_parses() {
+        let old_toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations.github]
+            enabled = false
+        "#;
+        let config =
+            AppConfig::parse(old_toml).expect("a pre-Phase-12 config.toml must not crash startup");
+        assert!(!config.integrations.calendar.enabled);
+        assert_eq!(config.integrations.calendar.sync_interval_secs, 900);
+        assert_eq!(config.integrations.calendar.lookahead_hours, 24);
+    }
+
+    #[test]
     fn save_to_then_parse_round_trips_a_picker_selection() {
         let dir = std::env::temp_dir().join(format!("tw_config_test_{}", uuid::Uuid::new_v4()));
         let path = dir.join("config.toml");
@@ -620,6 +769,77 @@ mod tests {
         assert_eq!(
             reloaded.integrations.slack.watched_user_ids,
             vec!["U123", "U456"]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plugins_settings_default_off_with_empty_allow_list() {
+        let config = ConfigBuilder::new()
+            .build()
+            .expect("defaults must validate");
+        assert!(!config.plugins.enabled);
+        assert!(config.plugins.allowed_list.is_empty());
+        assert!(config
+            .plugins
+            .directory
+            .ends_with("terminal-workspace/plugins"));
+    }
+
+    #[test]
+    fn a_pre_phase_14_config_toml_without_plugins_table_still_parses() {
+        let old_toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [integrations.github]
+            enabled = false
+        "#;
+        let config =
+            AppConfig::parse(old_toml).expect("a pre-Phase-14 config.toml must not crash startup");
+        assert!(!config.plugins.enabled);
+        assert!(config.plugins.allowed_list.is_empty());
+    }
+
+    #[test]
+    fn parses_real_plugins_config() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [plugins]
+            enabled = true
+            directory = "/opt/tw-plugins"
+            allowed_list = ["hello"]
+        "#;
+        let config = AppConfig::parse(toml).expect("valid plugins config must parse");
+        assert!(config.plugins.enabled);
+        assert_eq!(config.plugins.directory, PathBuf::from("/opt/tw-plugins"));
+        assert_eq!(config.plugins.allowed_list, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn save_to_then_parse_round_trips_a_plugins_selection() {
+        let dir = std::env::temp_dir().join(format!("tw_config_test_{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.toml");
+
+        let mut config = AppConfig::default();
+        config.plugins.enabled = true;
+        config.plugins.allowed_list = vec!["hello".to_string(), "pomodoro-timer".to_string()];
+        config.save_to(&path).expect("save_to must succeed");
+
+        let reloaded_toml = std::fs::read_to_string(&path).unwrap();
+        let reloaded = AppConfig::parse(&reloaded_toml).expect("saved config must parse back");
+
+        assert!(reloaded.plugins.enabled);
+        assert_eq!(
+            reloaded.plugins.allowed_list,
+            vec!["hello", "pomodoro-timer"]
         );
 
         std::fs::remove_dir_all(&dir).ok();
