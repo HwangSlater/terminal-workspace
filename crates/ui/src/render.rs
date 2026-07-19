@@ -3173,6 +3173,39 @@ mod tests {
     }
 
     #[test]
+    fn command_bar_prefers_the_error_over_autocomplete_hints_when_both_are_set() {
+        // `step34.md`: `keyboard.rs` clears `last_error` on the very next
+        // keystroke, so in practice this combination is transient -- but
+        // `render_command_bar` itself still has an unconditional early
+        // return on `last_error`, and that priority is deliberate (an
+        // error the user hasn't acted on yet should never be silently
+        // replaced by a hint line). Constructing the state directly here
+        // (bypassing `keyboard.rs`) is the only way to exercise that
+        // render-level priority in isolation.
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            cmd_buffer: CommandBufferState {
+                raw_text: "/se".to_string(),
+                last_error: Some("'nope' 채널을 찾을 수 없습니다".to_string()),
+                autocomplete_suggestions: vec!["/send".to_string()],
+                selected_suggestion_index: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(
+            &text,
+            "채널을 찾을 수 없습니다"
+        ));
+        // "Tab:" alone isn't a safe marker -- the footer legitimately shows
+        // "Tab:다음 패널" regardless of the command bar's state (see the
+        // no-suggestions test below). The hint's own opening paren is what
+        // actually distinguishes it.
+        assert!(!contains_ignoring_whitespace(&text, "(Tab:"));
+    }
+
+    #[test]
     fn command_bar_shows_the_autocomplete_hint_when_suggestions_exist() {
         let state = WorkspaceState {
             focus_mode: FocusMode::Input,

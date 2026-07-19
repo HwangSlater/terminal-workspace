@@ -598,6 +598,17 @@ fn capture_github_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> Key
 fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Char(c) => {
+            // Real bug fix, reported via live use (`step34.md`): a failed
+            // command's error stayed on screen indefinitely, and
+            // `render_command_bar`'s error branch unconditionally
+            // `return`s before it ever reaches the autocomplete-hint
+            // code -- so typing a brand new command after any failure
+            // showed the *previous* error glued onto it forever, with no
+            // Tab hint at all, however valid the new text was. Clearing
+            // it here, on the first keystroke of a new attempt, is enough
+            // to fix both: the error branch stops matching, so the
+            // ordinary text+hint rendering takes over immediately.
+            state.cmd_buffer.last_error = None;
             let buf = &mut state.cmd_buffer;
             buf.raw_text.insert(buf.cursor_position, c);
             buf.cursor_position += c.len_utf8();
@@ -605,6 +616,7 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
             None
         }
         KeyCode::Backspace => {
+            state.cmd_buffer.last_error = None;
             let buf = &mut state.cmd_buffer;
             if let Some(prev) = buf.raw_text[..buf.cursor_position].chars().next_back() {
                 let new_pos = buf.cursor_position - prev.len_utf8();
@@ -1050,6 +1062,50 @@ mod tests {
         assert!(state.cmd_buffer.last_error.is_some());
         // Still recorded in history like any other submitted line.
         assert_eq!(state.cmd_buffer.history, vec!["/send #nope hi".to_string()]);
+    }
+
+    #[test]
+    fn typing_after_a_failed_command_clears_the_stale_error() {
+        let mut state = state_with_general_channel();
+        type_and_submit(&mut state, "/send #nope hi");
+        assert!(state.cmd_buffer.last_error.is_some());
+
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+
+        assert!(state.cmd_buffer.last_error.is_none());
+        assert_eq!(state.cmd_buffer.raw_text, "/");
+    }
+
+    #[test]
+    fn backspacing_after_a_failed_command_clears_the_stale_error() {
+        let mut state = state_with_general_channel();
+        type_and_submit(&mut state, "/send #nope hi");
+        assert!(state.cmd_buffer.last_error.is_some());
+        // Enter's own `mem::take` already emptied `raw_text`; type one
+        // character back in so Backspace has something to remove.
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(state.cmd_buffer.last_error.is_none());
+        // Re-set the error to isolate Backspace's own clearing behavior
+        // from Char's, which the previous keystroke already exercised.
+        state.cmd_buffer.last_error = Some("stale".to_string());
+
+        handle_key(&mut state, key(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert!(state.cmd_buffer.last_error.is_none());
+    }
+
+    #[test]
+    fn typing_a_new_slash_command_after_a_failed_send_shows_autocomplete_again() {
+        let mut state = state_with_general_channel();
+        type_and_submit(&mut state, "/send #nope hi");
+        assert!(state.cmd_buffer.last_error.is_some());
+
+        for c in "/se".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        assert!(state.cmd_buffer.last_error.is_none());
+        assert!(!state.cmd_buffer.autocomplete_suggestions.is_empty());
     }
 
     #[test]
