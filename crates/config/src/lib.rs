@@ -291,13 +291,19 @@ impl AppConfig {
     }
 
     /// Overwrite `path` with this config, serialized as TOML. Used by the
-    /// Slack channel/user picker (`step8.md`) to persist a selection —
-    /// **not** part of the normal boot path, which stays read-only.
+    /// Slack/GitHub channel/repo pickers and their `/slack-watch`/
+    /// `/repo-watch` command equivalents (`step8.md`, `step41.md`) to
+    /// persist a selection — **not** part of the normal boot path, which
+    /// stays read-only. Always writes the *whole* struct, so a caller
+    /// should build `self` from a fresh `load_or_create_default()` read
+    /// immediately beforehand, not a snapshot cached from earlier in the
+    /// process — see `step42.md` for the real bug a stale snapshot caused.
     ///
     /// Round-trips through `serde`, so hand-added comments/formatting in an
     /// existing file are lost on save. Accepted limitation, same category
     /// as `EncryptedFileProvider`'s honest tradeoff (`crates/secrets`) —
-    /// pre-v1.0 with no public users yet, not hidden.
+    /// disclosed here and in every integration doc that triggers a save,
+    /// not hidden.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| WorkspaceError::Configuration(e.to_string()))?;

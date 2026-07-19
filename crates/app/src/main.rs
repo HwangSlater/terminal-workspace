@@ -30,7 +30,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
-use tokio::sync::Mutex;
 use tracing::info;
 use ui::TuiRenderer;
 
@@ -44,7 +43,6 @@ use ui::TuiRenderer;
 struct ConfigFileSlackSelectionApplier {
     slack_adapter: Arc<SlackAdapter>,
     config_path: PathBuf,
-    base_config: Mutex<AppConfig>,
 }
 
 #[async_trait]
@@ -56,7 +54,21 @@ impl SlackSelectionApplier for ConfigFileSlackSelectionApplier {
         watched_user_ids: Vec<String>,
     ) -> Result<()> {
         {
-            let mut cfg = self.base_config.lock().await;
+            // Re-read the file fresh immediately before writing it back
+            // (`step42.md`) -- this used to mutate a `base_config`
+            // snapshot cached once at process startup, and `save_to`
+            // always overwrites the *whole* file, so any field that
+            // changed on disk after startup (a newer default from a
+            // config-schema change, a hand edit, another selection saved
+            // in between) got silently reverted back to its stale
+            // in-memory value on every save. A real instance of exactly
+            // this bit a user directly: `step32.md` raised
+            // `right_dock_width`'s default, but a Slack picker save from
+            // an older-config session kept re-freezing it back to the
+            // old value on every subsequent save (`step33.md`'s
+            // Verification section, fixed by hand-editing the file at
+            // the time -- this closes the actual root cause).
+            let mut cfg = AppConfig::load_or_create_default()?;
             cfg.integrations.slack.channel_ids = channel_ids.clone();
             cfg.integrations.slack.watched_user_ids = watched_user_ids.clone();
             cfg.integrations.slack.enabled = true;
@@ -76,14 +88,15 @@ impl SlackSelectionApplier for ConfigFileSlackSelectionApplier {
 struct ConfigFileGitHubSelectionApplier {
     github_adapter: Arc<GitHubAdapter>,
     config_path: PathBuf,
-    base_config: Mutex<AppConfig>,
 }
 
 #[async_trait]
 impl SelectionApplier for ConfigFileGitHubSelectionApplier {
     async fn apply(&self, event_bus: Arc<dyn EventBus>, items: Vec<String>) -> Result<()> {
         {
-            let mut cfg = self.base_config.lock().await;
+            // See `ConfigFileSlackSelectionApplier::apply`'s matching
+            // comment (`step42.md`) -- same fresh-read-before-write fix.
+            let mut cfg = AppConfig::load_or_create_default()?;
             cfg.integrations.github.repositories = items.clone();
             cfg.integrations.github.enabled = true;
             cfg.save_to(&self.config_path)?;
@@ -394,7 +407,6 @@ async fn main() -> Result<()> {
         Arc::new(ConfigFileSlackSelectionApplier {
             slack_adapter: Arc::clone(&slack_adapter),
             config_path: config::resolve_config_path(),
-            base_config: Mutex::new(config.clone()),
         });
 
     // 4b. GitHub's equivalent of step 4 (`step10.md`) — always constructed
@@ -414,7 +426,6 @@ async fn main() -> Result<()> {
         Arc::new(ConfigFileGitHubSelectionApplier {
             github_adapter: Arc::clone(&github_adapter),
             config_path: config::resolve_config_path(),
-            base_config: Mutex::new(config.clone()),
         });
 
     // 4c. Calendar's equivalent of step 4 (`step12.md`, extended for

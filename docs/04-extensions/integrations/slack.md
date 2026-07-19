@@ -62,7 +62,7 @@ channel_ids = ["C0123456789"]
 watched_user_ids = ["U0123456789", "U0987654321"]
 ```
 
-Token is **not** in this file — see Authentication above. `AppConfig::save_to` (used by the `Ctrl+P` picker) round-trips through `serde`, so hand-added comments/formatting elsewhere in this file are lost if the picker writes it — an accepted, documented limitation (`step8.md`), not a silent one.
+Token is **not** in this file — see Authentication above. `AppConfig::save_to` (used by the `Ctrl+P` picker and `/slack-watch`, `step41.md`) round-trips through `serde`, so hand-added comments/formatting elsewhere in this file are lost if either writes it — an accepted, documented limitation (`step8.md`), not a silent one. **`step42.md`**: it used to also read from a config snapshot cached once at process startup rather than the file's current contents, so any *other* field that changed on disk after startup (a newer default, a hand edit, another selection saved in between) got silently reverted on every save — a real bug a user hit directly (`step33.md`'s Verification section). Fixed by reading fresh from disk immediately before every save instead of relying on a cached copy.
 
 ## Testing
 

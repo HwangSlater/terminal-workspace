@@ -56,7 +56,7 @@ sync_interval_secs = 60
 repositories = ["rust-lang/rust", "google/terminal-workspace"]
 ```
 
-Token is **not** in this file — see Authentication above. `AppConfig::save_to` (used by the `Ctrl+R` picker) round-trips through `serde`, so hand-added comments/formatting elsewhere in this file are lost if the picker writes it — same accepted, documented limitation as Slack's picker (`step8.md`).
+Token is **not** in this file — see Authentication above. `AppConfig::save_to` (used by the `Ctrl+R` picker and `/repo-watch`, `step41.md`) round-trips through `serde`, so hand-added comments/formatting elsewhere in this file are lost if either writes it — same accepted, documented limitation as Slack's picker (`step8.md`). **`step42.md`**: also fixed the same stale-config-snapshot bug Slack's picker had — see `slack.md`'s matching note.
 
 ## Testing
 
