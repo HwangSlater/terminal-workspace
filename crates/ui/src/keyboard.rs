@@ -144,6 +144,12 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
         (KeyCode::Char('s'), m) if m.contains(KeyModifiers::CONTROL) => {
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::SlackSetup;
+            // Clears whatever was typed before an earlier Esc, not just
+            // `status` -- otherwise a fresh paste appends onto leftover
+            // text from a prior attempt instead of replacing it, producing
+            // a garbled token/URL with no visible sign anything is wrong
+            // (real bug found via a live Calendar connection failure).
+            state.slack_setup.token_input.clear();
             state.slack_setup.status = SlackSetupStatus::Idle;
             Some(KeyOutcome::Handled)
         }
@@ -156,6 +162,8 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
         (KeyCode::Char('g'), m) if m.contains(KeyModifiers::CONTROL) => {
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::GitHubSetup;
+            // See the matching comment on Ctrl+S above -- same bug, same fix.
+            state.github_setup.token_input.clear();
             state.github_setup.status = GitHubSetupStatus::Idle;
             Some(KeyOutcome::Handled)
         }
@@ -168,6 +176,10 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
         (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::CalendarSetup;
+            // See the matching comment on Ctrl+S above -- same bug, same
+            // fix (this is the one a live Calendar connection failure
+            // actually traced back to).
+            state.calendar_setup.token_input.clear();
             state.calendar_setup.status = CalendarSetupStatus::Idle;
             Some(KeyOutcome::Handled)
         }
@@ -641,7 +653,9 @@ fn resolve_channel_id(target: &str, picker: &SlackPickerState) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{PickerRow, SlackPickerState};
+    use crate::state::{
+        CalendarSetupState, GitHubSetupState, PickerRow, SlackPickerState, SlackSetupState,
+    };
     use crossterm::event::KeyEventKind;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -981,6 +995,23 @@ mod tests {
         assert_eq!(state.active_overlay, OverlayKind::SlackSetup);
     }
 
+    /// Real bug: typing a partial token, pressing Esc, then reopening with
+    /// Ctrl+S left the old text sitting in `token_input` -- a fresh paste
+    /// would append onto it instead of replacing it, silently producing a
+    /// garbled token with no visible sign anything was wrong.
+    #[test]
+    fn ctrl_s_clears_leftover_token_input_from_a_previous_attempt() {
+        let mut state = WorkspaceState {
+            slack_setup: SlackSetupState {
+                token_input: "leftover-from-before".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(state.slack_setup.token_input, "");
+    }
+
     #[test]
     fn slack_setup_overlay_captures_typed_characters_masked_in_render() {
         let mut state = WorkspaceState {
@@ -1137,6 +1168,21 @@ mod tests {
         assert_eq!(state.active_overlay, OverlayKind::GitHubSetup);
     }
 
+    /// See `ctrl_s_clears_leftover_token_input_from_a_previous_attempt` --
+    /// same bug, same fix, same regression guard for GitHub.
+    #[test]
+    fn ctrl_g_clears_leftover_token_input_from_a_previous_attempt() {
+        let mut state = WorkspaceState {
+            github_setup: GitHubSetupState {
+                token_input: "leftover-from-before".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert_eq!(state.github_setup.token_input, "");
+    }
+
     #[test]
     fn github_setup_overlay_captures_typed_characters() {
         let mut state = WorkspaceState {
@@ -1184,6 +1230,23 @@ mod tests {
         assert_eq!(outcome, KeyOutcome::Handled);
         assert_eq!(state.focus_mode, FocusMode::Overlay);
         assert_eq!(state.active_overlay, OverlayKind::CalendarSetup);
+    }
+
+    /// See `ctrl_s_clears_leftover_token_input_from_a_previous_attempt` --
+    /// this is the one a live Calendar connection failure actually traced
+    /// back to (a stale partial entry concatenated with a fresh paste
+    /// produced a URL `reqwest` rejected as "relative URL without a base").
+    #[test]
+    fn ctrl_l_clears_leftover_token_input_from_a_previous_attempt() {
+        let mut state = WorkspaceState {
+            calendar_setup: CalendarSetupState {
+                token_input: "leftover-from-before".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert_eq!(state.calendar_setup.token_input, "");
     }
 
     #[test]

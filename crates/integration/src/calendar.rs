@@ -142,6 +142,25 @@ impl IntegrationAdapter for CalendarAdapter {
 #[async_trait]
 impl IntegrationConnector for CalendarAdapter {
     async fn connect(&self, event_bus: Arc<dyn EventBus>, token: String) -> Result<()> {
+        // Validate before ever saving or polling -- a non-absolute URL
+        // (most commonly: the "https://calendar.google.com/..." prefix got
+        // dropped while copying the secret address) previously sailed
+        // straight through to `Connecting`, then sat there forever: the
+        // poll loop's `reqwest::Client::get` fails with an opaque "relative
+        // URL without a base" that was never surfaced anywhere a user could
+        // see it before `step23.md`'s follow-up added poll-failure logging.
+        // Rejecting it immediately, with a clear reason, means the setup
+        // overlay shows `Failed(...)` right away instead of a
+        // never-resolving "연결 중...".
+        match reqwest::Url::parse(token.trim()) {
+            Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {}
+            _ => {
+                return Err(WorkspaceError::Integration(
+                    "Calendar URL must be a full http(s) address (e.g. https://calendar.google.com/calendar/ical/.../basic.ics) -- got a value that isn't a valid absolute URL".into(),
+                ));
+            }
+        }
+
         self.secret_writer
             .set_secret(CALENDAR_URL_KEY, &token)
             .await?;
@@ -512,6 +531,34 @@ mod tests {
         assert_eq!(
             adapter.health_check().await.unwrap(),
             ConnectionStatus::Connecting
+        );
+    }
+
+    /// Real regression test: a URL missing its `https://` prefix (the most
+    /// common real-world mistake -- the scheme dropping off while copying
+    /// Google's "secret address in iCal format") must be rejected
+    /// immediately, not accepted and left to fail silently on the first
+    /// poll cycle with an opaque `reqwest` "relative URL without a base"
+    /// error nobody could see.
+    #[tokio::test]
+    async fn connect_rejects_a_url_missing_its_scheme() {
+        let (adapter, writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+
+        let result = adapter
+            .connect(
+                Arc::clone(&event_bus),
+                "calendar.google.com/calendar/ical/xxx/basic.ics".to_string(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        // Must not have been saved -- a bad credential shouldn't survive a
+        // restart to keep silently failing.
+        assert!(writer.written.lock().await.is_empty());
+        assert_eq!(
+            adapter.health_check().await.unwrap(),
+            ConnectionStatus::Disconnected
         );
     }
 
