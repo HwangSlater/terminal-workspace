@@ -353,7 +353,10 @@ async fn main() -> Result<()> {
     //    root Application span (see docs/05-operations/logging.md §0).
     //    `init_logger` also returns a `LogBuffer` (`step17.md`) feeding the
     //    TUI's live log panel -- threaded into `TuiRenderer::new` below.
-    let log_buffer = init_logger(&config.core.log_level)?;
+    //    `_log_guard` (`step35.md`) must stay alive for the rest of `main`
+    //    (dropping it early would truncate the log file) -- bound here and
+    //    never touched again, so it naturally lives until process exit.
+    let (log_buffer, _log_guard) = init_logger(&config.core.log_level)?;
     let _application_span = application_span().entered();
     info!("Starting Terminal Workspace Core Daemon...");
     info!("Workspace settings loaded successfully.");

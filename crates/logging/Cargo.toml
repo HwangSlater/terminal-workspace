@@ -9,5 +9,6 @@ license.workspace = true
 common = { path = "../common" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 serde.workspace = true

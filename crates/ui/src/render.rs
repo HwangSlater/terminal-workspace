@@ -132,8 +132,8 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 description: "패널 포커스 순환",
             },
             HelpEntry {
-                key: "Ctrl+1~3",
-                description: "패널로 바로 이동 (팀/알림/캘린더)",
+                key: "Ctrl+2~3",
+                description: "패널로 바로 이동 (알림/캘린더)",
             },
             HelpEntry {
                 key: "Ctrl+4",
@@ -1477,7 +1477,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
 
 fn render_footer(frame: &mut Frame, area: Rect) {
     let footer = Paragraph::new(
-        "Tab:다음 패널  Ctrl+1~3:포커스 이동  Ctrl+4:로그 보기  ::명령줄  ?:도움말  Ctrl+Q:종료",
+        "Tab:다음 패널  Ctrl+2~3:포커스 이동  Ctrl+4:로그 보기  ::명령줄  ?:도움말  Ctrl+Q:종료",
     )
     .style(Style::default().fg(theme::MUTED));
     frame.render_widget(footer, area);

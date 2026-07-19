@@ -64,15 +64,26 @@ impl<W: io::Write> io::Write for RedactingWriter<W> {
 }
 
 /// `tracing_subscriber::fmt::MakeWriter` producing a [`RedactingWriter`] over
-/// stderr, for use as `fmt::layer().with_writer(RedactingMakeWriter::default())`.
-#[derive(Clone, Copy, Default)]
-pub struct RedactingMakeWriter;
+/// any other `MakeWriter` (`step35.md` -- generalized from a stderr-only
+/// wrapper so the same scrubbing applies regardless of the destination,
+/// e.g. `fmt::layer().with_writer(RedactingMakeWriter::new(some_file_writer))`).
+#[derive(Clone, Copy)]
+pub struct RedactingMakeWriter<M> {
+    inner: M,
+}
 
-impl<'a> MakeWriter<'a> for RedactingMakeWriter {
-    type Writer = RedactingWriter<io::Stderr>;
+impl<M> RedactingMakeWriter<M> {
+    /// Wrap `inner`, scrubbing every write it produces before it's used.
+    pub fn new(inner: M) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for RedactingMakeWriter<M> {
+    type Writer = RedactingWriter<M::Writer>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        RedactingWriter::new(io::stderr())
+        RedactingWriter::new(self.inner.make_writer())
     }
 }
 
