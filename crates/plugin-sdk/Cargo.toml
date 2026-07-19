@@ -3,6 +3,7 @@ name = "plugin-sdk"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+license.workspace = true
 
 [dependencies]
 wit-bindgen = "0.59.0"

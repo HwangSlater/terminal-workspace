@@ -4,6 +4,7 @@ description = "Terminal-first developer workspace: Slack, GitHub, Gmail, Calenda
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+license.workspace = true
 repository.workspace = true
 
 [package.metadata.wix]

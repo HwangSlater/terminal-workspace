@@ -69,6 +69,8 @@ This is a deliberate "walking skeleton" / steel-thread sequencing choice: prove 
 
 - **Unsigned binaries**: Windows SmartScreen and macOS Gatekeeper both warn on unsigned installers from an unknown publisher. This won't fully disappear without a paid code-signing certificate (and, for macOS, Apple Developer Program notarization). Phase 4 as scoped ships *unsigned* installers — first-run shows an OS warning the user has to click through once. Since Phase 4's installers are pre-release/internal-validation only (per the sequencing above), this is lower-stakes than it would be for a real public release — but the Phase 5+ public release will need an actual answer, not just a deferral. Worth deciding now: accept the warning long-term (many small open-source CLI tools do), or budget for a signing certificate before the real v1.0.0 public release.
 
+  **Resolved, right before the actual v1.0.0 tag** (pre-release readiness sweep, decided directly with the user): accept the warning long-term, no signing certificate for this release. Recorded in `CHANGELOG.md`'s "Known limitations" so it's visible to anyone downloading the release, not just to someone reading this implementation log. Revisit if it turns out to be a real adoption blocker.
+
 ---
 
 ## Verification Plan
