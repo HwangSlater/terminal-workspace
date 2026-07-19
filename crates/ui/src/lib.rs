@@ -99,12 +99,11 @@ pub struct TuiRenderer {
     /// `None` when no Calendar adapter was constructed at all, same
     /// reasoning `slack_messenger`-style `Option` fields use elsewhere.
     calendar_manager: Option<Arc<dyn CalendarManager>>,
-    /// Team dock width (`[layout]` in `config.toml`, `step26.md`) --
+    /// Calendar dock width ceiling (`[layout]` in `config.toml`,
+    /// `step26.md`, retargeted from Team to Calendar in `step32.md`) --
     /// resolved once in `crates/app/src/main.rs` from `AppConfig`, not a
     /// raw config struct, matching every other already-resolved value this
     /// struct holds (e.g. `initial_slack_status`).
-    left_dock_width: u16,
-    /// Calendar dock width, same sourcing as `left_dock_width`.
     right_dock_width: u16,
 }
 
@@ -125,7 +124,6 @@ impl TuiRenderer {
         log_buffer: Arc<LogBuffer>,
         scheduler: Arc<AgendaScheduler>,
         calendar_manager: Option<Arc<dyn CalendarManager>>,
-        left_dock_width: u16,
         right_dock_width: u16,
     ) -> Self {
         Self {
@@ -141,7 +139,6 @@ impl TuiRenderer {
             log_buffer,
             scheduler,
             calendar_manager,
-            left_dock_width,
             right_dock_width,
         }
     }
@@ -286,7 +283,6 @@ impl TuiRenderer {
     async fn apply_pane_action(&self, state: &mut WorkspaceState, action: PaneAction) {
         let model = self.read_model.read().await;
         let len = match state.focused_dock {
-            registry::UiDockSlot::Left => model.team_presence.len(),
             registry::UiDockSlot::Center => model.unread_notifications.len(),
             // Right dock (Calendar) shows only the Calendar-sourced subset
             // of unread_notifications (render::render_calendar_panel) --
@@ -294,12 +290,13 @@ impl TuiRenderer {
             // nothing to navigate; now it has real rows. Shares the same
             // filter render.rs uses so the two can't drift apart.
             registry::UiDockSlot::Right => render::calendar_notifications(&model).len(),
-            // Unreachable in practice since step19.md -- Bottom never
-            // enters `focused_dock` anymore (dropped from `DOCK_CYCLE`,
-            // `Ctrl+4` opens the Log Viewer overlay directly instead of
-            // focusing a dock). Kept for exhaustiveness over
-            // `UiDockSlot`'s four variants.
-            registry::UiDockSlot::Bottom => 0,
+            // Unreachable in practice: Bottom never enters `focused_dock`
+            // (dropped from `DOCK_CYCLE` since step19.md, `Ctrl+4` opens
+            // the Log Viewer overlay directly instead of focusing a dock),
+            // and Left (Team) moved into the header in step32.md and is no
+            // longer a focus-navigable body dock at all. Both arms kept
+            // for exhaustiveness over `UiDockSlot`'s four variants.
+            registry::UiDockSlot::Left | registry::UiDockSlot::Bottom => 0,
         };
         drop(model);
         if len == 0 {
@@ -620,7 +617,6 @@ impl TuiRenderer {
                     &model,
                     &log_lines,
                     &pomodoro,
-                    self.left_dock_width,
                     self.right_dock_width,
                 )
             })

@@ -12,7 +12,7 @@ use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel}
 use events::IntegrationConnectionStatus;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::block::Title;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
@@ -38,7 +38,6 @@ pub fn render(
     model: &DashboardReadModel,
     log_lines: &[String],
     pomodoro: &PomodoroSnapshot,
-    left_dock_width: u16,
     right_dock_width: u16,
 ) {
     let area = frame.size();
@@ -50,53 +49,47 @@ pub fn render(
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header (title / status / Pomodoro rows, step19.md)
-            Constraint::Min(5),    // Body (Left/Center/Right docks)
+            Constraint::Length(4), // Header (title / status / team / Pomodoro rows -- step32.md added the team row)
+            Constraint::Min(5),    // Body (Notification/Calendar docks -- step32.md dropped Team)
             Constraint::Length(1), // Command bar
             Constraint::Length(1), // Footer
         ])
         .split(area);
 
-    render_header(frame, rows[0], state, pomodoro);
+    render_header(frame, rows[0], state, model, pomodoro);
 
     let collapse_sidebars = area.width < SIDEBAR_COLLAPSE_WIDTH;
     if collapse_sidebars {
-        // Below the width where all three body panels fit side by side,
-        // only one is shown at a time -- which one follows `focused_dock`
-        // (already what `Tab`/`Shift+Tab`/`Ctrl+1~3` move) instead of
-        // being hardcoded to the Notification panel regardless of what the
-        // user last focused. Team/Calendar were previously unreachable at
-        // all on a narrow terminal; this was a real usability gap, not a
-        // deliberate simplification.
+        // Below the width where both body panels fit side by side, only
+        // one is shown at a time -- which one follows `focused_dock`
+        // (already what `Tab`/`Shift+Tab`/`Ctrl+2~3` move).
         match state.focused_dock {
-            UiDockSlot::Left => render_team_panel(frame, rows[1], state, model),
             UiDockSlot::Right => render_calendar_panel(frame, rows[1], state, model),
-            // Bottom is unreachable in practice since step19.md -- Log is
-            // now a Ctrl+4 overlay, not a focusable dock -- but the match
-            // stays exhaustive over `UiDockSlot`'s four variants, so it
-            // falls back to Notification defensively like Center does.
-            UiDockSlot::Center | UiDockSlot::Bottom => {
+            // Left (Team) is no longer a body dock at all (step32.md --
+            // it moved into the header); Bottom is unreachable in
+            // practice since step19.md (Log is a Ctrl+4 overlay, not a
+            // focusable dock). Both fall back to Notification, same as
+            // Center itself.
+            UiDockSlot::Left | UiDockSlot::Center | UiDockSlot::Bottom => {
                 render_notification_panel(frame, rows[1], state, model);
             }
         }
     } else {
-        // `left_dock_width` (`config.toml`, step26.md) is a ceiling, not a
-        // fixed value (step27.md): a short roster shouldn't force a wide
-        // empty-looking box, and the Notification panel is already fluid
+        // `right_dock_width` (`config.toml`) is a ceiling, not a fixed
+        // value -- `step27.md`'s pattern for the old Team dock, retargeted
+        // to Calendar in `step32.md` once Team stopped competing with it
+        // for the same row. The Notification panel is already fluid
         // (`Constraint::Min(0)`), so it automatically reclaims whatever
-        // width Team doesn't need.
-        let team_width = team_panel_natural_width(model).min(left_dock_width).max(10);
+        // width Calendar doesn't need.
+        let calendar_width = calendar_panel_natural_width(model)
+            .min(right_dock_width)
+            .max(20);
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(team_width),
-                Constraint::Min(0),
-                Constraint::Length(right_dock_width),
-            ])
+            .constraints([Constraint::Min(0), Constraint::Length(calendar_width)])
             .split(rows[1]);
-        render_team_panel(frame, body[0], state, model);
-        render_notification_panel(frame, body[1], state, model);
-        render_calendar_panel(frame, body[2], state, model);
+        render_notification_panel(frame, body[0], state, model);
+        render_calendar_panel(frame, body[1], state, model);
     }
 
     render_command_bar(frame, rows[2], state);
@@ -933,43 +926,13 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-/// Hard-wraps `text` to `width` terminal columns, honoring wide (e.g.
-/// Korean) characters via `unicode-width` rather than counting `char`s 1:1
-/// -- the Calendar panel's dock width clips long event titles with no way
-/// to see the rest otherwise. Breaks mid-word rather than at word
-/// boundaries: this panel is narrow enough (32 columns by default, minus
-/// borders) that word-wrapping would frequently orphan a single word onto
-/// its own line for little readability gain, not worth the extra
-/// complexity.
-fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(1);
-        if current_width + ch_width > width && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        current.push(ch);
-        current_width += ch_width;
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
 /// Shortens `text` to fit `width` terminal columns, appending `…` when it
-/// doesn't already fit -- the Team dock's alternative to `wrap_to_width`
-/// (`step31.md`): wrapping a *name* onto a second row read oddly for a
-/// list this narrow and this short (realistically a handful of
-/// teammates, not the Calendar panel's longer reminder titles), so a long
-/// name gets shortened in place instead. Unicode-width-aware for the same
-/// reason `wrap_to_width` is.
+/// doesn't already fit -- unicode-width-aware (honors wide, e.g. Korean,
+/// characters rather than counting `char`s 1:1) so a long name or event
+/// title shortens in place instead of wrapping onto a second row, which
+/// read oddly for lists this narrow and short (`step31.md`'s Team dock,
+/// generalized to the Calendar dock in `step32.md`, which additionally
+/// must never wrap under any circumstance).
 fn truncate_with_ellipsis(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -1100,6 +1063,7 @@ fn render_header(
     frame: &mut Frame,
     area: Rect,
     state: &WorkspaceState,
+    model: &DashboardReadModel,
     pomodoro: &PomodoroSnapshot,
 ) {
     let rows = Layout::default()
@@ -1107,6 +1071,7 @@ fn render_header(
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1), // Team roster line (step32.md)
             Constraint::Length(1),
         ])
         .split(area);
@@ -1138,14 +1103,59 @@ fn render_header(
     ]);
     frame.render_widget(Paragraph::new(status_line), rows[1]);
 
+    // Team is no longer a body dock (`step32.md` -- a roster this short
+    // never needed a tall scrollable panel); a compact colored-dot summary
+    // here replaces it. Nothing shown if there's no roster yet, same
+    // "don't clutter an unused feature's row" reasoning `step18.md`
+    // Decision 5 already established for the Pomodoro row below.
+    if !model.team_presence.is_empty() {
+        let team_line = team_header_line(model, rows[2].width as usize);
+        frame.render_widget(Paragraph::new(team_line), rows[2]);
+    }
+
     // Nothing shown while idle (never started) -- `step18.md` Decision 5.
     if let Some((pomodoro_text, pomodoro_color)) = pomodoro_label(pomodoro) {
         let pomodoro_line = Line::from(Span::styled(
             pomodoro_text,
             Style::default().fg(pomodoro_color),
         ));
-        frame.render_widget(Paragraph::new(pomodoro_line), rows[2]);
+        frame.render_widget(Paragraph::new(pomodoro_line), rows[3]);
     }
+}
+
+/// The Team roster as a single header line (`step32.md`), replacing the
+/// old dedicated Team dock -- `"팀  ● Alice  ● Bob"`. Each member gets the
+/// same colored dot `render_team_panel` used before it was removed
+/// (`step31.md`'s convention: the presence color alone carries the
+/// signal, no bracketed status word). Truncated with a trailing `…`
+/// (never wrapped) if the whole roster doesn't fit in `width` columns --
+/// `truncate_with_ellipsis` itself isn't reused here since a single
+/// member's colored dot can't be cleanly split mid-name the way a plain
+/// string can; this checks each whole member "piece" against the budget
+/// instead.
+fn team_header_line(model: &DashboardReadModel, width: usize) -> Line<'static> {
+    const PREFIX: &str = "팀  ";
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(PREFIX)];
+    let mut used = UnicodeWidthStr::width(PREFIX);
+    for (i, member) in model.team_presence.iter().enumerate() {
+        let sep_width = if i == 0 { 0 } else { 2 };
+        let name_width = UnicodeWidthStr::width(member.display_name.as_str());
+        let piece_width = sep_width + 2 + name_width; // 2 = "● "
+        if used + piece_width > width {
+            spans.push(Span::raw("…"));
+            return Line::from(spans);
+        }
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            "● ",
+            Style::default().fg(presence_status_color(member.status)),
+        ));
+        spans.push(Span::raw(member.display_name.clone()));
+        used += piece_width;
+    }
+    Line::from(spans)
 }
 
 /// `🍅 [████░░░░░░] 24:35 (Work)` while running, `⏸` swapped in and dimmed
@@ -1210,84 +1220,6 @@ fn connection_status_label(
         IntegrationConnectionStatus::Failed(_) => ("연결 실패".to_string(), theme::ERROR),
     };
     (format!("{label}: {suffix}"), color)
-}
-
-fn render_team_panel(
-    frame: &mut Frame,
-    area: Rect,
-    state: &WorkspaceState,
-    model: &DashboardReadModel,
-) {
-    let block = dock_block("팀", model.team_presence.len(), UiDockSlot::Left, state);
-    if model.team_presence.is_empty() {
-        let empty = Paragraph::new("(아직 팀원이 없습니다)")
-            .block(block)
-            .wrap(Wrap { trim: true });
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    // Width available for the name once the dot marker ("● ", 2 columns)
-    // and the block's borders are subtracted -- a long display name used
-    // to just get clipped by `List` (same class of bug `wrap_to_width`
-    // fixed for the Calendar panel), with no indication anything was cut
-    // off (`step31.md`).
-    let name_width = area.width.saturating_sub(2 + 2).max(1) as usize;
-
-    let items: Vec<ListItem> = model
-        .team_presence
-        .iter()
-        .enumerate()
-        .map(|(i, member)| {
-            let selected = state.focused_dock == UiDockSlot::Left && i == state.selected_index;
-            let name = truncate_with_ellipsis(&member.display_name, name_width);
-            let line = Line::from(vec![
-                // A colored dot instead of a bracketed status word
-                // (`step31.md`) -- shorter (so it rarely needs
-                // truncating at all), and the presence color alone
-                // already carries the same at-a-glance signal a text
-                // label did. Colored regardless of selection -- the
-                // selected-row background (`theme::selected_style`)
-                // doesn't touch a span's own `fg`, so the dot's color
-                // still reads the same either way.
-                Span::styled(
-                    "● ",
-                    Style::default().fg(presence_status_color(member.status)),
-                ),
-                Span::raw(name),
-            ]);
-            let style = if selected {
-                theme::selected_style()
-            } else {
-                Style::default()
-            };
-            ListItem::new(line).style(style)
-        })
-        .collect();
-    frame.render_widget(List::new(items).block(block), area);
-}
-
-/// How wide the Team dock actually needs to be for its real content
-/// (`step27.md`) -- the longest `"● {display_name}"` line (or the
-/// empty-state text), plus 2 for the block's borders. The caller still
-/// clamps this against the configured `left_dock_width` (a ceiling, not a
-/// target) and a floor, so this function itself doesn't need to know
-/// either bound. Shrunk further in `step31.md`, when the bracketed status
-/// word became a 2-column dot -- most rosters now fit comfortably under
-/// even a small ceiling without any name needing `truncate_with_ellipsis`
-/// at all.
-fn team_panel_natural_width(model: &DashboardReadModel) -> u16 {
-    let content_width = if model.team_presence.is_empty() {
-        UnicodeWidthStr::width("(아직 팀원이 없습니다)")
-    } else {
-        model
-            .team_presence
-            .iter()
-            .map(|member| UnicodeWidthStr::width(member.display_name.as_str()) + 2)
-            .max()
-            .unwrap_or(0)
-    };
-    u16::try_from(content_width + 2).unwrap_or(u16::MAX)
 }
 
 fn render_notification_panel(
@@ -1379,42 +1311,61 @@ fn render_calendar_panel(
     }
 
     // Inner width available for text once the block's left/right borders
-    // are subtracted -- ratatui's `List` doesn't wrap long lines on its
-    // own, it clips them, which is exactly what was hiding the rest of
-    // long event titles.
+    // are subtracted.
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
     let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
         .map(|(i, item)| {
             let when = format_occurrence_time(item.timestamp_ms);
-            let full_line = format!("{when}  {}", item.title);
             let style = if state.focused_dock == UiDockSlot::Right && i == state.selected_index {
                 theme::selected_style()
             } else {
                 Style::default()
             };
-            // Dims the timestamp so the title (the part actually worth
-            // scanning) stands out more -- only when the line fits on one
-            // row; the wrapped case falls back to plain text, since
-            // `wrap_to_width` operates on a flat string and re-deriving
-            // span boundaries across wrapped rows isn't worth the
-            // complexity for what's already a fallback path.
-            let lines: Vec<Line> = if UnicodeWidthStr::width(full_line.as_str()) <= inner_width {
-                vec![Line::from(vec![
-                    Span::styled(when, Style::default().fg(theme::MUTED)),
-                    Span::raw(format!("  {}", item.title)),
-                ])]
-            } else {
-                wrap_to_width(&full_line, inner_width)
-                    .into_iter()
-                    .map(Line::from)
-                    .collect()
-            };
-            ListItem::new(Text::from(lines)).style(style)
+            // Never wraps (`step32.md`, explicitly requested) -- the
+            // dock's width is itself content-sized up to a generous
+            // ceiling (`calendar_panel_natural_width`), so a title only
+            // actually needs shortening here for a genuine outlier, the
+            // same `truncate_with_ellipsis` treatment `step31.md` gave
+            // the Team panel's names.
+            let when_width = UnicodeWidthStr::width(when.as_str());
+            let title_budget = inner_width.saturating_sub(when_width + 2);
+            let title = truncate_with_ellipsis(&item.title, title_budget);
+            let line = Line::from(vec![
+                Span::styled(when, Style::default().fg(theme::MUTED)),
+                Span::raw(format!("  {title}")),
+            ]);
+            ListItem::new(line).style(style)
         })
         .collect();
     frame.render_widget(List::new(list_items).block(block), area);
+}
+
+/// How wide the Calendar dock actually needs to be for its currently
+/// visible items (`step27.md`'s pattern, retargeted from Team to Calendar
+/// in `step32.md`) -- the longest `"{time}  {title}"` line (or the
+/// longest empty-state text), plus 2 for the block's borders. The caller
+/// clamps this against the configured `right_dock_width` (a ceiling, not
+/// a target) and a floor, so this function itself doesn't need to know
+/// either bound.
+fn calendar_panel_natural_width(model: &DashboardReadModel) -> u16 {
+    let items = calendar_notifications(model);
+    let content_width = if items.is_empty() {
+        UnicodeWidthStr::width("(Calendar 연동이 연결되지 않았습니다 — Ctrl+L)")
+    } else {
+        items
+            .iter()
+            .map(|item| {
+                let when = format_occurrence_time(item.timestamp_ms);
+                UnicodeWidthStr::width(when.as_str())
+                    + 2
+                    + UnicodeWidthStr::width(item.title.as_str())
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    u16::try_from(content_width + 2).unwrap_or(u16::MAX)
 }
 
 /// `"7/20 14:00"` in the user's local time (not UTC — `timestamp_ms` is
@@ -1626,26 +1577,27 @@ mod tests {
         panic!("'{needle}' not found in rendered buffer");
     }
 
-    /// `step26.md`'s configurable dock widths' pre-`step26.md` defaults --
-    /// what every test that doesn't care about custom widths should keep
-    /// exercising, so this pair stays the single source of truth for
-    /// "the ordinary, unconfigured layout" rather than each test call site
-    /// hardcoding `24`/`32` directly.
-    const DEFAULT_LEFT_DOCK_WIDTH: u16 = 24;
-    const DEFAULT_RIGHT_DOCK_WIDTH: u16 = 32;
+    /// `step26.md`'s configurable dock width's pre-`step26.md` default --
+    /// what every test that doesn't care about a custom width should keep
+    /// exercising, so this stays the single source of truth for "the
+    /// ordinary, unconfigured layout" rather than each test call site
+    /// hardcoding `32` directly. Raised to 60 in `step32.md`, once
+    /// Calendar stopped competing with Team (moved into the header) for
+    /// the same row.
+    const DEFAULT_RIGHT_DOCK_WIDTH: u16 = 60;
 
     fn draw(width: u16, height: u16, state: &WorkspaceState, model: &DashboardReadModel) -> String {
         draw_with_logs(width, height, state, model, &[])
     }
 
-    /// Like [`draw`], but with custom dock widths (`step26.md`) -- for
-    /// tests specifically about the configurable-layout feature.
+    /// Like [`draw`], but with a custom Calendar dock width ceiling
+    /// (`step26.md`) -- for tests specifically about the
+    /// configurable-layout feature.
     fn draw_with_dock_widths(
         width: u16,
         height: u16,
         state: &WorkspaceState,
         model: &DashboardReadModel,
-        left_dock_width: u16,
         right_dock_width: u16,
     ) -> String {
         buffer_text(&draw_terminal(
@@ -1655,14 +1607,13 @@ mod tests {
             model,
             &[],
             &PomodoroSnapshot::default(),
-            left_dock_width,
             right_dock_width,
         ))
     }
 
     /// Like [`draw`], but with real log panel content (`step17.md`) --
     /// kept separate rather than adding a `log_lines` parameter to every
-    /// one of `draw`'s 37 existing call sites, almost none of which care
+    /// one of `draw`'s many existing call sites, almost none of which care
     /// about log panel content.
     fn draw_with_logs(
         width: u16,
@@ -1699,7 +1650,6 @@ mod tests {
             model,
             log_lines,
             pomodoro,
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         ))
     }
@@ -1708,7 +1658,6 @@ mod tests {
     /// itself rather than its flattened text -- for tests that need to
     /// inspect cell styles (`fg_color_of`), not just which characters
     /// rendered where (`step19.md`).
-    #[allow(clippy::too_many_arguments)]
     fn draw_terminal(
         width: u16,
         height: u16,
@@ -1716,23 +1665,12 @@ mod tests {
         model: &DashboardReadModel,
         log_lines: &[String],
         pomodoro: &PomodoroSnapshot,
-        left_dock_width: u16,
         right_dock_width: u16,
     ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    state,
-                    model,
-                    log_lines,
-                    pomodoro,
-                    left_dock_width,
-                    right_dock_width,
-                )
-            })
+            .draw(|frame| render(frame, state, model, log_lines, pomodoro, right_dock_width))
             .unwrap();
         terminal
     }
@@ -1749,55 +1687,62 @@ mod tests {
     }
 
     #[test]
-    fn renders_empty_state_text_for_team_and_notifications() {
+    fn renders_empty_state_text_for_notifications_and_hides_the_team_line_when_empty() {
         let text = draw(
             140,
             30,
             &WorkspaceState::default(),
             &DashboardReadModel::default(),
         );
-        assert!(text.contains("팀"));
-        assert!(contains_ignoring_whitespace(&text, "아직 팀원이 없습니다"));
         assert!(contains_ignoring_whitespace(&text, "알림"));
         assert!(contains_ignoring_whitespace(&text, "아직 알림이 없습니다"));
+        // `step32.md`: no roster yet means no header line at all, the same
+        // "don't clutter an unused feature's row" treatment `step18.md`
+        // already established for the idle Pomodoro row.
+        assert!(!contains_ignoring_whitespace(&text, "팀"));
     }
 
     #[test]
     fn collapses_to_a_single_panel_below_120_columns() {
-        // Center focus (Ctrl+2) shows Notification -- proven separately
-        // from the default-focus case below since WorkspaceState::default()
-        // focuses Left, not Center.
         let state = WorkspaceState {
             focused_dock: UiDockSlot::Center,
             ..Default::default()
         };
         let text = draw(100, 30, &state, &DashboardReadModel::default());
-        assert!(!contains_ignoring_whitespace(&text, "아직 팀원이 없습니다"));
         assert!(contains_ignoring_whitespace(&text, "알림"));
     }
 
     #[test]
     fn collapsed_panel_follows_focused_dock_instead_of_always_showing_notifications() {
-        // Team/Calendar were previously unreachable at all below 120
-        // columns -- this is the actual bug fix, not just a rename of the
-        // test above. Tab/Shift+Tab/Ctrl+1~4 already move `focused_dock`;
-        // the collapsed body now honors it instead of ignoring it.
-        let team_state = WorkspaceState {
-            focused_dock: UiDockSlot::Left,
-            ..Default::default()
-        };
-        let team_text = draw(100, 30, &team_state, &DashboardReadModel::default());
-        assert!(contains_ignoring_whitespace(
-            &team_text,
-            "아직 팀원이 없습니다"
-        ));
-
+        // Calendar was previously unreachable at all below 120 columns --
+        // this is the actual bug fix, not just a rename of the test above.
+        // Tab/Shift+Tab/Ctrl+2~3 already move `focused_dock`; the collapsed
+        // body now honors it instead of ignoring it. (Team has no
+        // collapsed-body equivalent to test since `step32.md` -- it moved
+        // into the header, which renders at every terminal width the same
+        // way regardless of collapse.)
         let calendar_state = WorkspaceState {
             focused_dock: UiDockSlot::Right,
             ..Default::default()
         };
         let calendar_text = draw(100, 30, &calendar_state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&calendar_text, "Ctrl+L"));
+    }
+
+    #[test]
+    fn collapsed_left_focus_falls_back_to_notification_panel() {
+        // Unreachable via real keyboard input since `step32.md` (Left
+        // dropped from `DOCK_CYCLE`, Ctrl+1 removed entirely) -- proves
+        // the defensive fallback still holds if `focused_dock` is ever
+        // `Left` regardless, same reasoning
+        // `collapsed_bottom_focus_falls_back_to_notification_panel` already
+        // established for `Bottom`.
+        let state = WorkspaceState {
+            focused_dock: UiDockSlot::Left,
+            ..Default::default()
+        };
+        let text = draw(100, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "알림"));
     }
 
     #[test]
@@ -1858,25 +1803,6 @@ mod tests {
         // against the filter below, not by scraping rendered text.
         let text = draw(140, 30, &state, &model);
         assert!(contains_ignoring_whitespace(&text, "Design Review"));
-    }
-
-    #[test]
-    fn wrap_to_width_keeps_every_character_across_the_split() {
-        let text = "이것은 아주 긴 문장입니다 매우 매우 매우 길게 만든 문장";
-        let wrapped = wrap_to_width(text, 10);
-        assert!(wrapped.len() > 1, "expected the text to actually wrap");
-        for line in &wrapped {
-            assert!(
-                UnicodeWidthStr::width(line.as_str()) <= 10,
-                "line {line:?} exceeds the requested width"
-            );
-        }
-        assert_eq!(wrapped.concat(), text, "wrapping must not drop characters");
-    }
-
-    #[test]
-    fn wrap_to_width_leaves_short_text_on_one_line() {
-        assert_eq!(wrap_to_width("short", 30), vec!["short".to_string()]);
     }
 
     #[test]
@@ -1981,39 +1907,6 @@ mod tests {
         assert!(
             sooner_pos < later_pos,
             "expected the sooner event to render first:\n{text}"
-        );
-    }
-
-    /// Real regression test, reported via live use: `List` doesn't wrap
-    /// long lines on its own, it clips them at the panel's edge, so an
-    /// event title that didn't fit in the Calendar dock's fixed 32-column
-    /// width was simply invisible past the cutoff with no way to see the
-    /// rest. Confirms the full title now reaches the buffer somewhere
-    /// (wrapped across rows), not just the prefix that fit on one row.
-    #[test]
-    fn calendar_panel_wraps_long_titles_instead_of_clipping_them() {
-        let long_title =
-            "이것은 한 줄에 다 들어가지 않을 정도로 아주 아주 길게 지어진 회의 이름입니다";
-        let model = DashboardReadModel {
-            unread_notifications: vec![sample_notification_for(
-                IntegrationSource::Calendar,
-                long_title,
-            )],
-            ..Default::default()
-        };
-        let text = draw(140, 30, &WorkspaceState::default(), &model);
-        // Checks the *tail* of the title, not the whole reassembled
-        // string: the old bug clipped the line at the panel's width, so
-        // the tail never reached the screen at all -- that's the real
-        // regression guard. A full-string contiguous match isn't used
-        // here because the flattened buffer text joins terminal *rows*,
-        // and an adjoining panel's own border character lands between two
-        // of the Calendar panel's wrapped rows in that flattening even
-        // though the wrap itself is correct -- a `TestBackend` scraping
-        // gotcha (see `buffer_text`'s doc comment), not a real bug.
-        assert!(
-            contains_ignoring_whitespace(&text, "회의 이름입니다"),
-            "expected the tail of the long title to be visible (wrapped), not clipped:\n{text}"
         );
     }
 
@@ -2140,7 +2033,6 @@ mod tests {
             &DashboardReadModel::default(),
             &log_lines,
             &PomodoroSnapshot::default(),
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
         let info_color = fg_color_of(&terminal, "routine");
@@ -2173,58 +2065,20 @@ mod tests {
     /// panicking. Checks exact cell positions (not text search) since the
     /// thing under test *is* where a column boundary lands.
     #[test]
-    fn configured_dock_widths_change_where_the_body_panels_split() {
-        let (left_dock_width, right_dock_width) = (15u16, 50u16);
-        let total_width = 140;
-        let terminal = draw_terminal(
-            total_width,
-            30,
-            &WorkspaceState::default(),
-            &DashboardReadModel::default(),
-            &[],
-            &PomodoroSnapshot::default(),
-            left_dock_width,
-            right_dock_width,
-        );
-        let buffer = terminal.backend().buffer();
-        // Header is `Constraint::Length(3)`, so the body's top border row
-        // (shared by all three panels) is row 3.
-        let body_top_row = 3;
-        let notification_corner = buffer.get(left_dock_width, body_top_row).symbol();
-        assert_eq!(
-            notification_corner, "┌",
-            "expected the Notification panel to start exactly at the configured \
-             left_dock_width ({left_dock_width}), found {notification_corner:?}"
-        );
-        let calendar_x = total_width - right_dock_width;
-        let calendar_corner = buffer.get(calendar_x, body_top_row).symbol();
-        assert_eq!(
-            calendar_corner, "┌",
-            "expected the Calendar panel to start exactly at \
-             total_width - right_dock_width ({calendar_x}), found {calendar_corner:?}"
-        );
-    }
-
-    /// Real regression guard for `step27.md`'s content-sized Team dock --
-    /// a short roster should render narrower than the *configured*
-    /// `left_dock_width`, with the Notification panel's border shifting
-    /// left to reclaim the difference (same cell-position technique as
-    /// `configured_dock_widths_change_where_the_body_panels_split`, since
-    /// `left_dock_width` is now a ceiling, not the exact width used).
-    #[test]
-    fn a_short_roster_shrinks_the_team_dock_below_the_configured_ceiling() {
+    fn configured_right_dock_width_reaches_the_buffer_when_it_is_the_binding_constraint() {
+        // A title long enough that its natural width exceeds any
+        // reasonable ceiling, so the *configured* ceiling -- not the
+        // content -- decides where the Calendar dock starts.
+        let long_title =
+            "이것은 어떤 설정값보다도 훨씬 더 길게 지어진 아주 긴 회의 이름입니다 정말로 깁니다";
         let model = DashboardReadModel {
-            team_presence: vec![MemberPresence {
-                user_id: UserId("u1".into()),
-                display_name: "ab".into(),
-                status: PresenceStatus::Active,
-                custom_status_text: None,
-                last_updated_ms: 0,
-            }],
-            unread_notifications: Vec::new(),
+            unread_notifications: vec![sample_notification_for(
+                IntegrationSource::Calendar,
+                long_title,
+            )],
+            ..Default::default()
         };
-        // "● ab" is far narrower than this configured ceiling.
-        let configured_left_dock_width = 40u16;
+        let right_dock_width = 50u16;
         let total_width = 140;
         let terminal = draw_terminal(
             total_width,
@@ -2233,65 +2087,93 @@ mod tests {
             &model,
             &[],
             &PomodoroSnapshot::default(),
-            configured_left_dock_width,
-            DEFAULT_RIGHT_DOCK_WIDTH,
+            right_dock_width,
         );
         let buffer = terminal.backend().buffer();
-        let body_top_row = 3;
-        // "● " (width 2) + "ab" (width 2) + 2 border columns = 6, but
-        // `render()` also floors the Team dock at 10 columns -- still
-        // well short of the 40-column ceiling.
-        let expected_team_width = 10;
-        let notification_corner = buffer.get(expected_team_width, body_top_row).symbol();
+        // Header is 4 rows now (`step32.md` added the team line).
+        let body_top_row = 4;
+        let calendar_x = total_width - right_dock_width;
+        let calendar_corner = buffer.get(calendar_x, body_top_row).symbol();
         assert_eq!(
-            notification_corner, "┌",
-            "expected the Team dock to shrink to its content width ({expected_team_width}), \
-             not stay at the configured ceiling ({configured_left_dock_width}); \
-             found {notification_corner:?} at x={expected_team_width}"
-        );
-        // And *not* still sitting at the old, unshrunk ceiling.
-        let stale_corner = buffer
-            .get(configured_left_dock_width, body_top_row)
-            .symbol();
-        assert_ne!(
-            stale_corner, "┌",
-            "the Notification panel should have already started before \
-             the configured ceiling ({configured_left_dock_width})"
+            calendar_corner, "┌",
+            "expected the Calendar panel to start exactly at \
+             total_width - right_dock_width ({calendar_x}) when its content exceeds \
+             the ceiling, found {calendar_corner:?}"
         );
     }
 
-    /// A wider configured Calendar dock should mean less wrapping
-    /// (`wrap_to_width`'s regression fix from earlier this phase) -- ties
-    /// the two `step26.md`-adjacent fixes together: a title that needs two
-    /// lines at the default 32-column dock should fit on one at 60.
+    /// Real regression guard for `step27.md`'s content-sized dock pattern,
+    /// retargeted from Team to Calendar in `step32.md` -- a light day's
+    /// events should render narrower than the *configured* `right_dock_width`,
+    /// with the Notification panel's border shifting right to reclaim the
+    /// difference (same cell-position technique as
+    /// `configured_dock_widths_change_where_the_body_panels_split`, since
+    /// `right_dock_width` is a ceiling, not the exact width used).
     #[test]
-    fn a_wider_right_dock_width_wraps_long_titles_less() {
-        let title = "이것은 서른 칸보다 길고 예순 칸보다 짧음";
+    fn a_light_day_shrinks_the_calendar_dock_below_the_configured_ceiling() {
+        let model = DashboardReadModel {
+            unread_notifications: vec![sample_notification_for(IntegrationSource::Calendar, "x")],
+            ..Default::default()
+        };
+        let configured_right_dock_width = 60u16;
+        let total_width = 140;
+        let terminal = draw_terminal(
+            total_width,
+            30,
+            &WorkspaceState::default(),
+            &model,
+            &[],
+            &PomodoroSnapshot::default(),
+            configured_right_dock_width,
+        );
+        let buffer = terminal.backend().buffer();
+        // Header is 4 rows now (`step32.md` added the team line), so the
+        // body's top border row shifted down by one from `step26.md`'s 3.
+        let body_top_row = 4;
+        // `format_occurrence_time(0)` (~9-11 cols) + 2 spaces + "x" (1) +
+        // 2 border columns is nowhere near the 60-column ceiling -- but
+        // `render()` also floors the Calendar dock at 20 columns, same as
+        // the production formula, or this test's own expectation would
+        // silently drift from what actually gets rendered.
+        let calendar_natural_width = calendar_panel_natural_width(&model)
+            .min(configured_right_dock_width)
+            .max(20);
+        assert!(
+            calendar_natural_width < configured_right_dock_width,
+            "test setup assumption broken: natural width {calendar_natural_width} should be \
+             below the {configured_right_dock_width}-column ceiling"
+        );
+        let expected_calendar_x = total_width - calendar_natural_width;
+        let calendar_corner = buffer.get(expected_calendar_x, body_top_row).symbol();
+        assert_eq!(
+            calendar_corner, "┌",
+            "expected the Calendar dock to shrink to its content width, \
+             not stay at the configured ceiling ({configured_right_dock_width}); \
+             found {calendar_corner:?} at x={expected_calendar_x}"
+        );
+    }
+
+    /// `step32.md`, explicitly requested: the Calendar panel must never
+    /// wrap, under any circumstance -- a title too long even for a wide
+    /// configured ceiling is truncated with an ellipsis instead, the same
+    /// `truncate_with_ellipsis` treatment `step31.md` gave the Team
+    /// panel's names.
+    #[test]
+    fn calendar_panel_truncates_never_wraps_a_title_too_long_for_the_ceiling() {
+        let title =
+            "이것은 예순 칸보다 훨씬 더 길게 지어진 회의 이름입니다 정말로 아주 많이 깁니다";
         let model = DashboardReadModel {
             unread_notifications: vec![sample_notification_for(IntegrationSource::Calendar, title)],
             ..Default::default()
         };
-        let narrow = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 24, 32);
-        let wide = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 10, 60);
-        // Scoped to the Calendar panel specifically via the time-prefixed
-        // compound needle (same reasoning as
-        // `calendar_panel_sorts_reminders_soonest_first`): the bare title
-        // alone also renders in the wider Notification panel, which never
-        // wraps at this length regardless of the Calendar dock's
-        // configured width, so it isn't a useful signal on its own.
-        let calendar_needle = format!("{}  {title}", format_occurrence_time(0));
-        // At the default 32-column dock this title wraps, splitting the
-        // tail onto a later row behind another panel's border character
-        // (the same `TestBackend` flattening quirk documented on the
-        // clipping-regression test above) -- so it does *not* appear
-        // contiguously. At 60 columns it fits on one line and does.
+        let text = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 60);
         assert!(
-            !contains_ignoring_whitespace(&narrow, &calendar_needle),
-            "expected the title to still be wrapped (not contiguous) at the default width:\n{narrow}"
+            text.contains('…'),
+            "expected a truncation marker for a title too long for the dock:\n{text}"
         );
         assert!(
-            contains_ignoring_whitespace(&wide, &calendar_needle),
-            "expected the title to fit on one line at the wider configured width:\n{wide}"
+            !contains_ignoring_whitespace(&text, title),
+            "expected the full title to be shortened, not rendered in full:\n{text}"
         );
     }
 
@@ -2311,35 +2193,38 @@ mod tests {
         assert!(text.contains("Alice"));
     }
 
-    /// Real regression guard, reported via live use: a long display name
-    /// used to just get clipped by `List` (`step31.md`) -- no `wrap_to_width`
-    /// treatment ever existed for the Team panel the way the Calendar
-    /// panel got one. Requested directly that names shorten in place
-    /// rather than wrap onto a second row, so this checks for
-    /// `truncate_with_ellipsis`'s marker, not a wrapped continuation.
+    /// Real regression guard, reported via live use (originally about the
+    /// old Team *panel*; the Team roster moved into the header in
+    /// `step32.md`, but the underlying request -- shorten a long name in
+    /// place rather than wrap or clip it -- still applies to the header
+    /// line). A narrow terminal width forces the header's roster line to
+    /// truncate.
     #[test]
-    fn team_panel_truncates_a_long_name_instead_of_clipping_it() {
-        let long_name = "이것은 팀 패널 폭보다 훨씬 긴 이름입니다";
+    fn team_header_line_truncates_a_long_name_instead_of_wrapping_it() {
+        // Repeated well past MIN_WIDTH (80) so this doesn't depend on
+        // precise unicode-width arithmetic matching the header's exact
+        // budget -- any reasonable width computation must truncate this.
+        let long_name = "이것은 헤더 한 줄보다 훨씬 긴 이름입니다 ".repeat(4);
         let model = DashboardReadModel {
             team_presence: vec![MemberPresence {
                 user_id: UserId("u1".into()),
-                display_name: long_name.into(),
+                display_name: long_name.clone(),
                 status: PresenceStatus::Active,
                 custom_status_text: None,
                 last_updated_ms: 0,
             }],
             unread_notifications: Vec::new(),
         };
-        // A narrow configured ceiling, well short of the long name's real
-        // width, so truncation is forced rather than merely possible.
-        let text = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 15, 32);
+        // Minimum supported terminal width -- narrow enough that the
+        // header line can't fit the whole name.
+        let text = draw(MIN_WIDTH, MIN_HEIGHT, &WorkspaceState::default(), &model);
         assert!(
-            !contains_ignoring_whitespace(&text, long_name),
+            !contains_ignoring_whitespace(&text, &long_name),
             "expected the full name to be shortened, not rendered in full:\n{text}"
         );
         assert!(
             text.contains('…'),
-            "expected a truncation marker somewhere in the Team panel:\n{text}"
+            "expected a truncation marker in the header's team line:\n{text}"
         );
     }
 
@@ -2348,9 +2233,11 @@ mod tests {
     /// scenario is drawn in isolation (one member each) instead of two
     /// members in the same frame, since `fg_color_of` returns only the
     /// *first* matching glyph and every row's dot is the same character
-    /// regardless of which member it belongs to.
+    /// regardless of which member it belongs to. Team moved into the
+    /// header in `step32.md`; the dot convention and this test's
+    /// isolation technique both carried over unchanged.
     #[test]
-    fn team_panel_colors_the_presence_dot_like_the_header_does() {
+    fn team_header_line_colors_the_presence_dot_correctly() {
         let active_model = DashboardReadModel {
             team_presence: vec![MemberPresence {
                 user_id: UserId("u1".into()),
@@ -2378,7 +2265,6 @@ mod tests {
             &active_model,
             &[],
             &PomodoroSnapshot::default(),
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
         let offline_terminal = draw_terminal(
@@ -2388,7 +2274,6 @@ mod tests {
             &offline_model,
             &[],
             &PomodoroSnapshot::default(),
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
         assert_eq!(fg_color_of(&active_terminal, "●"), theme::SUCCESS);
@@ -2410,14 +2295,25 @@ mod tests {
             ],
             ..Default::default()
         };
+        // Explicitly focused elsewhere (not Center/Notification): `step32.md`
+        // made Notification the default-focused dock (Team, the old
+        // default, moved into the header), so `WorkspaceState::default()`
+        // now marks this list's first row "selected" -- which replaces its
+        // priority color with the selection highlight
+        // (`theme::selected_style()`) entirely, masking exactly the thing
+        // this test checks. Unrelated to what's being tested here, so it's
+        // sidestepped rather than worked around.
+        let state = WorkspaceState {
+            focused_dock: UiDockSlot::Right,
+            ..Default::default()
+        };
         let terminal = draw_terminal(
             140,
             30,
-            &WorkspaceState::default(),
+            &state,
             &model,
             &[],
             &PomodoroSnapshot::default(),
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
         let high_color = fg_color_of(&terminal, "urgent");
@@ -2429,21 +2325,19 @@ mod tests {
     #[test]
     fn dock_titles_show_a_count_when_non_empty_and_omit_it_when_zero() {
         let model = DashboardReadModel {
-            team_presence: vec![MemberPresence {
-                user_id: UserId("u1".into()),
-                display_name: "Alice".into(),
-                status: PresenceStatus::Active,
-                custom_status_text: None,
-                last_updated_ms: 0,
-            }],
-            unread_notifications: Vec::new(),
+            unread_notifications: vec![sample_notification_for(
+                IntegrationSource::GitHub,
+                "PR review requested",
+            )],
+            ..Default::default()
         };
         let text = draw(140, 30, &WorkspaceState::default(), &model);
-        assert!(contains_ignoring_whitespace(&text, "팀 (1)"));
-        // Notification panel is empty in this model -- must stay plain
-        // "알림", not the noisy "알림 (0)".
-        assert!(!contains_ignoring_whitespace(&text, "알림 (0)"));
-        assert!(contains_ignoring_whitespace(&text, "알림"));
+        assert!(contains_ignoring_whitespace(&text, "알림 (1)"));
+        // Calendar panel is empty in this model (the one notification is
+        // GitHub-sourced) -- must stay plain "캘린더", not the noisy
+        // "캘린더 (0)".
+        assert!(!contains_ignoring_whitespace(&text, "캘린더 (0)"));
+        assert!(contains_ignoring_whitespace(&text, "캘린더"));
     }
 
     #[test]
@@ -3013,7 +2907,6 @@ mod tests {
             &DashboardReadModel::default(),
             &[],
             &PomodoroSnapshot::default(),
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
         // "일" only appears as the Sunday header label in this scenario
@@ -3087,7 +2980,6 @@ mod tests {
             &DashboardReadModel::default(),
             &[],
             &PomodoroSnapshot::default(),
-            DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
         let buffer = terminal.backend().buffer();

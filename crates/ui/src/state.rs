@@ -476,7 +476,10 @@ impl Default for WorkspaceState {
         Self {
             active_layout: ActiveLayout::default(),
             focus_mode: FocusMode::default(),
-            focused_dock: UiDockSlot::Left,
+            // `Left` (Team) is no longer a focus-navigable body dock
+            // (`step32.md` -- Team moved into the header), so the default
+            // focus target becomes Notification instead.
+            focused_dock: UiDockSlot::Center,
             docking_registry: HashMap::new(),
             active_panel_focus: HashMap::new(),
             cmd_buffer: CommandBufferState::default(),

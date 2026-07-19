@@ -201,15 +201,17 @@ fn default_plugins_directory() -> PathBuf {
         .join("plugins")
 }
 
-/// `[layout]` settings (`step26.md`) — the main dashboard's Team (left)
-/// and Calendar (right) dock widths. The Center pane is always fluid, so
-/// it isn't a field here; it simply gets whatever's left.
+/// `[layout]` settings (`step26.md`, narrowed in `step32.md`) — the
+/// Calendar dock's width ceiling. Team moved into the header in
+/// `step32.md` (no longer a `Constraint::Length` dock, so it has no width
+/// to configure); the Center pane is always fluid, so it isn't a field
+/// here either -- it simply gets whatever's left.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutSettings {
-    /// Team dock width, in terminal columns.
-    #[serde(default = "default_left_dock_width")]
-    pub left_dock_width: u16,
-    /// Calendar dock width, in terminal columns.
+    /// Calendar dock width ceiling, in terminal columns -- the dock
+    /// actually renders at `min(this, its real content's natural width)`
+    /// (`step27.md`'s "ceiling, not exact value" pattern, retargeted from
+    /// Team to Calendar in `step32.md`).
     #[serde(default = "default_right_dock_width")]
     pub right_dock_width: u16,
 }
@@ -217,23 +219,18 @@ pub struct LayoutSettings {
 impl Default for LayoutSettings {
     fn default() -> Self {
         Self {
-            left_dock_width: default_left_dock_width(),
             right_dock_width: default_right_dock_width(),
         }
     }
 }
 
-/// Matches `crates/ui/src/render.rs`'s pre-`step26.md` `LEFT_DOCK_WIDTH`
-/// constant -- an existing `config.toml` with no `[layout]` table renders
-/// identically to before this phase.
-fn default_left_dock_width() -> u16 {
-    24
-}
-
-/// Matches `crates/ui/src/render.rs`'s pre-`step26.md` `RIGHT_DOCK_WIDTH`
-/// constant, same reasoning as `default_left_dock_width`.
+/// Raised from `step26.md`'s original 32 in `step32.md`, once Calendar
+/// stopped competing with Team for the same row -- 32 was too narrow to
+/// avoid wrapping for a typical `[label] title` event once multi-calendar
+/// labels (`step24.md`) were in the mix, which was the whole reason this
+/// phase happened.
 fn default_right_dock_width() -> u16 {
-    32
+    60
 }
 
 impl Default for AppConfig {
@@ -317,25 +314,15 @@ impl AppConfig {
                 "refresh_rate_ms cannot be below 16ms (60 FPS max)".into(),
             ));
         }
-        let left_dock_width = self.layout.left_dock_width;
         let right_dock_width = self.layout.right_dock_width;
-        if !(10..=60).contains(&left_dock_width) {
-            return Err(WorkspaceError::Configuration(
-                "layout.left_dock_width must be between 10 and 60 columns".into(),
-            ));
-        }
+        // `screen-spec.md`'s minimum supported terminal is 80 columns wide
+        // -- this bound leaves the fluid Notification pane at least 20 of
+        // those, rather than letting Calendar squeeze it to near-nothing
+        // (`step32.md`: Team no longer competes for the same row, so this
+        // is now a single standalone bound instead of a combined one).
         if !(10..=60).contains(&right_dock_width) {
             return Err(WorkspaceError::Configuration(
                 "layout.right_dock_width must be between 10 and 60 columns".into(),
-            ));
-        }
-        // `screen-spec.md`'s minimum supported terminal is 80 columns wide
-        // -- this bound leaves the fluid Center pane at least 20 of those,
-        // rather than letting two large docks squeeze it to near-nothing.
-        if left_dock_width + right_dock_width > 60 {
-            return Err(WorkspaceError::Configuration(
-                "layout.left_dock_width + layout.right_dock_width must not exceed 60 columns"
-                    .into(),
             ));
         }
         Ok(())
@@ -801,11 +788,9 @@ mod tests {
             log_level = "info"
 
             [layout]
-            left_dock_width = 20
             right_dock_width = 40
         "#;
         let config = AppConfig::parse(toml).expect("valid layout config must parse");
-        assert_eq!(config.layout.left_dock_width, 20);
         assert_eq!(config.layout.right_dock_width, 40);
     }
 
@@ -819,22 +804,29 @@ mod tests {
         "#;
         let config =
             AppConfig::parse(old_toml).expect("a pre-step26 config.toml must not crash startup");
-        assert_eq!(config.layout.left_dock_width, 24);
-        assert_eq!(config.layout.right_dock_width, 32);
+        assert_eq!(config.layout.right_dock_width, 60);
     }
 
     #[test]
-    fn validate_rejects_a_left_dock_width_below_the_10_column_floor() {
-        let toml = r#"
+    fn a_pre_step32_config_toml_with_a_stray_left_dock_width_key_still_parses() {
+        // `step32.md`: Team moved out of the body row, so
+        // `layout.left_dock_width` no longer configures anything -- an
+        // old config.toml that still has the key must not crash startup.
+        // `toml`/`serde` ignore unknown keys by default (no
+        // `deny_unknown_fields`), which is what makes this safe.
+        let old_toml = r#"
             [core]
             theme = "default-dark"
             refresh_rate_ms = 100
             log_level = "info"
 
             [layout]
-            left_dock_width = 5
+            left_dock_width = 24
+            right_dock_width = 40
         "#;
-        assert!(AppConfig::parse(toml).is_err());
+        let config =
+            AppConfig::parse(old_toml).expect("a stray left_dock_width key must not crash startup");
+        assert_eq!(config.layout.right_dock_width, 40);
     }
 
     #[test]
@@ -852,10 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_dock_widths_that_would_leave_the_center_pane_too_narrow() {
-        // Each is individually in-bounds (10..=60), but their sum leaves
-        // less than 20 columns of Center pane on an 80-column minimum
-        // terminal (`screen-spec.md`'s `MIN_WIDTH`).
+    fn validate_rejects_a_right_dock_width_below_the_10_column_floor() {
         let toml = r#"
             [core]
             theme = "default-dark"
@@ -863,8 +852,7 @@ mod tests {
             log_level = "info"
 
             [layout]
-            left_dock_width = 35
-            right_dock_width = 30
+            right_dock_width = 5
         "#;
         assert!(AppConfig::parse(toml).is_err());
     }

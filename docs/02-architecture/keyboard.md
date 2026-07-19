@@ -2,7 +2,7 @@
 
 The Terminal Workspace utilizes a **Modal Input System** (inspired by Vim) to allow developers to perform rapid navigation, command dispatch, and content viewing without leaving the home row.
 
-> **Implementation Status (Phase 5, amended Phase 7/8/13/19)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Team Panel and Notification Panel (the two panels that exist so far); Detail Pane/CI panel navigation will follow when those panels do. `Ctrl+S` (Phase 7, `step7.md`) is the first real Overlay/Dialog Mode dialog with actual input fields — the Slack credential setup screen; line 12's "connection setup" example was written before any adapter existed to connect, and this is what filled it in. `Ctrl+P` (Phase 8, `step8.md`) is the second — a checkbox-list picker for `channel_ids`/`watched_user_ids`, using `j`/`k`/`Space`/`Enter` rather than Tab/arrows (a flat list has no separate "fields" to tab between). **Phase 13** (`step13.md`) gave `Tab` a second meaning specific to Input Mode: classic shell-style completion for the command head (`/a` → `/away`/`/active`, cycling on repeated presses) and, for `/send`'s first argument, the channel name — `Tab`'s Normal Mode meaning (focus-cycle) is unaffected, since the two modes never overlap. **Phase 19** (`step19.md`) repointed `Ctrl+4`/`Ctrl+c`: the row below documented it as "Focus CI/CD Build Status Panel," which was never actually true (the real implementation always mapped it to the Bottom/Log dock, and no CI/CD panel exists) — it now opens the Log Viewer overlay directly, like `Ctrl+S`/`Ctrl+G`/`Ctrl+L` open their own overlays, and `Tab`/`Shift+Tab`'s focus cycle only visits the three real body panels (Team/Notification/Calendar).
+> **Implementation Status (Phase 5, amended Phase 7/8/13/19/32)**: The three input modes, the global key bindings, and the capture pipeline below are implemented in `crates/ui` exactly as specified — global shortcuts take precedence over pane-specific and plugin shortcuts per the rule at the bottom of this document. Pane-specific navigation is implemented for the Notification and Calendar panels; Detail Pane/CI panel navigation will follow when those panels do. `Ctrl+S` (Phase 7, `step7.md`) is the first real Overlay/Dialog Mode dialog with actual input fields — the Slack credential setup screen; line 12's "connection setup" example was written before any adapter existed to connect, and this is what filled it in. `Ctrl+P` (Phase 8, `step8.md`) is the second — a checkbox-list picker for `channel_ids`/`watched_user_ids`, using `j`/`k`/`Space`/`Enter` rather than Tab/arrows (a flat list has no separate "fields" to tab between). **Phase 13** (`step13.md`) gave `Tab` a second meaning specific to Input Mode: classic shell-style completion for the command head (`/a` → `/away`/`/active`, cycling on repeated presses) and, for `/send`'s first argument, the channel name — `Tab`'s Normal Mode meaning (focus-cycle) is unaffected, since the two modes never overlap. **Phase 19** (`step19.md`) repointed `Ctrl+4`/`Ctrl+c`: the row below documented it as "Focus CI/CD Build Status Panel," which was never actually true (the real implementation always mapped it to the Bottom/Log dock, and no CI/CD panel exists) — it now opens the Log Viewer overlay directly, like `Ctrl+S`/`Ctrl+G`/`Ctrl+L` open their own overlays. **Phase 32** (`step32.md`) moved Team out of the body-panel/focus-cycle set entirely — a roster that short (the product's own working assumption: realistically a handful of people) never needed a tall scrollable panel, so it's a single always-visible header line instead. `Tab`/`Shift+Tab`'s focus cycle now only visits the two real body panels (Notification/Calendar); `Ctrl+1` (previously "focus Team") was removed rather than renumbered.
 
 ## Input Modes
 
@@ -37,12 +37,13 @@ When a specific panel is focused in **Normal Mode**, keys change behavior:
 - `Down Arrow`: Move selection down.
 - `Enter`: Activate item (e.g., open thread, edit event).
 - **`step29.md`**: `j`/`k` (and, in overlays that historically accepted `h`/`l` too) are no longer documented as the primary navigation — arrow keys are the one advertised method everywhere, consistent with the Calendar grid view's arrow-only navigation (`step26.md`/`step27.md`). Existing `j`/`k` key bindings in list pickers are left functionally in place (removing them wasn't requested, only the help text advertising them was), so muscle memory built on the old hint still works.
+- **`step32.md`**: the Team roster has no panel-navigation section anymore — it's a static header line, nothing in it is selectable, and up/down movement within it was never wired to any action to begin with (confirmed before removing the panel: selecting a team member changed only its highlight, never triggered anything).
 
 ### 2. Quick Focus Switchers (Global shortcuts)
-- `Ctrl + 1` or `Ctrl + t`: Focus Team Panel.
 - `Ctrl + 2` or `Ctrl + n`: Focus Notification Queue.
 - `Ctrl + 3` or `Ctrl + d`: Focus Detail/Calendar Panel.
-- `Ctrl + 4` or `Ctrl + c`: Open the Log Viewer overlay directly (`step19.md`) — not a "focus a dock" shortcut like the three above; there is no CI/CD Build Status Panel.
+- `Ctrl + 4` or `Ctrl + c`: Open the Log Viewer overlay directly (`step19.md`) — not a "focus a dock" shortcut like the two above; there is no CI/CD Build Status Panel.
+- **`step32.md`**: `Ctrl + 1`/`Ctrl + t` ("Focus Team Panel") is removed, not renumbered — Team is no longer a focus-navigable body dock, and `Ctrl+2`/`Ctrl+3` keep their existing meanings so muscle memory for those two survives.
 
 ---
 
@@ -68,5 +69,5 @@ Because TUI terminals interpret keystrokes differently based on emulator capabil
                          v
                     [Dispatch to Focused Pane] -> Execute Pane Action
 ```
-- If a plugin registers a command or custom shortcut, it **cannot** override Global Hotkeys (`Ctrl+Q`, `Esc`, `Tab`, `Ctrl+1..4`).
+- If a plugin registers a command or custom shortcut, it **cannot** override Global Hotkeys (`Ctrl+Q`, `Esc`, `Tab`, `Ctrl+2..4`).
 - All key-capture operations are non-blocking to prevent UI thread lag.

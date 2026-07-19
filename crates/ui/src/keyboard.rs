@@ -33,7 +33,11 @@ const COMMAND_HEADS: &[&str] = &[
 /// `UiDockSlot::Bottom` (Log) dropped out in `step19.md`: it's no longer a
 /// focusable dock at all, `Ctrl+4` opens the Log Viewer overlay directly
 /// instead.
-const DOCK_CYCLE: [UiDockSlot; 3] = [UiDockSlot::Left, UiDockSlot::Center, UiDockSlot::Right];
+// `Left` (Team) dropped in `step32.md` -- Team moved into the header and
+// is no longer a focus-navigable body dock, the same way `Bottom` was
+// already excluded from this cycle since `step19.md` (its `UiDockSlot`
+// variant kept, just unreachable here).
+const DOCK_CYCLE: [UiDockSlot; 2] = [UiDockSlot::Center, UiDockSlot::Right];
 
 /// A pane-specific navigation action, once a key has fallen through the
 /// global-shortcut checks in Normal mode.
@@ -234,10 +238,10 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             focus_dock(state, -1);
             Some(KeyOutcome::Handled)
         }
-        (KeyCode::Char('1' | 't'), m) if m.contains(KeyModifiers::CONTROL) => {
-            set_focused_dock(state, UiDockSlot::Left);
-            Some(KeyOutcome::Handled)
-        }
+        // `Ctrl+1`/`t` used to focus Team; removed rather than renumbered
+        // in `step32.md` -- Team is no longer a focus-navigable body dock,
+        // and `Ctrl+2`/`Ctrl+3` keep their existing meanings so muscle
+        // memory for those two survives.
         (KeyCode::Char('2' | 'n'), m) if m.contains(KeyModifiers::CONTROL) => {
             set_focused_dock(state, UiDockSlot::Center);
             Some(KeyOutcome::Handled)
@@ -885,18 +889,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_focus_through_all_three_docks_and_wraps() {
-        // Bottom (Log) dropped out of the cycle in step19.md -- it's no
-        // longer a focusable dock, Ctrl+4 opens the Log Viewer overlay
-        // directly instead.
+    fn tab_cycles_focus_through_both_docks_and_wraps() {
+        // Bottom (Log) dropped out of the cycle in step19.md, Left (Team)
+        // in step32.md -- neither is a focusable body dock anymore,
+        // leaving just Notification and Calendar to cycle between.
         let mut state = WorkspaceState::default();
-        assert_eq!(state.focused_dock, UiDockSlot::Left);
-        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(state.focused_dock, UiDockSlot::Center);
         handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(state.focused_dock, UiDockSlot::Right);
         handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(state.focused_dock, UiDockSlot::Left);
+        assert_eq!(state.focused_dock, UiDockSlot::Center);
     }
 
     #[test]
@@ -908,15 +910,27 @@ mod tests {
 
     #[test]
     fn ctrl_4_opens_the_log_viewer_overlay_directly_without_touching_focused_dock() {
-        // Not a "focus a dock" shortcut like Ctrl+1~3 -- step19.md replaced
-        // the old "focus Bottom dock" behavior with opening the overlay
-        // straight away, so `focused_dock` must be untouched.
+        // Not a "focus a dock" shortcut like Ctrl+2/Ctrl+3 -- step19.md
+        // replaced the old "focus Bottom dock" behavior with opening the
+        // overlay straight away, so `focused_dock` must be untouched.
         let mut state = WorkspaceState::default();
         let outcome = handle_key(&mut state, key(KeyCode::Char('4'), KeyModifiers::CONTROL));
         assert_eq!(outcome, KeyOutcome::Handled);
         assert_eq!(state.focus_mode, FocusMode::Overlay);
         assert_eq!(state.active_overlay, OverlayKind::LogViewer);
-        assert_eq!(state.focused_dock, UiDockSlot::Left);
+        assert_eq!(state.focused_dock, UiDockSlot::Center);
+    }
+
+    #[test]
+    fn ctrl_1_no_longer_does_anything() {
+        // `step32.md`: Team moved into the header and is no longer a
+        // focus-navigable body dock -- Ctrl+1 (previously "focus Team")
+        // was removed rather than renumbered, so it now falls through
+        // like any other unmapped Normal-mode key.
+        let mut state = WorkspaceState::default();
+        let before = state.focused_dock;
+        handle_key(&mut state, key(KeyCode::Char('1'), KeyModifiers::CONTROL));
+        assert_eq!(state.focused_dock, before);
     }
 
     #[test]

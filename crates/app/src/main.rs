@@ -653,7 +653,6 @@ async fn main() -> Result<()> {
         log_buffer,
         scheduler,
         Some(Arc::clone(&calendar_adapter) as Arc<dyn CalendarManager>),
-        config.layout.left_dock_width,
         config.layout.right_dock_width,
     );
     renderer.run_loop().await?;
