@@ -3,8 +3,9 @@
 //! diagram, not a new design.
 
 use crate::state::{
-    CalendarSetupStatus, FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind,
-    SlackPickerState, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
+    CalendarPickerStatus, CalendarSetupField, CalendarSetupStatus, FocusMode, GitHubPickerStatus,
+    GitHubSetupStatus, OverlayKind, SlackPickerState, SlackPickerStatus, SlackSetupStatus,
+    WorkspaceState,
 };
 use commands::Command;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -116,6 +117,7 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
             OverlayKind::GitHubSetup => capture_github_setup_input(state, key),
             OverlayKind::GitHubPicker => capture_github_picker_input(state, key),
             OverlayKind::CalendarSetup => capture_calendar_setup_input(state, key),
+            OverlayKind::CalendarPicker => capture_calendar_picker_input(state, key),
         },
         FocusMode::Normal => {
             if let Some(outcome) = try_global_shortcut(state, key) {
@@ -178,10 +180,19 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.active_overlay = OverlayKind::CalendarSetup;
             // See the matching comment on Ctrl+S above -- same bug, same
             // fix (this is the one a live Calendar connection failure
-            // actually traced back to).
+            // actually traced back to). Adds a calendar (step24.md), so
+            // both fields reset, starting on the label.
+            state.calendar_setup.label_input.clear();
             state.calendar_setup.token_input.clear();
+            state.calendar_setup.field = CalendarSetupField::Label;
             state.calendar_setup.status = CalendarSetupStatus::Idle;
             Some(KeyOutcome::Handled)
+        }
+        (KeyCode::Char('k'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::CalendarPicker;
+            state.calendar_picker.status = CalendarPickerStatus::Loading;
+            Some(KeyOutcome::OpenPicker(IntegrationSource::Calendar))
         }
         (KeyCode::Tab, _) => {
             focus_dock(state, 1);
@@ -338,26 +349,76 @@ fn capture_github_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyO
     }
 }
 
-/// Text capture for the Calendar setup overlay's secret-URL field. Mirrors
-/// `capture_github_setup_input`/`capture_slack_setup_input` exactly
-/// (`step12.md`) — the field holds a URL instead of a short token, but the
-/// capture semantics (append/backspace-from-the-end, submit on non-empty
-/// `Enter`) don't care about that distinction.
+/// Text capture for the Calendar setup overlay (`step12.md`, extended to
+/// two fields in `step24.md`): a display label first, then the secret
+/// iCal URL. `Enter` on a non-empty label advances to the URL field
+/// instead of submitting; `Enter` on a non-empty URL submits both,
+/// combined as `"{label}\n{url}"` -- `IntegrationConnector::connect`
+/// splits them back apart, reusing the existing `Command::Connect`/
+/// `KeyOutcome::SubmitToken` plumbing without a new `Command` variant.
 fn capture_calendar_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
     let setup = &mut state.calendar_setup;
+    let field = match setup.field {
+        CalendarSetupField::Label => &mut setup.label_input,
+        CalendarSetupField::Url => &mut setup.token_input,
+    };
     match key.code {
         KeyCode::Char(c) => {
-            setup.token_input.push(c);
+            field.push(c);
             KeyOutcome::Handled
         }
         KeyCode::Backspace => {
-            setup.token_input.pop();
+            field.pop();
             KeyOutcome::Handled
         }
-        KeyCode::Enter if !setup.token_input.is_empty() => {
-            let token = std::mem::take(&mut setup.token_input);
+        KeyCode::Enter if setup.field == CalendarSetupField::Label && !field.is_empty() => {
+            setup.field = CalendarSetupField::Url;
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter if setup.field == CalendarSetupField::Url && !field.is_empty() => {
+            let label = std::mem::take(&mut setup.label_input);
+            let url = std::mem::take(&mut setup.token_input);
             setup.status = CalendarSetupStatus::Connecting;
-            KeyOutcome::SubmitToken(IntegrationSource::Calendar, token)
+            KeyOutcome::SubmitToken(IntegrationSource::Calendar, format!("{label}\n{url}"))
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
+/// Navigation + selection for the Calendar picker overlay (`step24.md`).
+/// Mirrors `capture_github_picker_input` exactly -- one list, "checked"
+/// means "keep", `Enter` submits the kept set (unchecked entries get
+/// removed by `CalendarAdapter::keep_only`, the inverse of GitHub's
+/// "checked means watch this repo").
+fn capture_calendar_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let picker = &mut state.calendar_picker;
+    let total = picker.calendars.len();
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if total > 0 {
+                picker.cursor = (picker.cursor + 1).min(total - 1);
+            }
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            picker.cursor = picker.cursor.saturating_sub(1);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char(' ') => {
+            if let Some(row) = picker.calendars.get_mut(picker.cursor) {
+                row.selected = !row.selected;
+            }
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter => {
+            let keep_ids = picker
+                .calendars
+                .iter()
+                .filter(|r| r.selected)
+                .map(|r| r.id.clone())
+                .collect();
+            picker.status = CalendarPickerStatus::Saving;
+            KeyOutcome::SubmitSelection(IntegrationSource::Calendar, keep_ids)
         }
         _ => KeyOutcome::Handled,
     }
@@ -1250,31 +1311,65 @@ mod tests {
     }
 
     #[test]
-    fn calendar_setup_overlay_captures_typed_characters() {
+    fn calendar_setup_overlay_captures_typed_characters_into_the_label_field_first() {
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarSetup,
             ..Default::default()
         };
-        handle_key(&mut state, key(KeyCode::Char('u'), KeyModifiers::NONE));
-        handle_key(&mut state, key(KeyCode::Char('r'), KeyModifiers::NONE));
-        handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert_eq!(state.calendar_setup.token_input, "url");
+        // Label is the first field (step24.md) -- default `field` is
+        // `Label`, so plain typing goes there before any URL entry.
+        handle_key(&mut state, key(KeyCode::Char('회'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('사'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_setup.label_input, "회사");
+        assert_eq!(state.calendar_setup.token_input, "");
     }
 
     #[test]
-    fn calendar_setup_enter_with_a_url_submits_and_clears_the_input() {
+    fn calendar_setup_enter_on_a_nonempty_label_advances_to_the_url_field_without_submitting() {
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarSetup,
             ..Default::default()
         };
+        handle_key(&mut state, key(KeyCode::Char('회'), KeyModifiers::NONE));
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.calendar_setup.field, CalendarSetupField::Url);
+        // Typing now lands in the URL field, label untouched.
+        handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_setup.label_input, "회");
+        assert_eq!(state.calendar_setup.token_input, "x");
+    }
+
+    #[test]
+    fn calendar_setup_enter_with_an_empty_label_does_not_advance() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.calendar_setup.field, CalendarSetupField::Label);
+    }
+
+    #[test]
+    fn calendar_setup_enter_with_a_url_submits_both_fields_combined_and_clears_the_input() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarSetup,
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('회'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
         handle_key(&mut state, key(KeyCode::Char('x'), KeyModifiers::NONE));
         let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             outcome,
-            KeyOutcome::SubmitToken(IntegrationSource::Calendar, "x".to_string())
+            KeyOutcome::SubmitToken(IntegrationSource::Calendar, "회\nx".to_string())
         );
+        assert_eq!(state.calendar_setup.label_input, "");
         assert_eq!(state.calendar_setup.token_input, "");
         assert_eq!(
             state.calendar_setup.status,
@@ -1287,10 +1382,73 @@ mod tests {
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarSetup,
+            calendar_setup: crate::state::CalendarSetupState {
+                field: CalendarSetupField::Url,
+                label_input: "회사".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(outcome, KeyOutcome::Handled);
+    }
+
+    #[test]
+    fn ctrl_k_opens_the_calendar_picker_overlay() {
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::OpenPicker(IntegrationSource::Calendar));
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::CalendarPicker);
+    }
+
+    fn calendar_picker_state_with_two_calendars() -> crate::state::CalendarPickerState {
+        crate::state::CalendarPickerState {
+            calendars: vec![
+                PickerRow {
+                    id: "id-1".into(),
+                    label: "회사".into(),
+                    selected: true,
+                },
+                PickerRow {
+                    id: "id-2".into(),
+                    label: "개인".into(),
+                    selected: true,
+                },
+            ],
+            cursor: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn calendar_picker_space_toggles_the_row_under_the_cursor() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarPicker,
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!state.calendar_picker.calendars[0].selected);
+        assert!(state.calendar_picker.calendars[1].selected);
+    }
+
+    #[test]
+    fn calendar_picker_enter_submits_only_the_ids_still_selected() {
+        let mut picker = calendar_picker_state_with_two_calendars();
+        picker.calendars[0].selected = false; // unchecked -- will be removed
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarPicker,
+            calendar_picker: picker,
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitSelection(IntegrationSource::Calendar, vec!["id-2".to_string()])
+        );
     }
 
     #[test]

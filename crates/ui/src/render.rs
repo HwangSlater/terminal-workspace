@@ -2,8 +2,8 @@
 //! layout this implements (Phase 5 subset — see `step5.md`).
 
 use crate::state::{
-    CalendarSetupStatus, FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind,
-    SlackPickerStatus, SlackSetupStatus, WorkspaceState,
+    CalendarPickerStatus, CalendarSetupField, CalendarSetupStatus, FocusMode, GitHubPickerStatus,
+    GitHubSetupStatus, OverlayKind, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
 };
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel};
@@ -101,6 +101,7 @@ pub fn render(
             OverlayKind::GitHubPicker => render_github_picker_overlay(frame, area, state),
             OverlayKind::LogViewer => render_log_viewer_overlay(frame, area, log_lines),
             OverlayKind::CalendarSetup => render_calendar_setup_overlay(frame, area, state),
+            OverlayKind::CalendarPicker => render_calendar_picker_overlay(frame, area, state),
         }
     }
 }
@@ -192,10 +193,16 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
     ),
     (
         "Calendar 연동",
-        &[HelpEntry {
-            key: "Ctrl+L",
-            description: "연결 설정 (비공개 iCal 주소)",
-        }],
+        &[
+            HelpEntry {
+                key: "Ctrl+L",
+                description: "캘린더 추가 (이름 + 비공개 iCal 주소)",
+            },
+            HelpEntry {
+                key: "Ctrl+K",
+                description: "연결된 캘린더 관리/제거",
+            },
+        ],
     ),
     (
         "기타",
@@ -381,31 +388,119 @@ fn render_github_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     );
 }
 
-/// In-app Calendar secret iCal URL entry (`step12.md`). Mirrors
-/// `render_github_setup_overlay`/`render_slack_setup_overlay` exactly —
-/// the field holds a URL rather than a short token, but it's still a
-/// bearer credential and gets the same masked treatment. No picker overlay
-/// exists for Calendar (`step12.md` Decision 1's consequence).
+/// In-app Calendar connection entry (`step12.md`, extended to a two-field
+/// add flow in `step24.md`): a display label first (plain text -- it's
+/// shown alongside reminders, not a secret), then the secret iCal URL
+/// (masked, same treatment `render_github_setup_overlay`/
+/// `render_slack_setup_overlay` give their tokens). Adds a calendar to the
+/// existing set rather than replacing it -- see `Ctrl+K`'s picker overlay
+/// (`render_calendar_picker_overlay`) for removal.
 fn render_calendar_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
     let popup = centered_rect(60, 30, area);
     frame.render_widget(Clear, popup);
 
-    let masked: String = "*".repeat(state.calendar_setup.token_input.chars().count());
-    let status_line = match &state.calendar_setup.status {
-        CalendarSetupStatus::Idle => "비공개 iCal 주소를 입력하고 Enter를 누르세요.".to_string(),
+    let setup = &state.calendar_setup;
+    let label_line = match setup.field {
+        CalendarSetupField::Label => format!("이름: {}_", setup.label_input),
+        CalendarSetupField::Url => format!("이름: {}", setup.label_input),
+    };
+    let masked: String = "*".repeat(setup.token_input.chars().count());
+    let url_line = match setup.field {
+        CalendarSetupField::Label => String::new(),
+        CalendarSetupField::Url => format!("\nURL: {masked}"),
+    };
+    let status_line = match &setup.status {
+        CalendarSetupStatus::Idle => match setup.field {
+            CalendarSetupField::Label => {
+                "이 캘린더를 부를 이름을 입력하고 Enter를 누르세요.".to_string()
+            }
+            CalendarSetupField::Url => "비공개 iCal 주소를 입력하고 Enter를 누르세요.".to_string(),
+        },
         CalendarSetupStatus::Connecting => "연결 중...".to_string(),
         CalendarSetupStatus::Connected => "연결됨.".to_string(),
         CalendarSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
     };
-    let text = format!("URL: {masked}\n\n{status_line}\n\nEsc: 닫기");
+    let text = format!("{label_line}{url_line}\n\n{status_line}\n\nEsc: 닫기");
 
     let block = Block::default()
-        .title("Calendar 연결 설정")
+        .title("캘린더 추가")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
+    );
+}
+
+/// Connected-calendar picker (`Ctrl+K`, `step24.md`). Mirrors
+/// `render_github_picker_overlay` almost exactly (single list, no
+/// channel/user section split like Slack's) -- the only real difference is
+/// framing: rows start checked (`open_picker`'s population logic), since
+/// unchecking means "remove" here rather than GitHub's "add this repo to
+/// what I'm watching."
+fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let picker = &state.calendar_picker;
+    let block = Block::default()
+        .title("캘린더 관리 (선택 해제 후 저장 시 제거)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    match &picker.status {
+        CalendarPickerStatus::Loading => {
+            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            return;
+        }
+        CalendarPickerStatus::Failed(reason) => {
+            frame.render_widget(
+                Paragraph::new(format!("불러오기 실패: {reason}\n\nEsc: 닫기"))
+                    .block(block)
+                    .wrap(Wrap { trim: true }),
+                popup,
+            );
+            return;
+        }
+        CalendarPickerStatus::Idle
+        | CalendarPickerStatus::Loaded
+        | CalendarPickerStatus::Saving
+        | CalendarPickerStatus::Saved => {}
+    }
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    if picker.calendars.is_empty() {
+        items.push(ListItem::new(
+            "  (연결된 캘린더가 없습니다 — Ctrl+L로 추가하세요)",
+        ));
+    }
+    for (i, row) in picker.calendars.iter().enumerate() {
+        let checkbox = if row.selected { "[x]" } else { "[ ]" };
+        let style = if picker.cursor == i {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
+    }
+    frame.render_widget(List::new(items), layout[0]);
+
+    let status_line = match &picker.status {
+        CalendarPickerStatus::Saving => "저장 중...",
+        CalendarPickerStatus::Saved => "저장됨!",
+        _ => "j/k: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+    };
+    frame.render_widget(
+        Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
+        layout[1],
     );
 }
 
@@ -1755,14 +1850,16 @@ mod tests {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarSetup,
             calendar_setup: crate::state::CalendarSetupState {
+                field: CalendarSetupField::Url,
                 token_input: "https://secret.example/cal.ics".to_string(),
                 status: CalendarSetupStatus::Idle,
+                ..Default::default()
             },
             ..Default::default()
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(!text.contains("https://secret.example/cal.ics"));
-        assert!(contains_ignoring_whitespace(&text, "Calendar 연결 설정"));
+        assert!(contains_ignoring_whitespace(&text, "캘린더 추가"));
         let mask = "*".repeat("https://secret.example/cal.ics".chars().count());
         assert!(text.contains(&mask));
     }
@@ -1773,8 +1870,8 @@ mod tests {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarSetup,
             calendar_setup: crate::state::CalendarSetupState {
-                token_input: String::new(),
                 status: CalendarSetupStatus::Failed("feed unreachable".to_string()),
+                ..Default::default()
             },
             ..Default::default()
         };

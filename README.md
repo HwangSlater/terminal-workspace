@@ -61,7 +61,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 | `Esc` | 명령줄/도움말/오버레이 닫고 Normal 모드로 복귀 |
 | `Ctrl+S` / `Ctrl+P` | Slack 연결 설정 / 채널·사용자 선택 |
 | `Ctrl+G` / `Ctrl+R` | GitHub 연결 설정 / 저장소 선택 |
-| `Ctrl+L` | Calendar 연결 설정 |
+| `Ctrl+L` / `Ctrl+K` | Calendar 추가 / 연결된 캘린더 관리·제거 |
 | `Ctrl+Q` | 종료 |
 
 ### Slack
@@ -85,7 +85,9 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 ### Calendar
 
 1. Google Calendar → 설정 → 캘린더 통합 → **비공개 iCal 형식 주소**를 복사하세요. OAuth나 로그인 절차가 필요 없습니다.
-2. `Ctrl+L`로 주소를 입력하면 바로 연결됩니다. 앞으로 24시간(설정으로 조절 가능) 이내 일정이 알림 패널에 표시되고, 반복 일정도 인식합니다.
+2. `Ctrl+L`로 이 캘린더를 부를 이름(예: "회사")을 입력하고 Enter, 이어서 주소를 입력하면 바로 연결됩니다. 앞으로 24시간(설정으로 조절 가능) 이내 일정이 알림 패널에 `[회사] 회의 이름`처럼 이름과 함께 표시되고, 반복 일정도 인식합니다.
+3. 여러 캘린더(예: 회사 + 개인)를 동시에 연결할 수 있습니다 — `Ctrl+L`을 다시 눌러 하나씩 추가하세요.
+4. `Ctrl+K`로 연결된 캘린더 목록을 보고, 제거하고 싶은 걸 체크 해제한 뒤 저장하면 됩니다.
 
 자세한 내용은 [`docs/04-extensions/integrations/calendar.md`](docs/04-extensions/integrations/calendar.md) 참고.
 

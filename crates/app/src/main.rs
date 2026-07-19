@@ -92,6 +92,27 @@ impl SelectionApplier for ConfigFileGitHubSelectionApplier {
     }
 }
 
+/// Calendar's equivalent of [`ConfigFileGitHubSelectionApplier`]
+/// (`step24.md`), but with no `config.toml` bridging at all -- unlike
+/// GitHub's watched-repository list, every field of a calendar connection
+/// (label and URL both) is a secret, so there's nothing non-secret to
+/// write to the config file. `CalendarAdapter::keep_only` already handles
+/// persistence (via `SecretWriter`) and restarting polling on its own; this
+/// wrapper exists purely because `SelectionApplier` is defined in
+/// `crates/commands`, which `crates/integration` can't depend on without a
+/// cycle (`crates/commands` already depends on `crates/integration`) --
+/// same reasoning `ConfigFileGitHubSelectionApplier`'s doc comment gives.
+struct CalendarSelectionApplierBridge {
+    calendar_adapter: Arc<CalendarAdapter>,
+}
+
+#[async_trait]
+impl SelectionApplier for CalendarSelectionApplierBridge {
+    async fn apply(&self, event_bus: Arc<dyn EventBus>, items: Vec<String>) -> Result<()> {
+        self.calendar_adapter.keep_only(event_bus, items).await
+    }
+}
+
 /// Maps `integration::ConnectionStatus` to the structurally-identical but
 /// separately-defined `events::IntegrationConnectionStatus` (ADR-0016) —
 /// used once at boot to seed `TuiRenderer`'s initial header status before
@@ -393,13 +414,14 @@ async fn main() -> Result<()> {
             base_config: Mutex::new(config.clone()),
         });
 
-    // 4c. Calendar's equivalent of step 4 (`step12.md`) — always
-    //     constructed for the same "the setup overlay needs something to
-    //     connect through" reason. No messenger, no picker, no selection
-    //     applier: Calendar is read-only with no "list my calendars"
-    //     discovery call under the secret-URL auth model (`step12.md`
-    //     Decision 1's consequence), so there is nothing beyond a
-    //     connector to wire up here.
+    // 4c. Calendar's equivalent of step 4 (`step12.md`, extended for
+    //     multi-calendar support in `step24.md`) — always constructed for
+    //     the same "the setup overlay needs something to connect through"
+    //     reason. No messenger (read-only, nothing to send). It does have a
+    //     picker/selection applier since `step24.md`, but unlike GitHub's
+    //     that's a *local* read of already-connected calendars for
+    //     removal, not a remote "list my calendars" discovery call -- the
+    //     secret-URL auth model still has no such API.
     let calendar_adapter = Arc::new(CalendarAdapter::new(
         CalendarConfig {
             lookahead_hours: config.integrations.calendar.lookahead_hours,
@@ -423,6 +445,12 @@ async fn main() -> Result<()> {
     let mut selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>> =
         HashMap::new();
     selection_appliers.insert(IntegrationSource::GitHub, github_selection_applier);
+    selection_appliers.insert(
+        IntegrationSource::Calendar,
+        Arc::new(CalendarSelectionApplierBridge {
+            calendar_adapter: Arc::clone(&calendar_adapter),
+        }),
+    );
 
     let event_bus = Arc::new(InProcessEventBus::new(256));
 
@@ -607,6 +635,10 @@ async fn main() -> Result<()> {
     let ui_registry = Arc::new(InMemoryUiRegistry::new());
     let mut pickers: HashMap<IntegrationSource, Arc<dyn Picker>> = HashMap::new();
     pickers.insert(IntegrationSource::GitHub, github_picker);
+    pickers.insert(
+        IntegrationSource::Calendar,
+        Arc::clone(&calendar_adapter) as Arc<dyn Picker>,
+    );
     let renderer = TuiRenderer::new(
         ui_registry,
         read_model,

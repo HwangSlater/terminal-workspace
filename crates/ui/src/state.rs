@@ -36,11 +36,16 @@ pub enum OverlayKind {
     GitHubSetup,
     /// Repository picker (`Ctrl+R`, `step10.md`).
     GitHubPicker,
-    /// In-app Calendar secret iCal URL entry (`Ctrl+L`, `step12.md`). No
-    /// picker overlay exists for Calendar — there's no "list my calendars"
-    /// discovery call under the secret-URL auth model (`step12.md`
-    /// Decision 1's consequence).
+    /// In-app Calendar connection entry (`Ctrl+L`, `step12.md`, extended
+    /// for multiple calendars in `step24.md`) — adds a calendar (label +
+    /// secret iCal URL), doesn't replace the existing set.
     CalendarSetup,
+    /// Connected-calendar picker (`Ctrl+K`, `step24.md`) — select which
+    /// calendars to *keep*; unchecking one and saving removes it. A local
+    /// read of already-connected calendars, not a remote "list my
+    /// calendars" discovery call (the secret-URL auth model still has no
+    /// such API).
+    CalendarPicker,
     /// Full scrollback view of the app's own log buffer (`Ctrl+4`,
     /// `step19.md`) — opened directly, the same way `Ctrl+S`/`Ctrl+G`/
     /// `Ctrl+L` open their setup overlays, rather than a "focus a dock,
@@ -195,17 +200,69 @@ pub enum CalendarSetupStatus {
     Failed(String),
 }
 
-/// Text input + last outcome for the Calendar setup overlay (`step12.md`).
-/// The "token" here is the calendar's secret iCal feed URL, not a short
-/// bearer string — masked the same way regardless, since it's still a
-/// bearer credential (leaking it grants read access to the calendar).
+/// Which field the Calendar setup overlay is currently capturing
+/// (`step24.md`) -- adding a calendar now collects a display label before
+/// the secret URL, so unlike Slack/GitHub's single-field overlays this one
+/// has a small two-step sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CalendarSetupField {
+    #[default]
+    Label,
+    Url,
+}
+
+/// Text input + last outcome for the Calendar setup overlay (`step12.md`,
+/// extended for multiple calendars in `step24.md`). The "token" here is
+/// the calendar's secret iCal feed URL, not a short bearer string — masked
+/// the same way regardless, since it's still a bearer credential (leaking
+/// it grants read access to the calendar). `label_input` is a plain
+/// display name, not a secret, and isn't masked.
 #[derive(Debug, Clone, Default)]
 pub struct CalendarSetupState {
+    /// Display label as typed so far (`step24.md`) — shown alongside this
+    /// calendar's reminders once connected, e.g. `[회사] Design Review`.
+    pub label_input: String,
     /// URL as typed so far — rendered masked, never shown in the clear or
     /// pushed into the command bar's history.
     pub token_input: String,
+    /// Which field `Char`/`Backspace`/`Enter` currently apply to.
+    pub field: CalendarSetupField,
     /// Result of the most recent connection attempt, if any.
     pub status: CalendarSetupStatus,
+}
+
+/// Outcome of the Calendar picker's fetch/apply flow (`step24.md`).
+/// Structurally identical to [`GitHubPickerStatus`] — "fetch" here is a
+/// local read of already-connected calendars, not a network call, but the
+/// overlay's loading/saving/failure states still apply the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CalendarPickerStatus {
+    /// Overlay not open, or open but not yet fetched.
+    #[default]
+    Idle,
+    /// `Picker::list_items` in flight.
+    Loading,
+    /// Connected calendars fetched successfully; rows are ready to select.
+    Loaded,
+    /// `Command::ApplySelection` dispatched, awaiting the result.
+    Saving,
+    /// Selection applied (i.e. unselected calendars removed) successfully.
+    Saved,
+    /// A fetch or apply failed; the message is shown to the user.
+    Failed(String),
+}
+
+/// State for the Calendar picker overlay (`Ctrl+K`, `step24.md`) — select
+/// which connected calendars to *keep*; unchecking one and saving removes
+/// it. Simpler than [`SlackPickerState`]: one list, not two.
+#[derive(Debug, Clone, Default)]
+pub struct CalendarPickerState {
+    /// Currently connected calendars.
+    pub calendars: Vec<PickerRow>,
+    /// Index into `calendars`.
+    pub cursor: usize,
+    /// Current fetch/apply outcome.
+    pub status: CalendarPickerStatus,
 }
 
 /// `docs/03-domain/workspace-state.md`'s `ActiveLayout`.
@@ -278,9 +335,10 @@ pub struct WorkspaceState {
     pub github_connection_status: IntegrationConnectionStatus,
     /// Calendar setup overlay's text input and last connection outcome.
     pub calendar_setup: CalendarSetupState,
+    /// Calendar picker overlay's fetched rows and selection (`step24.md`).
+    pub calendar_picker: CalendarPickerState,
     /// Calendar's connection status, kept current the same way
-    /// `slack_connection_status` is (`step12.md`). No picker state exists
-    /// for Calendar (`step12.md` Decision 1's consequence).
+    /// `slack_connection_status` is (`step12.md`).
     pub calendar_connection_status: IntegrationConnectionStatus,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
@@ -311,6 +369,7 @@ impl Default for WorkspaceState {
             // Same placeholder reasoning as slack_connection_status above.
             github_connection_status: IntegrationConnectionStatus::Disconnected,
             calendar_setup: CalendarSetupState::default(),
+            calendar_picker: CalendarPickerState::default(),
             // Same placeholder reasoning as slack_connection_status above.
             calendar_connection_status: IntegrationConnectionStatus::Disconnected,
             active_theme: "default-dark".to_string(),

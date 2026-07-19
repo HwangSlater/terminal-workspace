@@ -25,8 +25,8 @@ use ratatui::Terminal;
 use registry::UiRegistry;
 use scheduler::AgendaScheduler;
 use state::{
-    CalendarSetupStatus, GitHubPickerStatus, GitHubSetupStatus, PickerRow, SlackPickerStatus,
-    SlackSetupStatus,
+    CalendarPickerStatus, CalendarSetupStatus, GitHubPickerStatus, GitHubSetupStatus, PickerRow,
+    SlackPickerStatus, SlackSetupStatus,
 };
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -421,6 +421,26 @@ impl TuiRenderer {
             (IntegrationSource::GitHub, Err(e)) => {
                 state.github_picker.status = GitHubPickerStatus::Failed(e.to_string());
             }
+            // Every row starts *checked* -- unlike GitHub's "discover new
+            // repos to watch" picker (nothing selected until chosen), every
+            // calendar shown here is already connected, so leaving
+            // everything checked and hitting Enter is a no-op keep-as-is,
+            // not an accidental remove-all (step24.md).
+            (IntegrationSource::Calendar, Ok(items)) => {
+                state.calendar_picker.calendars = items
+                    .into_iter()
+                    .map(|i| PickerRow {
+                        id: i.id,
+                        label: i.label,
+                        selected: true,
+                    })
+                    .collect();
+                state.calendar_picker.cursor = 0;
+                state.calendar_picker.status = CalendarPickerStatus::Loaded;
+            }
+            (IntegrationSource::Calendar, Err(e)) => {
+                state.calendar_picker.status = CalendarPickerStatus::Failed(e.to_string());
+            }
             _ => {}
         }
         Ok(())
@@ -448,10 +468,13 @@ impl TuiRenderer {
                     Err(e) => GitHubPickerStatus::Failed(e.to_string()),
                 };
             }
-            IntegrationSource::Slack
-            | IntegrationSource::Calendar
-            | IntegrationSource::Gmail
-            | IntegrationSource::Jira => {}
+            IntegrationSource::Calendar => {
+                state.calendar_picker.status = match result {
+                    Ok(()) => CalendarPickerStatus::Saved,
+                    Err(e) => CalendarPickerStatus::Failed(e.to_string()),
+                };
+            }
+            IntegrationSource::Slack | IntegrationSource::Gmail | IntegrationSource::Jira => {}
         }
         Ok(())
     }
