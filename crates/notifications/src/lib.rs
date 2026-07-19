@@ -15,21 +15,32 @@ use events::{Event, EventHandler};
 /// existing variants rather than adding a new one. Deliberately narrow:
 /// presence/connection-status churn and plugin events are excluded as too
 /// frequent or too low-signal to interrupt another app for.
+///
+/// The three integration-sourced variants also check `item.is_read`
+/// (`step39.md`): each adapter's poller now always publishes so the
+/// Notification/Calendar panels stay accurate, but marks an item
+/// already-read when it's backlog discovered on that adapter's first
+/// poll since the process started (`step33.md`/`step39.md`) -- real
+/// content the panel should show, but not something worth an OS toast,
+/// since it already existed before this session began.
 fn notification_for_event(event: &Event) -> Option<(String, String)> {
     match event {
-        Event::SlackMessageReceived(item) => {
+        Event::SlackMessageReceived(item) if !item.is_read => {
             Some((format!("슬랙: {}", item.title), item.body.clone()))
         }
-        Event::GitHubPRCreated(item) => {
+        Event::GitHubPRCreated(item) if !item.is_read => {
             Some((format!("깃허브: {}", item.title), item.body.clone()))
         }
-        Event::CalendarReminderTriggered(item) => {
+        Event::CalendarReminderTriggered(item) if !item.is_read => {
             Some((format!("캘린더: {}", item.title), item.body.clone()))
         }
         // Covers Pomodoro session-end (step18.md) and any other
         // best-effort system message published through this variant.
         Event::SystemAlert(message) => Some(("Terminal Workspace".to_string(), message.clone())),
-        Event::SlackPresenceChanged(_)
+        Event::SlackMessageReceived(_)
+        | Event::GitHubPRCreated(_)
+        | Event::CalendarReminderTriggered(_)
+        | Event::SlackPresenceChanged(_)
         | Event::IntegrationStatusChanged { .. }
         | Event::PluginCustomEvent { .. } => None,
     }
@@ -118,6 +129,30 @@ mod tests {
         let (title, body) = notification_for_event(&event).unwrap();
         assert_eq!(title, "캘린더: Design Review");
         assert_eq!(body, "in 10 min");
+    }
+
+    /// `step39.md`: the three integration adapters now always publish
+    /// (so the Notification/Calendar panels stay accurate even on a
+    /// poller's first cycle since restart), marking first-poll backlog
+    /// items already-read instead of skipping the publish outright
+    /// (`step33.md`'s original approach, which silently dropped
+    /// genuinely new items caught in the same window). This is the other
+    /// half of that fix: an already-read item must not produce an OS
+    /// toast, or the original "rings every time I launch" bug returns.
+    #[test]
+    fn already_read_integration_items_produce_no_notification() {
+        let mut item = sample_item("PR approved", "great work");
+        item.is_read = true;
+        for event in [
+            Event::SlackMessageReceived(item.clone()),
+            Event::GitHubPRCreated(item.clone()),
+            Event::CalendarReminderTriggered(item),
+        ] {
+            assert!(
+                notification_for_event(&event).is_none(),
+                "already-read item should not produce a desktop notification: {event:?}"
+            );
+        }
     }
 
     #[test]

@@ -410,16 +410,19 @@ impl CalendarPoller {
                 }
                 self.seen_occurrences.lock().await.insert(key);
                 // `seen_occurrences` starts empty every process launch
-                // (`step33.md`) -- without this check, every occurrence
-                // already inside the lookahead window would look "new"
-                // and fire a desktop notification on every single app
-                // launch. The first poll still records every occurrence
-                // it finds as seen, it just doesn't announce any of them,
-                // since none of it is actually new to the user.
-                if is_first_poll {
-                    continue;
-                }
-                let item = map_occurrence(event, occurrence, &connection.label);
+                // (`step33.md`). `step33.md` originally skipped
+                // publishing entirely on the first poll here, but that
+                // meant the Calendar panel stayed empty for up to a full
+                // `sync_interval_secs` (900s by default) after every
+                // restart -- reported directly as "캘린더 일정 갑자기 안
+                // 떠." `step39.md` publishes unconditionally instead (so
+                // the panel always reflects what's actually upcoming) and
+                // marks first-poll occurrences already-read so
+                // `DesktopNotifier` skips the OS toast for something that
+                // was already inside the lookahead window before this
+                // session started.
+                let mut item = map_occurrence(event, occurrence, &connection.label);
+                item.is_read = is_first_poll;
                 if event_bus
                     .publish(Event::CalendarReminderTriggered(item))
                     .await

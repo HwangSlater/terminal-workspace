@@ -226,17 +226,20 @@ impl GitHubPoller {
                         }
                         self.seen_prs.lock().await.insert(key);
                         // `seen_prs` starts empty every process launch
-                        // (`step33.md`) -- without this check, every
-                        // currently-open PR would look "new" and fire a
-                        // desktop notification on every single app
-                        // launch. The first poll still records every PR
-                        // it finds as seen, it just doesn't announce any
-                        // of them, since none of it is actually new to
-                        // the user.
-                        if is_first_poll {
-                            continue;
-                        }
-                        let item = map_pull_request(repo, pr);
+                        // (`step33.md`). `step33.md` originally skipped
+                        // publishing entirely on the first poll here, but
+                        // that meant a PR opened moments before/during a
+                        // restart could be silently lost -- `seen_prs`
+                        // records it either way, so no later poll would
+                        // ever see it as "new" again. `step39.md`
+                        // publishes unconditionally instead (so the
+                        // Notification panel always reflects reality) and
+                        // marks first-poll items already-read so
+                        // `DesktopNotifier` skips the OS toast for a PR
+                        // that was already open before this session
+                        // started.
+                        let mut item = map_pull_request(repo, pr);
+                        item.is_read = is_first_poll;
                         if event_bus
                             .publish(Event::GitHubPRCreated(item))
                             .await

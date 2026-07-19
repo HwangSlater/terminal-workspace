@@ -314,13 +314,19 @@ impl SlackPoller {
             let oldest = self.channel_cursor.lock().await.get(channel_id).cloned();
             // `oldest.is_none()` means this channel has never been polled
             // in this process's lifetime -- `channel_cursor` isn't
-            // persisted across restarts (`step33.md`), so without this
-            // check, every existing message in the channel's history
-            // would look "new" and fire a desktop notification on every
-            // single app launch. This poll still runs the real fetch and
-            // still advances the cursor to the latest message seen --
-            // it just doesn't publish anything for what it finds, since
-            // none of it is actually new to the user.
+            // persisted across restarts (`step33.md`). `step33.md`
+            // originally skipped publishing entirely for this case, but
+            // that silently dropped genuinely new messages that happened
+            // to already exist at the moment of the very first poll (a
+            // real bug, reported via live use: a message sent moments
+            // before/during a restart never appeared, and the cursor
+            // advanced past it so no later poll ever caught it either).
+            // `step39.md` publishes unconditionally instead, so the
+            // Notification panel always reflects what's actually unread,
+            // and marks the item already-read when it's first-poll
+            // backlog so `DesktopNotifier` (`crates/notifications`)
+            // knows not to re-toast for something that was already
+            // sitting in the channel before this session started.
             let is_first_poll_for_channel = oldest.is_none();
             match fetch_history(&self.http, token, channel_id, oldest.as_deref()).await {
                 Ok(HistoryOutcome::RateLimited { retry_after_secs }) => {
@@ -329,19 +335,18 @@ impl SlackPoller {
                 Ok(HistoryOutcome::Messages(messages)) => {
                     let mut latest_ts = oldest;
                     for msg in &messages {
-                        if !is_first_poll_for_channel {
-                            let display_name = match &msg.user {
-                                Some(uid) => self.resolve_display_name(token, uid).await,
-                                None => "Slack".to_string(),
-                            };
-                            let item = map_message_to_notification(channel_id, msg, &display_name);
-                            if event_bus
-                                .publish(Event::SlackMessageReceived(item))
-                                .await
-                                .is_err()
-                            {
-                                any_failure = true;
-                            }
+                        let display_name = match &msg.user {
+                            Some(uid) => self.resolve_display_name(token, uid).await,
+                            None => "Slack".to_string(),
+                        };
+                        let mut item = map_message_to_notification(channel_id, msg, &display_name);
+                        item.is_read = is_first_poll_for_channel;
+                        if event_bus
+                            .publish(Event::SlackMessageReceived(item))
+                            .await
+                            .is_err()
+                        {
+                            any_failure = true;
                         }
                         if latest_ts.as_deref().is_none_or(|cur| msg.ts.as_str() > cur) {
                             latest_ts = Some(msg.ts.clone());
