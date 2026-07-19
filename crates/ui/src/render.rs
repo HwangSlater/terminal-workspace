@@ -269,60 +269,82 @@ const HELP_CATEGORIES: &[HelpCategory] = &[
     },
 ];
 
-fn render_help_overlay(frame: &mut Frame, area: Rect) {
+/// Builds one [`HelpSection`]'s rendered rows (its own categories only,
+/// no section-title row -- that becomes the column's `Block` title
+/// instead) plus the column's natural content width/height.
+fn help_section_column(section: HelpSection) -> (Vec<ListItem<'static>>, u16, u16) {
     let mut items: Vec<ListItem> = Vec::new();
-    // A fixed 60%-of-screen popup was fine when this list was short, but
-    // it stopped fitting once Calendar's shortcuts (`step25.md`) pushed
-    // the content past that budget -- the overlay silently clipped
-    // everything after the GitHub category with no scroll to reach the
-    // rest. Sizing to the real content (clamped to the terminal, same as
-    // `centered_rect_fixed`) means it can never truncate again as new
-    // categories are added, short of the terminal itself being too small.
-    let mut content_width: u16 = UnicodeWidthStr::width("도움말") as u16;
-    let mut first_section = true;
-    for section in [HelpSection::Shortcuts, HelpSection::Commands] {
-        let section_title = section.title();
-        content_width = content_width.max(UnicodeWidthStr::width(section_title) as u16);
-        if !first_section {
+    let mut content_width: u16 = UnicodeWidthStr::width(section.title()) as u16;
+    let mut first_category = true;
+    for category in HELP_CATEGORIES.iter().filter(|c| c.section == section) {
+        if !first_category {
             items.push(ListItem::new(""));
         }
+        first_category = false;
+        content_width = content_width.max(UnicodeWidthStr::width(category.title) as u16);
         items.push(ListItem::new(Span::styled(
-            section_title,
+            category.title,
             Style::default()
                 .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                .add_modifier(Modifier::BOLD),
         )));
-        first_section = false;
-        for category in HELP_CATEGORIES.iter().filter(|c| c.section == section) {
-            items.push(ListItem::new(""));
-            content_width = content_width.max(UnicodeWidthStr::width(category.title) as u16);
-            items.push(ListItem::new(Span::styled(
-                category.title,
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for entry in category.entries {
-                let line = format!("  {:<20} {}", entry.key, entry.description);
-                content_width = content_width.max(UnicodeWidthStr::width(line.as_str()) as u16);
-                items.push(ListItem::new(line));
-            }
+        for entry in category.entries {
+            let line = format!("  {:<20} {}", entry.key, entry.description);
+            content_width = content_width.max(UnicodeWidthStr::width(line.as_str()) as u16);
+            items.push(ListItem::new(line));
         }
     }
-
     let content_height = u16::try_from(items.len()).unwrap_or(u16::MAX);
-    let popup = centered_rect_fixed(
-        content_width.saturating_add(4),
-        content_height.saturating_add(2),
-        area,
-    );
+    (items, content_width, content_height)
+}
+
+/// `step37.md`: side-by-side columns (단축키 | 커맨드) instead of one tall
+/// vertical list -- a single column kept growing taller every phase that
+/// added a category, until the overlay was mostly scroll-past-the-fold
+/// height on an ordinary terminal. Splitting along the same
+/// `HelpSection` the categories already carry (`step36.md`) turns that
+/// vertical growth into horizontal growth instead, and doubles as a
+/// clearer visual separation between "what key do I press" and "what can
+/// I type" than an underlined header row was on its own.
+fn render_help_overlay(frame: &mut Frame, area: Rect) {
+    let (shortcuts_items, shortcuts_width, shortcuts_height) =
+        help_section_column(HelpSection::Shortcuts);
+    let (commands_items, commands_width, commands_height) =
+        help_section_column(HelpSection::Commands);
+
+    let shortcuts_col_width = shortcuts_width.saturating_add(2); // borders
+    let commands_col_width = commands_width.saturating_add(2); // borders
+    let popup_width = shortcuts_col_width
+        .saturating_add(1) // gap
+        .saturating_add(commands_col_width);
+    let popup_height = shortcuts_height.max(commands_height).saturating_add(2); // borders
+
+    let popup = centered_rect_fixed(popup_width, popup_height, area);
     frame.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .title("도움말")
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(shortcuts_col_width),
+            Constraint::Length(1),
+            Constraint::Length(commands_col_width),
+        ])
+        .split(popup);
+
+    let shortcuts_block = Block::default()
+        .title(HelpSection::Shortcuts.title())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::ACCENT));
-    frame.render_widget(List::new(items).block(block), popup);
+    frame.render_widget(
+        List::new(shortcuts_items).block(shortcuts_block),
+        columns[0],
+    );
+
+    let commands_block = Block::default()
+        .title(HelpSection::Commands.title())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ACCENT));
+    frame.render_widget(List::new(commands_items).block(commands_block), columns[2]);
 }
 
 /// In-app Slack Bot Token entry (`step7.md`). The token is rendered
@@ -399,14 +421,29 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
-    // `picker.cursor` indexes the *logical* channels-then-users list, but
-    // `items` also has two bold section headers interspersed -- this
-    // tracks which rendered row that logical cursor actually lands on, so
-    // the `ListState` below (which operates on rendered indices) can tell
-    // ratatui to keep the right row in view (`step29.md`).
+    frame.render_widget(
+        Paragraph::new(search_line(&picker.filter_query, picker.filtering))
+            .style(Style::default().fg(theme::MUTED)),
+        layout[0],
+    );
+
+    // `picker.cursor` indexes the *visible* (post-filter, `step37.md`)
+    // channels-then-users list, but `items` also has two bold section
+    // headers interspersed -- this tracks which rendered row that cursor
+    // actually lands on, so the `ListState` below (which operates on
+    // rendered indices) can tell ratatui to keep the right row in view
+    // (`step29.md`). `visible` is guaranteed channels-first-then-users by
+    // `SlackPickerState::visible_indices`, so a plain position check
+    // (`real_index < picker.channels.len()`) is enough to tell which list
+    // each entry belongs to.
+    let visible = picker.visible_indices();
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_render_index = 0usize;
     items.push(ListItem::new(Span::styled(
@@ -417,10 +454,16 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         items.push(ListItem::new(
             "  (없음 — 채널에 봇을 초대해야 여기 나타납니다)",
         ));
+    } else if !visible.iter().any(|&i| i < picker.channels.len()) {
+        items.push(ListItem::new("  (검색 결과 없음)"));
     }
-    for (i, row) in picker.channels.iter().enumerate() {
+    for (visible_pos, &real_index) in visible.iter().enumerate() {
+        if real_index >= picker.channels.len() {
+            continue;
+        }
+        let row = &picker.channels[real_index];
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
-        let style = if picker.cursor == i {
+        let style = if picker.cursor == visible_pos {
             selected_render_index = items.len();
             theme::selected_style()
         } else {
@@ -432,10 +475,16 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         "사용자",
         Style::default().add_modifier(Modifier::BOLD),
     )));
-    for (i, row) in picker.users.iter().enumerate() {
+    if !picker.users.is_empty() && !visible.iter().any(|&i| i >= picker.channels.len()) {
+        items.push(ListItem::new("  (검색 결과 없음)"));
+    }
+    for (visible_pos, &real_index) in visible.iter().enumerate() {
+        if real_index < picker.channels.len() {
+            continue;
+        }
+        let row = &picker.users[real_index - picker.channels.len()];
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
-        let index = picker.channels.len() + i;
-        let style = if picker.cursor == index {
+        let style = if picker.cursor == visible_pos {
             selected_render_index = items.len();
             theme::selected_style()
         } else {
@@ -444,17 +493,33 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
     }
     let mut list_state = ListState::default().with_selected(Some(selected_render_index));
-    frame.render_stateful_widget(List::new(items), layout[0], &mut list_state);
+    frame.render_stateful_widget(List::new(items), layout[1], &mut list_state);
 
     let status_line = match &picker.status {
         SlackPickerStatus::Saving => "저장 중...",
         SlackPickerStatus::Saved => "저장됨!",
-        _ => "↑/↓: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+        _ if picker.filtering => "입력 중... Enter: 검색 완료  Backspace: 지우기",
+        _ => "↑/↓: 이동  Space: 선택/해제  /: 검색  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(theme::MUTED)),
-        layout[1],
+        layout[2],
     );
+}
+
+/// Shared search-line rendering for the Slack and GitHub pickers
+/// (`step37.md`) -- a trailing `_` cursor while actively typing (same
+/// convention `render_calendar_setup_overlay`'s label/URL fields use), a
+/// plain `검색: <query>` once typing stops but a query is still applied,
+/// and a bare hint when no search has been typed yet.
+fn search_line(filter_query: &str, filtering: bool) -> String {
+    if filtering {
+        format!("검색: {filter_query}_")
+    } else if filter_query.is_empty() {
+        "/: 검색".to_string()
+    } else {
+        format!("검색: {filter_query}")
+    }
 }
 
 /// In-app GitHub PAT entry (`step10.md`). Mirrors `render_slack_setup_overlay`
@@ -903,16 +968,32 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
+    frame.render_widget(
+        Paragraph::new(search_line(&picker.filter_query, picker.filtering))
+            .style(Style::default().fg(theme::MUTED)),
+        layout[0],
+    );
+
+    // `picker.cursor` indexes the *visible* (post-filter, `step37.md`)
+    // list now, not `repositories` directly.
+    let visible = picker.visible_indices();
     let mut items: Vec<ListItem> = Vec::new();
     if picker.repositories.is_empty() {
         items.push(ListItem::new("  (없음)"));
+    } else if visible.is_empty() {
+        items.push(ListItem::new("  (검색 결과 없음)"));
     }
-    for (i, row) in picker.repositories.iter().enumerate() {
+    for (visible_pos, &real_index) in visible.iter().enumerate() {
+        let row = &picker.repositories[real_index];
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
-        let style = if picker.cursor == i {
+        let style = if picker.cursor == visible_pos {
             theme::selected_style()
         } else {
             Style::default()
@@ -925,16 +1006,17 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     // (`step29.md`). A `ListState` with the cursor selected makes ratatui
     // shift the viewport to keep the highlighted row visible.
     let mut list_state = ListState::default().with_selected(Some(picker.cursor));
-    frame.render_stateful_widget(List::new(items), layout[0], &mut list_state);
+    frame.render_stateful_widget(List::new(items), layout[1], &mut list_state);
 
     let status_line = match &picker.status {
         GitHubPickerStatus::Saving => "저장 중...",
         GitHubPickerStatus::Saved => "저장됨!",
-        _ => "↑/↓: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+        _ if picker.filtering => "입력 중... Enter: 검색 완료  Backspace: 지우기",
+        _ => "↑/↓: 이동  Space: 선택/해제  /: 검색  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(theme::MUTED)),
-        layout[1],
+        layout[2],
     );
 }
 
@@ -2612,12 +2694,62 @@ mod tests {
                 users: vec![],
                 cursor: 0,
                 status: SlackPickerStatus::Loaded,
+                ..Default::default()
             },
             ..Default::default()
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(text.contains("[x] #general"));
         assert!(text.contains("[ ] #random"));
+    }
+
+    #[test]
+    fn slack_picker_overlay_hides_rows_that_do_not_match_the_filter() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: SlackPickerState {
+                channels: vec![
+                    PickerRow {
+                        id: "C1".into(),
+                        label: "general".into(),
+                        selected: false,
+                    },
+                    PickerRow {
+                        id: "C2".into(),
+                        label: "random".into(),
+                        selected: false,
+                    },
+                ],
+                users: vec![],
+                cursor: 0,
+                status: SlackPickerStatus::Loaded,
+                filter_query: "gen".to_string(),
+                filtering: false,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "#general"));
+        assert!(!contains_ignoring_whitespace(&text, "#random"));
+        assert!(contains_ignoring_whitespace(&text, "검색: gen"));
+    }
+
+    #[test]
+    fn slack_picker_overlay_shows_a_trailing_cursor_mark_while_actively_filtering() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: SlackPickerState {
+                status: SlackPickerStatus::Loaded,
+                filter_query: "ge".to_string(),
+                filtering: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "검색: ge_"));
     }
 
     /// Real regression guard, same root cause as
@@ -2653,6 +2785,7 @@ mod tests {
                 users,
                 cursor: 25, // logical index 25 = 5th user (20 channels + 5)
                 status: SlackPickerStatus::Loaded,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -3169,6 +3302,7 @@ mod tests {
                 ],
                 cursor: 0,
                 status: GitHubPickerStatus::Loaded,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -3199,6 +3333,7 @@ mod tests {
                 repositories,
                 cursor: 25,
                 status: GitHubPickerStatus::Loaded,
+                ..Default::default()
             },
             ..Default::default()
         };

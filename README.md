@@ -60,7 +60,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 | `↑`/`↓` | 포커스된 패널 안에서 위아래로 선택 이동 |
 | `Enter` | 선택한 알림/일정을 읽음 처리 |
 | `:` | 명령줄 입력 모드로 전환 |
-| `?` | 도움말 팝업 열기 (단축키·커맨드 섹션으로 분리되어 있습니다) |
+| `?` | 도움말 팝업 열기 (단축키·커맨드 두 열로 나란히 표시됩니다) |
 | `Esc` | 명령줄/도움말/오버레이 닫고 Normal 모드로 복귀 |
 | `Ctrl+S` / `Ctrl+P` | Slack 연결 설정 / 채널·사용자 선택 |
 | `Ctrl+G` / `Ctrl+R` | GitHub 연결 설정 / 저장소 선택 |
@@ -72,7 +72,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 1. Slack 워크스페이스에 App을 하나 만들고, Bot Token 스코프로 `channels:history`, `channels:read`, `users:read`, `chat:write`를 추가한 뒤 설치해 Bot Token(`xoxb-...`)을 발급받으세요. **비공개 채널**도 쓰려면 `groups:history`, `groups:read`도 추가하세요 — 없으면 봇을 초대해도 `Ctrl+P` 목록에 안 뜹니다.
 2. `Ctrl+S`로 토큰을 입력하면 바로 연결됩니다 — 토큰은 OS 키체인(또는 암호화 파일)에 저장되고 설정 파일에는 절대 들어가지 않습니다.
 3. 메시지를 받을 채널에 봇을 초대하세요 (`/invite @봇이름`).
-4. `Ctrl+P`로 채널/팀원 목록을 불러와 선택하세요. 위쪽 "채널" 목록은 메시지 알림용, 아래쪽 "사용자" 목록은 온라인 상태 표시용입니다 — 후자를 선택해도 DM이 열리거나 메시지가 오가지 않습니다.
+4. `Ctrl+P`로 채널/팀원 목록을 불러와 선택하세요. 위쪽 "채널" 목록은 메시지 알림용, 아래쪽 "사용자" 목록은 온라인 상태 표시용입니다 — 후자를 선택해도 DM이 열리거나 메시지가 오가지 않습니다. 목록이 길면 `/`를 눌러 이름으로 검색할 수 있습니다 (`Enter`로 검색 종료 후 다시 탐색).
 5. 명령줄(`:`)에서 바로 사용할 수 있습니다: `/send #채널이름 메시지`, `/away`·`/active`·`/offline`·`/meeting`·`/lunch [메시지]`로 상태 변경. 명령어/채널명 입력 중 `Tab`으로 자동완성됩니다.
 
 자세한 내용은 [`docs/04-extensions/integrations/slack.md`](docs/04-extensions/integrations/slack.md) 참고.
@@ -81,7 +81,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 
 1. GitHub → Settings → Developer settings → Personal access tokens에서 `repo` 스코프로 Classic PAT(`ghp_...`)를 발급받으세요.
 2. `Ctrl+G`로 토큰을 입력하면 바로 연결됩니다.
-3. `Ctrl+R`로 접근 가능한 저장소를 선택하면, 열린 PR이 알림 패널에 표시됩니다.
+3. `Ctrl+R`로 접근 가능한 저장소를 선택하면, 열린 PR이 알림 패널에 표시됩니다. 마찬가지로 `/`로 검색할 수 있습니다.
 
 자세한 내용은 [`docs/04-extensions/integrations/github.md`](docs/04-extensions/integrations/github.md) 참고.
 

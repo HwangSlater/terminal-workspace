@@ -79,6 +79,16 @@ pub struct PickerRow {
     pub selected: bool,
 }
 
+impl PickerRow {
+    /// Case-insensitive substring match against a picker's `filter_query`
+    /// (`step37.md`, `/` to search) — an empty query matches every row,
+    /// so a picker that never searches behaves exactly as before search
+    /// existed.
+    fn matches_filter(&self, query: &str) -> bool {
+        query.is_empty() || self.label.to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
 /// Outcome of the picker's data fetch / apply flow.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SlackPickerStatus {
@@ -104,10 +114,46 @@ pub struct SlackPickerState {
     pub channels: Vec<PickerRow>,
     /// Fetched non-bot, non-deleted workspace members.
     pub users: Vec<PickerRow>,
-    /// Index into the combined `channels` then `users` list.
+    /// Index into the *visible* (post-filter) combined `channels` then
+    /// `users` list, not the raw one (`step37.md`) — `visible_indices`
+    /// translates between the two.
     pub cursor: usize,
     /// Current fetch/apply outcome.
     pub status: SlackPickerStatus,
+    /// Live search text (`step37.md`, `/` to start typing, `Enter` to stop
+    /// and go back to navigating). Empty means "show everything," the
+    /// same as before search existed.
+    pub filter_query: String,
+    /// Whether `/` was pressed and keystrokes are currently going into
+    /// `filter_query` instead of `j`/`k`/`Space`/`Enter`'s normal
+    /// navigation meanings.
+    pub filtering: bool,
+}
+
+impl SlackPickerState {
+    /// Indices into the combined channels-then-users cursor space whose
+    /// row matches `filter_query`, preserving each list's own order
+    /// (`step37.md`). `cursor` indexes *into this*, not into `channels`/
+    /// `users` directly — translate back via this same function before
+    /// touching either list.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        let mut visible: Vec<usize> = self
+            .channels
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.matches_filter(&self.filter_query))
+            .map(|(i, _)| i)
+            .collect();
+        let user_offset = self.channels.len();
+        visible.extend(
+            self.users
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.matches_filter(&self.filter_query))
+                .map(|(i, _)| i + user_offset),
+        );
+        visible
+    }
 }
 
 /// Outcome of the last `Command::Connect` dispatch, shown inline in
@@ -190,10 +236,33 @@ pub enum GitHubPickerStatus {
 pub struct GitHubPickerState {
     /// Fetched repositories the authenticated user can access.
     pub repositories: Vec<PickerRow>,
-    /// Index into `repositories`.
+    /// Index into the *visible* (post-filter) `repositories` list, not the
+    /// raw one (`step37.md`) — `visible_indices` translates between the
+    /// two.
     pub cursor: usize,
     /// Current fetch/apply outcome.
     pub status: GitHubPickerStatus,
+    /// Live search text, same convention as [`SlackPickerState::filter_query`]
+    /// (`step37.md`).
+    pub filter_query: String,
+    /// Whether `/` was pressed and keystrokes are going into
+    /// `filter_query` instead of navigation, same convention as
+    /// [`SlackPickerState::filtering`].
+    pub filtering: bool,
+}
+
+impl GitHubPickerState {
+    /// Indices into `repositories` whose row matches `filter_query`
+    /// (`step37.md`). See [`SlackPickerState::visible_indices`] for the
+    /// two-list version this mirrors.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        self.repositories
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.matches_filter(&self.filter_query))
+            .map(|(i, _)| i)
+            .collect()
+    }
 }
 
 /// Outcome of the last `Command::Connect` dispatch, shown inline in the

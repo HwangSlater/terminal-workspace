@@ -178,6 +178,12 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::SlackPicker;
             state.slack_picker.status = SlackPickerStatus::Loading;
+            // A search left over from a previous Ctrl+P session (`step37.md`)
+            // would otherwise silently hide a channel/user the fresh fetch
+            // just brought in -- same "clear stale input" reasoning as the
+            // setup overlays above.
+            state.slack_picker.filter_query.clear();
+            state.slack_picker.filtering = false;
             Some(KeyOutcome::OpenSlackPicker)
         }
         (KeyCode::Char('g'), m) if m.contains(KeyModifiers::CONTROL) => {
@@ -192,6 +198,9 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::GitHubPicker;
             state.github_picker.status = GitHubPickerStatus::Loading;
+            // See the matching comment on Ctrl+P above -- same reasoning.
+            state.github_picker.filter_query.clear();
+            state.github_picker.filtering = false;
             Some(KeyOutcome::OpenPicker(IntegrationSource::GitHub))
         }
         (KeyCode::Char('l'), m) if m.contains(KeyModifiers::CONTROL) => {
@@ -320,11 +329,43 @@ fn capture_slack_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOu
 /// it, `Space` toggles the row it's on, `Enter` confirms.
 fn capture_slack_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
     let picker = &mut state.slack_picker;
-    let total = picker.channels.len() + picker.users.len();
+    // `/` (`step37.md`) puts the overlay into a filter-typing sub-mode,
+    // mirroring the app's existing Normal/Input split rather than
+    // overloading letter keys that already mean "navigate" (`j`) or
+    // "select" (`Space`) -- typing and browsing are mutually exclusive at
+    // any instant, so there's no ambiguity about which a keystroke means.
+    // `Esc` still always closes the whole overlay regardless of this
+    // sub-mode (intercepted globally in `handle_key`, before this
+    // function ever runs) -- the same "cancel everything" meaning it has
+    // everywhere else in this app.
+    if picker.filtering {
+        return match key.code {
+            KeyCode::Char(c) => {
+                picker.filter_query.push(c);
+                picker.cursor = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Backspace => {
+                picker.filter_query.pop();
+                picker.cursor = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Enter => {
+                picker.filtering = false;
+                KeyOutcome::Handled
+            }
+            _ => KeyOutcome::Handled,
+        };
+    }
+    let visible = picker.visible_indices();
     match key.code {
+        KeyCode::Char('/') => {
+            picker.filtering = true;
+            KeyOutcome::Handled
+        }
         KeyCode::Char('j') | KeyCode::Down => {
-            if total > 0 {
-                picker.cursor = (picker.cursor + 1).min(total - 1);
+            if !visible.is_empty() {
+                picker.cursor = (picker.cursor + 1).min(visible.len() - 1);
             }
             KeyOutcome::Handled
         }
@@ -333,17 +374,21 @@ fn capture_slack_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyO
             KeyOutcome::Handled
         }
         KeyCode::Char(' ') => {
-            let cursor = picker.cursor;
-            if cursor < picker.channels.len() {
-                if let Some(row) = picker.channels.get_mut(cursor) {
+            if let Some(&real_index) = visible.get(picker.cursor) {
+                if real_index < picker.channels.len() {
+                    if let Some(row) = picker.channels.get_mut(real_index) {
+                        row.selected = !row.selected;
+                    }
+                } else if let Some(row) = picker.users.get_mut(real_index - picker.channels.len()) {
                     row.selected = !row.selected;
                 }
-            } else if let Some(row) = picker.users.get_mut(cursor - picker.channels.len()) {
-                row.selected = !row.selected;
             }
             KeyOutcome::Handled
         }
         KeyCode::Enter => {
+            // Submits every *selected* row regardless of the current
+            // filter -- searching only narrows what's being browsed, it
+            // never hides an already-checked row from the final result.
             let channel_ids = picker
                 .channels
                 .iter()
@@ -558,11 +603,37 @@ fn capture_calendar_grid_input(state: &mut WorkspaceState, key: KeyEvent) -> Key
 /// lines for an abstraction with only one real shape on each side.
 fn capture_github_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
     let picker = &mut state.github_picker;
-    let total = picker.repositories.len();
+    // See `capture_slack_picker_input`'s matching comment (`step37.md`) --
+    // identical filter-typing sub-mode, mirrored here for a single list
+    // instead of two.
+    if picker.filtering {
+        return match key.code {
+            KeyCode::Char(c) => {
+                picker.filter_query.push(c);
+                picker.cursor = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Backspace => {
+                picker.filter_query.pop();
+                picker.cursor = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Enter => {
+                picker.filtering = false;
+                KeyOutcome::Handled
+            }
+            _ => KeyOutcome::Handled,
+        };
+    }
+    let visible = picker.visible_indices();
     match key.code {
+        KeyCode::Char('/') => {
+            picker.filtering = true;
+            KeyOutcome::Handled
+        }
         KeyCode::Char('j') | KeyCode::Down => {
-            if total > 0 {
-                picker.cursor = (picker.cursor + 1).min(total - 1);
+            if !visible.is_empty() {
+                picker.cursor = (picker.cursor + 1).min(visible.len() - 1);
             }
             KeyOutcome::Handled
         }
@@ -571,8 +642,10 @@ fn capture_github_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> Key
             KeyOutcome::Handled
         }
         KeyCode::Char(' ') => {
-            if let Some(row) = picker.repositories.get_mut(picker.cursor) {
-                row.selected = !row.selected;
+            if let Some(&real_index) = visible.get(picker.cursor) {
+                if let Some(row) = picker.repositories.get_mut(real_index) {
+                    row.selected = !row.selected;
+                }
             }
             KeyOutcome::Handled
         }
@@ -1461,6 +1534,100 @@ mod tests {
     }
 
     #[test]
+    fn slash_starts_filtering_the_slack_picker() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker_state_with_two_channels_one_user(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(state.slack_picker.filtering);
+        handle_key(&mut state, key(KeyCode::Char('a'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(state.slack_picker.filter_query, "al");
+        // "general" and "Alice" both match "al" case-insensitively;
+        // "random" doesn't -- the visible set should narrow to just those
+        // two, channels before users same as the unfiltered ordering.
+        assert_eq!(state.slack_picker.visible_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn typing_while_filtering_does_not_move_the_cursor_or_toggle_a_row() {
+        // Real risk this test guards against: 'j'/'Space' are ordinary
+        // characters a channel/user search might legitimately contain, so
+        // while `filtering` is true they must be captured as filter text,
+        // not fall through to their Normal-mode navigation/toggle meaning.
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker_state_with_two_channels_one_user(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(state.slack_picker.filter_query, "j ");
+        assert_eq!(state.slack_picker.cursor, 0);
+        assert!(!state.slack_picker.channels[0].selected);
+        assert!(!state.slack_picker.channels[1].selected);
+    }
+
+    #[test]
+    fn enter_while_filtering_stops_filtering_without_submitting() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker_state_with_two_channels_one_user(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        handle_key(&mut state, key(KeyCode::Char('a'), KeyModifiers::NONE));
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(!state.slack_picker.filtering);
+        assert_eq!(state.slack_picker.filter_query, "a");
+    }
+
+    #[test]
+    fn space_toggles_the_correct_underlying_row_even_when_filtered() {
+        // The cursor indexes the *visible* (post-filter) list, not the raw
+        // one -- this pins that Space still flips the right real row
+        // (`random`, not whatever raw index 0 happens to be) once a
+        // filter has narrowed what's on screen.
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: picker_state_with_two_channels_one_user(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "rand".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE)); // stop filtering
+        assert_eq!(state.slack_picker.visible_indices(), vec![1]); // "random" only
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!state.slack_picker.channels[0].selected); // "general" untouched
+        assert!(state.slack_picker.channels[1].selected); // "random" toggled
+    }
+
+    #[test]
+    fn ctrl_p_clears_a_filter_left_over_from_a_previous_session() {
+        let mut state = WorkspaceState {
+            slack_picker: SlackPickerState {
+                filter_query: "stale".to_string(),
+                filtering: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(state.slack_picker.filter_query, "");
+        assert!(!state.slack_picker.filtering);
+    }
+
+    #[test]
     fn ctrl_g_opens_the_github_setup_overlay() {
         let mut state = WorkspaceState::default();
         let outcome = handle_key(&mut state, key(KeyCode::Char('g'), KeyModifiers::CONTROL));
@@ -1971,6 +2138,41 @@ mod tests {
                 vec!["owner/repo-two".to_string()]
             )
         );
+    }
+
+    #[test]
+    fn slash_filters_the_github_picker_and_space_toggles_the_filtered_row() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: github_picker_state_with_two_repos(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "two".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE)); // stop filtering
+        assert!(!state.github_picker.filtering);
+        assert_eq!(state.github_picker.visible_indices(), vec![1]);
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!state.github_picker.repositories[0].selected);
+        assert!(state.github_picker.repositories[1].selected);
+    }
+
+    #[test]
+    fn ctrl_r_clears_a_filter_left_over_from_a_previous_session() {
+        let mut state = WorkspaceState {
+            github_picker: crate::state::GitHubPickerState {
+                filter_query: "stale".to_string(),
+                filtering: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(state.github_picker.filter_query, "");
+        assert!(!state.github_picker.filtering);
     }
 
     fn picker_with_channels(labels: &[&str]) -> SlackPickerState {
