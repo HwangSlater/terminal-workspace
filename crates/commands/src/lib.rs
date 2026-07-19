@@ -236,6 +236,12 @@ pub struct WorkspaceCommandHandler {
     /// `None` when no Calendar adapter was constructed at all, same
     /// reasoning as `slack_messenger` above.
     calendar_manager: Option<Arc<dyn CalendarManager>>,
+    /// Live read-model handle (`step36.md`) -- `MarkNotificationRead`
+    /// removes the marked item from this directly rather than through an
+    /// `Event`, since no frozen `Event` variant fits "notification read"
+    /// and nothing else in the system needs to react to it the way the
+    /// `Projector`'s other, integration-originated events do.
+    read_model: SharedReadModel,
 }
 
 /// Looks up `source` in a connector/applier registry, or returns the same
@@ -266,6 +272,7 @@ impl WorkspaceCommandHandler {
         selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
         scheduler: Arc<AgendaScheduler>,
         calendar_manager: Option<Arc<dyn CalendarManager>>,
+        read_model: SharedReadModel,
     ) -> Self {
         Self {
             presence_repo,
@@ -277,6 +284,7 @@ impl WorkspaceCommandHandler {
             selection_appliers,
             scheduler,
             calendar_manager,
+            read_model,
         }
     }
 }
@@ -311,7 +319,18 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
             Command::MarkNotificationRead { id } => {
                 // No Event published: no frozen Event variant fits "notification
                 // read," and there's no Projector subscriber yet to receive one.
-                self.notification_repo.mark_read(&id).await
+                // The live read model would otherwise keep showing this item as
+                // unread until the next full restart (`Projector` only re-syncs
+                // from storage once, at startup) -- so remove it here directly
+                // instead, once the underlying repository write actually
+                // succeeds (`step36.md`).
+                self.notification_repo.mark_read(&id).await?;
+                self.read_model
+                    .write()
+                    .await
+                    .unread_notifications
+                    .retain(|n| n.id != id);
+                Ok(())
             }
             Command::SendSlackMessage { channel_id, text } => match &self.slack_messenger {
                 Some(messenger) => messenger.send_message(&channel_id, &text).await,
@@ -554,6 +573,7 @@ mod tests {
         Arc<MockPresenceRepo>,
         Arc<MockNotificationRepo>,
         Arc<InProcessEventBus>,
+        SharedReadModel,
     );
 
     fn make_handler() -> Fixture {
@@ -597,6 +617,7 @@ mod tests {
             HashMap::new(),
             AgendaScheduler::new(bus as Arc<dyn EventBus>),
             Some(calendar_manager),
+            Arc::new(RwLock::new(DashboardReadModel::default())),
         ))
     }
 
@@ -609,6 +630,7 @@ mod tests {
         let presence = Arc::new(MockPresenceRepo::default());
         let notifications = Arc::new(MockNotificationRepo::default());
         let bus = Arc::new(InProcessEventBus::new(10));
+        let read_model: SharedReadModel = Arc::new(RwLock::new(DashboardReadModel::default()));
         let handler = Arc::new(WorkspaceCommandHandler::new(
             Arc::clone(&presence) as Arc<dyn PresenceRepository>,
             Arc::clone(&notifications) as Arc<dyn NotificationRepository>,
@@ -619,8 +641,9 @@ mod tests {
             selection_appliers,
             AgendaScheduler::new(Arc::clone(&bus) as Arc<dyn EventBus>),
             None,
+            Arc::clone(&read_model),
         ));
-        (handler, presence, notifications, bus)
+        (handler, presence, notifications, bus, read_model)
     }
 
     /// Like [`make_handler`], but also hands back the `AgendaScheduler`
@@ -642,13 +665,14 @@ mod tests {
             HashMap::new(),
             Arc::clone(&scheduler),
             None,
+            Arc::new(RwLock::new(DashboardReadModel::default())),
         ));
         (handler, scheduler)
     }
 
     #[tokio::test]
     async fn set_presence_persists_and_publishes_event() {
-        let (handler, presence, _notifications, bus) = make_handler();
+        let (handler, presence, _notifications, bus, ..) = make_handler();
         let mut rx = bus.subscribe();
 
         handler
@@ -673,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn mark_notification_read_persists_no_event() {
-        let (handler, _presence, notifications, bus) = make_handler();
+        let (handler, _presence, notifications, bus, ..) = make_handler();
         let mut rx = bus.subscribe();
         let id = NotificationId(Uuid::new_v4());
 
@@ -684,6 +708,34 @@ mod tests {
 
         assert_eq!(notifications.marked_read.lock().await.as_slice(), [id]);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn mark_notification_read_removes_it_from_the_live_read_model() {
+        // step36.md: without this, a marked-read notification would keep
+        // showing as unread in the TUI until the next full restart, since
+        // Projector only re-syncs unread_notifications from storage once,
+        // at startup, and no Event exists for "notification read."
+        let (handler, _presence, _notifications, _bus, read_model) = make_handler();
+        let keep = sample_notification("keep me", 1);
+        let remove = sample_notification("mark me read", 2);
+        read_model.write().await.unread_notifications = vec![remove.clone(), keep.clone()];
+
+        handler
+            .handle(Command::MarkNotificationRead {
+                id: remove.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = read_model
+            .read()
+            .await
+            .unread_notifications
+            .iter()
+            .map(|n| n.id.clone())
+            .collect();
+        assert_eq!(ids, vec![keep.id]);
     }
 
     #[tokio::test]

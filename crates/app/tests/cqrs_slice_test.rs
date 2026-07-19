@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use commands::{Command, CommandDispatcher, InMemoryCommandDispatcher, WorkspaceCommandHandler};
+use commands::{
+    Command, CommandDispatcher, DashboardReadModel, InMemoryCommandDispatcher,
+    WorkspaceCommandHandler,
+};
 use common::Result;
 use domain::{
     FailedEventRepository, IntegrationSource, NotificationId, NotificationItem,
@@ -10,7 +13,7 @@ use scheduler::AgendaScheduler;
 use std::collections::HashMap;
 use std::sync::Arc;
 use storage::RedbStorageBackend;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 struct RecordingHandler {
@@ -55,6 +58,7 @@ async fn cqrs_write_path_flows_through_storage_and_events() -> Result<()> {
         HashMap::new(),
         AgendaScheduler::new(Arc::clone(&event_bus) as Arc<dyn EventBus>),
         None,
+        Arc::new(RwLock::new(DashboardReadModel::default())),
     ));
     let command_dispatcher = InMemoryCommandDispatcher::new(handler);
 

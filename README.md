@@ -2,13 +2,13 @@
 
 터미널을 벗어나지 않고 Slack, GitHub, Google Calendar를 한곳에서 확인하고 다루는 터미널 우선 개발자 워크스페이스입니다. (Gmail, Jira, CI/CD 연동은 로드맵에 있지만 아직 준비되지 않았습니다.)
 
-Local First. Zero Configuration. Windows·macOS·Linux 어느 OS도 2등 시민 취급하지 않는 크로스 플랫폼 — 자세한 내용은 [`docs/06-development/platform-support.md`](docs/06-development/platform-support.md) 참고.
+Local First. Zero Configuration. Windows·macOS·Linux를 동등하게 지원하는 크로스 플랫폼 — 자세한 내용은 [`docs/06-development/platform-support.md`](docs/06-development/platform-support.md) 참고.
 
 ---
 
 ## 시작하기
 
-**1. Rust 설치** (아직 없으시다면): <https://rustup.rs> — 이것만 있으면 됩니다. C 컴파일러도, 별도 데이터베이스 서버도, 추가 툴체인도 필요 없습니다.
+**1. Rust 설치** (아직 없으시다면): <https://rustup.rs>. 데이터베이스는 순수 Rust 임베디드 저장소(redb)라 별도 서버가 필요 없습니다 — 다만 플러그인 런타임(WASM 샌드박스)이 빌드 시점에 C 컴파일러를 요구해서, Windows/Linux에서는 `cargo run -p app` 자체가 그 영향을 받습니다 (macOS는 원래 필요한 Xcode Command Line Tools가 이미 충족시켜 줍니다). 아래 OS별 안내를 확인하세요.
 
 **2. 실행:**
 
@@ -22,13 +22,13 @@ cargo run -p app
 
 ### Windows
 
-대부분의 경우 위 두 단계로 끝입니다. 만약 아래 오류를 만나면:
+대부분의 경우 위 두 단계로 끝입니다. 만약 아래 오류를 만나면(플러그인 런타임의 WASM 샌드박스를 빌드하는 데 C 컴파일러가 필요해서 나는 오류입니다):
 
 ```
 error: error calling dlltool 'dlltool.exe': program not found
 ```
 
-GCC 기반 MinGW-w64를 설치하세요: `winget install BrechtSanders.WinLibs.POSIX.UCRT` (설치 프로그램 없이 압축 해제만 하는 방식이라 가볍습니다). **LLVM 기반 MinGW은 피하세요** — Rust가 기대하는 `libgcc`/`libgcc_eh`가 없어 링크가 실패합니다. 설치 후 `mingw64\bin` 폴더를 PATH에 추가하고 새 터미널에서 다시 시도하세요.
+GCC 기반 MinGW-w64를 설치하세요: `winget install BrechtSanders.WinLibs.POSIX.UCRT` (설치 프로그램 없이 압축 해제만 하는 방식이라 가볍습니다). **LLVM 기반 MinGW은 피하세요** — Rust가 기대하는 `libgcc`/`libgcc_eh`가 없어 링크가 실패합니다. 설치 후 `mingw64\bin` 폴더를 PATH에 추가하고 새 터미널에서 다시 시도하세요. (또는 Visual Studio Build Tools의 "Desktop development with C++" 워크로드 — 자세한 내용은 [`docs/06-development/platform-support.md`](docs/06-development/platform-support.md) §3.1 참고.)
 
 ### macOS
 
@@ -58,8 +58,9 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 | `Ctrl+2` / `Ctrl+3` | 알림 / 캘린더 패널로 바로 이동 |
 | `Ctrl+4` | 로그 보기 오버레이 열기 |
 | `↑`/`↓` | 포커스된 패널 안에서 위아래로 선택 이동 |
+| `Enter` | 선택한 알림/일정을 읽음 처리 |
 | `:` | 명령줄 입력 모드로 전환 |
-| `?` | 도움말 팝업 열기 |
+| `?` | 도움말 팝업 열기 (단축키·커맨드 섹션으로 분리되어 있습니다) |
 | `Esc` | 명령줄/도움말/오버레이 닫고 Normal 모드로 복귀 |
 | `Ctrl+S` / `Ctrl+P` | Slack 연결 설정 / 채널·사용자 선택 |
 | `Ctrl+G` / `Ctrl+R` | GitHub 연결 설정 / 저장소 선택 |
@@ -101,7 +102,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 
 ### 로그 보기
 
-`Ctrl+4`로 앱의 로그 기록(최근 200줄, 비밀값 자동 마스킹)을 오버레이로 확인할 수 있습니다. `ERROR`/`WARN` 줄은 색으로 구분됩니다.
+`Ctrl+4`로 앱의 로그 기록(최근 200줄, 비밀값 자동 마스킹)을 오버레이로 확인할 수 있습니다. `ERROR`/`WARN` 줄은 색으로 구분됩니다. 같은 내용이 날짜별로 로테이션되는 파일(`app.log.<날짜>`, Windows는 `%LOCALAPPDATA%\terminal-workspace\logs`, macOS/Linux는 `~/.local/share/terminal-workspace/logs`)에도 남아서, 앱이 예기치 않게 종료돼 화면상의 기록이 사라진 뒤에도 원인을 확인할 수 있습니다.
 
 ### 알림을 놓치지 않으려면
 

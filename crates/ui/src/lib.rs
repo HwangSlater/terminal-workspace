@@ -298,16 +298,61 @@ impl TuiRenderer {
             // for exhaustiveness over `UiDockSlot`'s four variants.
             registry::UiDockSlot::Left | registry::UiDockSlot::Bottom => 0,
         };
-        drop(model);
         if len == 0 {
+            drop(model);
             return;
         }
         match action {
-            PaneAction::Up => state.selected_index = state.selected_index.saturating_sub(1),
-            PaneAction::Down => state.selected_index = (state.selected_index + 1).min(len - 1),
-            PaneAction::Left | PaneAction::Right | PaneAction::Activate => {
-                // No expandable tree nodes or activatable detail view yet
-                // (Phase 5 scope: shell only) — nothing to do.
+            PaneAction::Up => {
+                drop(model);
+                state.selected_index = state.selected_index.saturating_sub(1);
+            }
+            PaneAction::Down => {
+                drop(model);
+                state.selected_index = (state.selected_index + 1).min(len - 1);
+            }
+            PaneAction::Left | PaneAction::Right => drop(model),
+            // Fills in a real behavior for what was previously a documented
+            // no-op (`step36.md`) -- mark the highlighted notification
+            // read, using the same id lookup + Command::MarkNotificationRead
+            // the domain layer has had wired end-to-end since Phase 3, just
+            // never dispatched from anywhere in the UI. The read guard must
+            // be dropped before dispatching: the handler for this command
+            // takes a write lock on this same `SharedReadModel` to remove
+            // the item, so holding a read guard across the `.await` would
+            // deadlock.
+            PaneAction::Activate => {
+                let id = match state.focused_dock {
+                    registry::UiDockSlot::Center => model
+                        .unread_notifications
+                        .get(state.selected_index)
+                        .map(|n| n.id.clone()),
+                    registry::UiDockSlot::Right => render::calendar_notifications(&model)
+                        .get(state.selected_index)
+                        .map(|n| n.id.clone()),
+                    registry::UiDockSlot::Left | registry::UiDockSlot::Bottom => None,
+                };
+                drop(model);
+                if let Some(id) = id {
+                    let _ = self
+                        .command_dispatcher
+                        .dispatch(Command::MarkNotificationRead { id })
+                        .await;
+                    // The dispatched command already removed this item from
+                    // the read model synchronously (`step36.md`), so the
+                    // list this dock shows is one shorter now -- reclamp so
+                    // the highlight doesn't point past the new end.
+                    let new_model = self.read_model.read().await;
+                    let new_len = match state.focused_dock {
+                        registry::UiDockSlot::Center => new_model.unread_notifications.len(),
+                        registry::UiDockSlot::Right => {
+                            render::calendar_notifications(&new_model).len()
+                        }
+                        registry::UiDockSlot::Left | registry::UiDockSlot::Bottom => 0,
+                    };
+                    drop(new_model);
+                    state.selected_index = state.selected_index.min(new_len.saturating_sub(1));
+                }
             }
         }
     }

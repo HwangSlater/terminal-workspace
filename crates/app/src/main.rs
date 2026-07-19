@@ -464,6 +464,19 @@ async fn main() -> Result<()> {
     //     integration adapters' poll loops.
     let scheduler = AgendaScheduler::new(Arc::clone(&event_bus) as Arc<dyn EventBus>);
 
+    // 4e. Wire the CQRS read path (Phase 5): Projector keeps a
+    //     DashboardReadModel current for the TUI to render from -- closes
+    //     the read path docs/06-development/decisions/0007-cqrs.md deferred
+    //     until a real UI consumer existed. Built here, earlier than its
+    //     original spot further down, because the command handler needs a
+    //     `SharedReadModel` handle too as of `step36.md` -- `Command::MarkNotificationRead`
+    //     removes the marked item from the live model directly rather than
+    //     through an `Event` (no frozen variant fits, and nothing else in
+    //     the system needs to react to it).
+    let presence_repo = Arc::clone(&storage) as Arc<dyn PresenceRepository>;
+    let notification_repo = Arc::clone(&storage) as Arc<dyn NotificationRepository>;
+    let (projector, read_model) = Projector::new(&presence_repo, &notification_repo).await?;
+
     let handler = Arc::new(WorkspaceCommandHandler::new(
         Arc::clone(&storage) as Arc<dyn PresenceRepository>,
         Arc::clone(&storage) as Arc<dyn NotificationRepository>,
@@ -474,6 +487,7 @@ async fn main() -> Result<()> {
         selection_appliers,
         Arc::clone(&scheduler),
         Some(Arc::clone(&calendar_adapter) as Arc<dyn CalendarManager>),
+        Arc::clone(&read_model),
     ));
     let dispatcher: Arc<dyn CommandDispatcher> = Arc::new(InMemoryCommandDispatcher::new(handler));
 
@@ -528,22 +542,14 @@ async fn main() -> Result<()> {
         scheduler_for_loop.run_loop().await;
     });
 
-    // 7. Wire the CQRS read path (Phase 5): Projector keeps a
-    //    DashboardReadModel current for the TUI to render from — closes
-    //    the read path docs/06-development/decisions/0007-cqrs.md deferred
-    //    until a real UI consumer existed.
-    let presence_repo = Arc::clone(&storage) as Arc<dyn PresenceRepository>;
-    let notification_repo = Arc::clone(&storage) as Arc<dyn NotificationRepository>;
-    let (projector, read_model) = Projector::new(&presence_repo, &notification_repo).await?;
-
-    // 7b. Bind the local CLI socket/pipe (`step15.md`, ADR from
-    //     `product-requirements.md` §4) -- the running TUI process *is*
-    //     the daemon (Decision 1), reachable from a one-shot `termws
-    //     slack-send`/`set-presence`/`status` invocation (step 0 above, in
-    //     a *different* process). A bind failure (most commonly: another
-    //     instance is already running and holds the name) is logged and
-    //     otherwise ignored -- IPC is a convenience on top of the TUI, not
-    //     a requirement for it to work.
+    // 7. Bind the local CLI socket/pipe (`step15.md`, ADR from
+    //    `product-requirements.md` §4) -- the running TUI process *is*
+    //    the daemon (Decision 1), reachable from a one-shot `termws
+    //    slack-send`/`set-presence`/`status` invocation (step 0 above, in
+    //    a *different* process). A bind failure (most commonly: another
+    //    instance is already running and holds the name) is logged and
+    //    otherwise ignored -- IPC is a convenience on top of the TUI, not
+    //    a requirement for it to work.
     let ipc_dir = ipc_socket_dir();
     match IpcServer::bind(&ipc_dir, ipc::DEFAULT_SOCKET_NAME) {
         Ok(server) => {

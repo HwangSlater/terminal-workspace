@@ -111,22 +111,50 @@ pub fn render(
     }
 }
 
-/// One key/description row within a [`HELP_CATEGORIES`] section.
+/// One key/description row within a [`HELP_CATEGORIES`] category.
 struct HelpEntry {
     key: &'static str,
     description: &'static str,
 }
 
-/// A titled group of [`HelpEntry`] rows. Data-driven rather than one
-/// hand-formatted string: as more integrations arrive (Calendar, Jira, ...)
-/// each just appends a category here instead of hand-aligning a growing
-/// wall of text — the flat-list version of this became hard to scan once
-/// Slack and GitHub's shortcuts were both mixed in with navigation and
-/// command-bar syntax.
-const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
-    (
-        "탐색",
-        &[
+/// Which top-level group of the `?` overlay a [`HelpCategory`] belongs
+/// under (`step36.md`) -- keystrokes vs. command-bar syntax read as two
+/// fundamentally different things to look up ("what key do I press" vs.
+/// "what can I type"), so they're rendered as two clearly separated
+/// sections rather than interleaved categories that happened to sort
+/// alphabetically or by feature area.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum HelpSection {
+    Shortcuts,
+    Commands,
+}
+
+impl HelpSection {
+    const fn title(self) -> &'static str {
+        match self {
+            HelpSection::Shortcuts => "단축키",
+            HelpSection::Commands => "커맨드",
+        }
+    }
+}
+
+/// A titled group of [`HelpEntry`] rows, tagged with the [`HelpSection`]
+/// it belongs under. Data-driven rather than one hand-formatted string:
+/// as more integrations arrive (Calendar, Jira, ...) each just appends a
+/// category here instead of hand-aligning a growing wall of text — the
+/// flat-list version of this became hard to scan once Slack and GitHub's
+/// shortcuts were both mixed in with navigation and command-bar syntax.
+struct HelpCategory {
+    section: HelpSection,
+    title: &'static str,
+    entries: &'static [HelpEntry],
+}
+
+const HELP_CATEGORIES: &[HelpCategory] = &[
+    HelpCategory {
+        section: HelpSection::Shortcuts,
+        title: "탐색",
+        entries: &[
             HelpEntry {
                 key: "Tab / Shift+Tab",
                 description: "패널 포커스 순환",
@@ -143,11 +171,76 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 key: "↑/↓",
                 description: "선택한 패널 안에서 위아래 이동",
             },
+            HelpEntry {
+                key: "Enter",
+                description: "선택한 알림을 읽음 처리",
+            },
         ],
-    ),
-    (
-        "명령줄",
-        &[
+    },
+    HelpCategory {
+        section: HelpSection::Shortcuts,
+        title: "Slack 연동",
+        entries: &[
+            HelpEntry {
+                key: "Ctrl+S",
+                description: "연결 설정",
+            },
+            HelpEntry {
+                key: "Ctrl+P",
+                description: "채널/사용자 선택",
+            },
+        ],
+    },
+    HelpCategory {
+        section: HelpSection::Shortcuts,
+        title: "GitHub 연동",
+        entries: &[
+            HelpEntry {
+                key: "Ctrl+G",
+                description: "연결 설정",
+            },
+            HelpEntry {
+                key: "Ctrl+R",
+                description: "저장소 선택",
+            },
+        ],
+    },
+    HelpCategory {
+        section: HelpSection::Shortcuts,
+        title: "Calendar 연동",
+        entries: &[
+            HelpEntry {
+                key: "Ctrl+L",
+                description: "캘린더 추가 (이름 + 비공개 iCal 주소)",
+            },
+            HelpEntry {
+                key: "Ctrl+K",
+                description: "연결된 캘린더 관리/제거/이름 변경(e)",
+            },
+            HelpEntry {
+                key: "Ctrl+M",
+                description: "달력 그리드 뷰 ([/]: 이전/다음 달)",
+            },
+        ],
+    },
+    HelpCategory {
+        section: HelpSection::Shortcuts,
+        title: "기타",
+        entries: &[
+            HelpEntry {
+                key: "Esc",
+                description: "닫기 / Normal 모드로 복귀",
+            },
+            HelpEntry {
+                key: "Ctrl+Q",
+                description: "종료",
+            },
+        ],
+    },
+    HelpCategory {
+        section: HelpSection::Commands,
+        title: "명령줄",
+        entries: &[
             HelpEntry {
                 key: ":",
                 description: "명령줄 입력",
@@ -173,63 +266,7 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 description: "명령어/채널 자동완성 (연속 Tab: 다음 후보)",
             },
         ],
-    ),
-    (
-        "Slack 연동",
-        &[
-            HelpEntry {
-                key: "Ctrl+S",
-                description: "연결 설정",
-            },
-            HelpEntry {
-                key: "Ctrl+P",
-                description: "채널/사용자 선택",
-            },
-        ],
-    ),
-    (
-        "GitHub 연동",
-        &[
-            HelpEntry {
-                key: "Ctrl+G",
-                description: "연결 설정",
-            },
-            HelpEntry {
-                key: "Ctrl+R",
-                description: "저장소 선택",
-            },
-        ],
-    ),
-    (
-        "Calendar 연동",
-        &[
-            HelpEntry {
-                key: "Ctrl+L",
-                description: "캘린더 추가 (이름 + 비공개 iCal 주소)",
-            },
-            HelpEntry {
-                key: "Ctrl+K",
-                description: "연결된 캘린더 관리/제거/이름 변경(e)",
-            },
-            HelpEntry {
-                key: "Ctrl+M",
-                description: "달력 그리드 뷰 ([/]: 이전/다음 달)",
-            },
-        ],
-    ),
-    (
-        "기타",
-        &[
-            HelpEntry {
-                key: "Esc",
-                description: "닫기 / Normal 모드로 복귀",
-            },
-            HelpEntry {
-                key: "Ctrl+Q",
-                description: "종료",
-            },
-        ],
-    ),
+    },
 ];
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
@@ -242,21 +279,34 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     // `centered_rect_fixed`) means it can never truncate again as new
     // categories are added, short of the terminal itself being too small.
     let mut content_width: u16 = UnicodeWidthStr::width("도움말") as u16;
-    for (i, (title, entries)) in HELP_CATEGORIES.iter().enumerate() {
-        if i > 0 {
+    let mut first_section = true;
+    for section in [HelpSection::Shortcuts, HelpSection::Commands] {
+        let section_title = section.title();
+        content_width = content_width.max(UnicodeWidthStr::width(section_title) as u16);
+        if !first_section {
             items.push(ListItem::new(""));
         }
-        content_width = content_width.max(UnicodeWidthStr::width(*title) as u16);
         items.push(ListItem::new(Span::styled(
-            *title,
+            section_title,
             Style::default()
                 .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
-        for entry in *entries {
-            let line = format!("  {:<20} {}", entry.key, entry.description);
-            content_width = content_width.max(UnicodeWidthStr::width(line.as_str()) as u16);
-            items.push(ListItem::new(line));
+        first_section = false;
+        for category in HELP_CATEGORIES.iter().filter(|c| c.section == section) {
+            items.push(ListItem::new(""));
+            content_width = content_width.max(UnicodeWidthStr::width(category.title) as u16);
+            items.push(ListItem::new(Span::styled(
+                category.title,
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for entry in category.entries {
+                let line = format!("  {:<20} {}", entry.key, entry.description);
+                content_width = content_width.max(UnicodeWidthStr::width(line.as_str()) as u16);
+                items.push(ListItem::new(line));
+            }
         }
     }
 
@@ -2381,6 +2431,8 @@ mod tests {
         // overflow which at least still occupies buffer rows.
         let text = draw(140, 55, &state, &DashboardReadModel::default());
         for category in [
+            "단축키",
+            "커맨드",
             "탐색",
             "명령줄",
             "Slack 연동",
@@ -2398,6 +2450,31 @@ mod tests {
         assert!(contains_ignoring_whitespace(&text, "Ctrl+S"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+G"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+L"));
+    }
+
+    /// `step36.md`: shortcuts and command-bar syntax read as two different
+    /// kinds of lookup, so they're grouped under two clearly separated
+    /// section headers -- 단축키 first, 커맨드 last -- rather than
+    /// interleaved category cards. Pins both the headers' presence and
+    /// their relative order, not just that the text exists somewhere.
+    #[test]
+    fn help_overlay_separates_shortcuts_from_commands_as_distinct_sections() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            ..Default::default()
+        };
+        let text = draw(140, 55, &state, &DashboardReadModel::default());
+        // A wide glyph's padding cell reads back as a literal space in the
+        // raw buffer, so a plain `text.find` on a multi-character Korean
+        // needle can miss it -- strip whitespace first, same convention
+        // `contains_ignoring_whitespace` uses elsewhere in this file.
+        let stripped: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let shortcuts_pos = stripped.find("단축키").expect("단축키 section missing");
+        let commands_pos = stripped.find("커맨드").expect("커맨드 section missing");
+        assert!(
+            shortcuts_pos < commands_pos,
+            "단축키 section should render before 커맨드"
+        );
     }
 
     /// Real regression test, reported via live use: the overlay used to be
