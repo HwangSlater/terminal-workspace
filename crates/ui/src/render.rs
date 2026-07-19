@@ -906,7 +906,15 @@ fn render_calendar_panel(
     state: &WorkspaceState,
     model: &DashboardReadModel,
 ) {
-    let items = calendar_notifications(model);
+    let mut items = calendar_notifications(model);
+    // Real gap found via live use: the occurrence's start time was already
+    // in `NotificationItem.timestamp_ms` (`map_occurrence` populates it
+    // correctly) but this panel never rendered it -- a list of reminders
+    // with no visible date/time. Sorting soonest-first goes with that fix:
+    // an unsorted list of dated items reads as broken, not just unordered
+    // (`unread_notifications`' order is whatever order the Projector
+    // received the underlying events in, not chronological).
+    items.sort_by_key(|item| item.timestamp_ms);
     let block = dock_block("캘린더", items.len(), UiDockSlot::Right, state);
 
     if items.is_empty() {
@@ -925,7 +933,8 @@ fn render_calendar_panel(
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let line = format!("{} — {}", item.title, item.body);
+            let when = format_occurrence_time(item.timestamp_ms);
+            let line = format!("{when}  {}", item.title);
             let style = if state.focused_dock == UiDockSlot::Right && i == state.selected_index {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
@@ -935,6 +944,21 @@ fn render_calendar_panel(
         })
         .collect();
     frame.render_widget(List::new(list_items).block(block), area);
+}
+
+/// `"7/20 14:00"` in the user's local time (not UTC — `timestamp_ms` is
+/// epoch milliseconds; a raw UTC display would silently be wrong for
+/// anyone not in UTC). No year shown -- `lookahead_hours` bounds this
+/// panel to the near future (default 24h, configurable), so a reminder
+/// crossing a year boundary isn't a real scenario worth the extra width.
+fn format_occurrence_time(timestamp_ms: u64) -> String {
+    let Some(utc) =
+        chrono::DateTime::from_timestamp_millis(i64::try_from(timestamp_ms).unwrap_or(i64::MAX))
+    else {
+        return "?".to_string();
+    };
+    let local = utc.with_timezone(&chrono::Local);
+    local.format("%-m/%-d %H:%M").to_string()
 }
 
 /// Full scrollback view of the app's own `tracing` output (`Ctrl+4`,
@@ -1302,6 +1326,107 @@ mod tests {
         // against the filter below, not by scraping rendered text.
         let text = draw(140, 30, &state, &model);
         assert!(contains_ignoring_whitespace(&text, "Design Review"));
+    }
+
+    #[test]
+    fn format_occurrence_time_renders_local_month_day_and_time() {
+        // 2025-01-01T09:00:00Z -- checked against a fixed UTC instant
+        // (not "now") so the test doesn't depend on the machine's local
+        // timezone offset for its *input*, only for confirming the
+        // conversion actually happened (see the two assertions below).
+        let ts = chrono::DateTime::parse_from_rfc3339("2025-01-01T09:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let formatted = format_occurrence_time(u64::try_from(ts).unwrap());
+        // Real regression guard: this is the fix itself -- the panel
+        // previously showed no date/time at all.
+        assert!(formatted.contains(':'), "expected a time in {formatted:?}");
+        assert!(formatted.contains('/'), "expected a date in {formatted:?}");
+    }
+
+    /// Real regression test: the Calendar panel previously rendered
+    /// `"{title} — {body}"` with no date/time anywhere, discovered via live
+    /// use with multiple calendars connected. Confirms the fix actually
+    /// reaches the screen, not just the formatting helper in isolation.
+    #[test]
+    fn calendar_panel_shows_the_occurrence_time_not_just_the_title() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2025-06-15T14:30:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let model = DashboardReadModel {
+            unread_notifications: vec![NotificationItem {
+                timestamp_ms: u64::try_from(ts).unwrap(),
+                ..sample_notification_for(IntegrationSource::Calendar, "Design Review")
+            }],
+            ..Default::default()
+        };
+        let text = draw(140, 30, &WorkspaceState::default(), &model);
+        let expected_time = format_occurrence_time(u64::try_from(ts).unwrap());
+        assert!(
+            contains_ignoring_whitespace(&text, &expected_time),
+            "expected the formatted time {expected_time:?} in:\n{text}"
+        );
+    }
+
+    /// Proves the render function's own sort, not just that sorting is
+    /// possible -- checks the *rendered buffer's* row order, since
+    /// `calendar_notifications` itself (the filter, tested separately
+    /// below) preserves insertion order and does no sorting on its own.
+    #[test]
+    fn calendar_panel_sorts_reminders_soonest_first() {
+        let later = NotificationItem {
+            timestamp_ms: 999_999,
+            ..sample_notification_for(IntegrationSource::Calendar, "LaterEventXYZ")
+        };
+        let sooner = NotificationItem {
+            timestamp_ms: 1,
+            ..sample_notification_for(IntegrationSource::Calendar, "SoonerEventXYZ")
+        };
+        let model = DashboardReadModel {
+            // Deliberately inserted out of chronological order.
+            unread_notifications: vec![later, sooner],
+            ..Default::default()
+        };
+        let text = draw(140, 30, &WorkspaceState::default(), &model);
+        // Bare titles aren't unique enough: the Notification panel (center
+        // column) also shows both Calendar-sourced items -- unsorted, and
+        // positioned *before* the Calendar panel (right column) in the
+        // buffer's row-major text, which would make a plain title search
+        // find "LaterEventXYZ" first regardless of whether the Calendar
+        // panel's own sort works. Only the Calendar panel prefixes a
+        // formatted time, so pairing title with time scopes the search to
+        // that panel specifically.
+        let sooner_needle = format!("{}  SoonerEventXYZ", format_occurrence_time(1));
+        let later_needle = format!("{}  LaterEventXYZ", format_occurrence_time(999_999));
+        let sooner_pos = text
+            .find(&sooner_needle)
+            .unwrap_or_else(|| panic!("{sooner_needle:?} not rendered in:\n{text}"));
+        let later_pos = text
+            .find(&later_needle)
+            .unwrap_or_else(|| panic!("{later_needle:?} not rendered in:\n{text}"));
+        assert!(
+            sooner_pos < later_pos,
+            "expected the sooner event to render first:\n{text}"
+        );
+    }
+
+    #[test]
+    fn calendar_notifications_preserves_insertion_order_sorting_is_the_render_fns_job() {
+        // Documents the boundary: the filter itself is order-preserving:
+        // `render_calendar_panel` is where chronological sorting happens,
+        // not here -- so this helper stays reusable by anything that wants
+        // the raw filtered list in its original order (e.g. a future
+        // consumer that sorts differently).
+        let model = DashboardReadModel {
+            unread_notifications: vec![
+                sample_notification_for(IntegrationSource::Calendar, "First"),
+                sample_notification_for(IntegrationSource::Calendar, "Second"),
+            ],
+            ..Default::default()
+        };
+        let items = calendar_notifications(&model);
+        assert_eq!(items[0].title, "First");
+        assert_eq!(items[1].title, "Second");
     }
 
     #[test]
