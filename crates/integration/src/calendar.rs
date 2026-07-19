@@ -373,6 +373,7 @@ impl CalendarPoller {
         &self,
         event_bus: &Arc<dyn EventBus>,
         connection: &CalendarConnection,
+        is_first_poll: bool,
     ) -> (PollResult, Option<u64>) {
         let calendar = match fetch_calendar_feed(&self.http, connection).await {
             FetchOutcome::Success(cal) => cal,
@@ -407,6 +408,17 @@ impl CalendarPoller {
                 if already_seen {
                     continue;
                 }
+                self.seen_occurrences.lock().await.insert(key);
+                // `seen_occurrences` starts empty every process launch
+                // (`step33.md`) -- without this check, every occurrence
+                // already inside the lookahead window would look "new"
+                // and fire a desktop notification on every single app
+                // launch. The first poll still records every occurrence
+                // it finds as seen, it just doesn't announce any of them,
+                // since none of it is actually new to the user.
+                if is_first_poll {
+                    continue;
+                }
                 let item = map_occurrence(event, occurrence, &connection.label);
                 if event_bus
                     .publish(Event::CalendarReminderTriggered(item))
@@ -415,7 +427,6 @@ impl CalendarPoller {
                 {
                     any_failure = true;
                 }
-                self.seen_occurrences.lock().await.insert(key);
             }
         }
 
@@ -435,13 +446,14 @@ impl CalendarPoller {
         &self,
         event_bus: &Arc<dyn EventBus>,
         connections: &[CalendarConnection],
+        is_first_poll: bool,
     ) -> (PollResult, Option<u64>) {
         let mut any_success = false;
         let mut any_rate_limited = false;
         let mut retry_after = None;
 
         for connection in connections {
-            let (result, retry) = self.poll_one(event_bus, connection).await;
+            let (result, retry) = self.poll_one(event_bus, connection, is_first_poll).await;
             match result {
                 PollResult::Success => any_success = true,
                 PollResult::RateLimited => {
@@ -463,8 +475,12 @@ impl CalendarPoller {
 
     async fn run_loop(self, event_bus: Arc<dyn EventBus>, connections: Vec<CalendarConnection>) {
         let base_interval = Duration::from_secs(self.config.sync_interval_secs.max(1));
+        let mut is_first_poll = true;
         loop {
-            let (result, retry_after) = self.poll_once(&event_bus, &connections).await;
+            let (result, retry_after) = self
+                .poll_once(&event_bus, &connections, is_first_poll)
+                .await;
+            is_first_poll = false;
 
             let (status, prev_status) = {
                 let mut state = self.state.write().await;

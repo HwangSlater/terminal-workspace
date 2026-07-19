@@ -207,6 +207,7 @@ impl GitHubPoller {
         &self,
         event_bus: &Arc<dyn EventBus>,
         token: &str,
+        is_first_poll: bool,
     ) -> (PollResult, Option<u64>) {
         let mut any_failure = false;
         let mut retry_after: Option<u64> = None;
@@ -223,6 +224,18 @@ impl GitHubPoller {
                         if already_seen {
                             continue;
                         }
+                        self.seen_prs.lock().await.insert(key);
+                        // `seen_prs` starts empty every process launch
+                        // (`step33.md`) -- without this check, every
+                        // currently-open PR would look "new" and fire a
+                        // desktop notification on every single app
+                        // launch. The first poll still records every PR
+                        // it finds as seen, it just doesn't announce any
+                        // of them, since none of it is actually new to
+                        // the user.
+                        if is_first_poll {
+                            continue;
+                        }
                         let item = map_pull_request(repo, pr);
                         if event_bus
                             .publish(Event::GitHubPRCreated(item))
@@ -231,7 +244,6 @@ impl GitHubPoller {
                         {
                             any_failure = true;
                         }
-                        self.seen_prs.lock().await.insert(key);
                     }
                 }
                 Err(_) => any_failure = true,
@@ -250,8 +262,10 @@ impl GitHubPoller {
 
     async fn run_loop(self, event_bus: Arc<dyn EventBus>, token: String) {
         let base_interval = Duration::from_secs(self.config.sync_interval_secs.max(1));
+        let mut is_first_poll = true;
         loop {
-            let (result, retry_after) = self.poll_once(&event_bus, &token).await;
+            let (result, retry_after) = self.poll_once(&event_bus, &token, is_first_poll).await;
+            is_first_poll = false;
 
             let (status, prev_status) = {
                 let mut state = self.state.write().await;
