@@ -13,7 +13,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::block::Title;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use registry::UiDockSlot;
 use scheduler::{PomodoroMode, PomodoroSnapshot};
@@ -146,7 +146,7 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 description: "로그 보기 (최근 기록 전체, 오버레이)",
             },
             HelpEntry {
-                key: "j/k, ↑/↓",
+                key: "↑/↓",
                 description: "선택한 패널 안에서 위아래 이동",
             },
         ],
@@ -349,7 +349,13 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(inner);
 
+    // `picker.cursor` indexes the *logical* channels-then-users list, but
+    // `items` also has two bold section headers interspersed -- this
+    // tracks which rendered row that logical cursor actually lands on, so
+    // the `ListState` below (which operates on rendered indices) can tell
+    // ratatui to keep the right row in view (`step29.md`).
     let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_render_index = 0usize;
     items.push(ListItem::new(Span::styled(
         "채널 (봇이 초대된 채널만 표시)",
         Style::default().add_modifier(Modifier::BOLD),
@@ -362,6 +368,7 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     for (i, row) in picker.channels.iter().enumerate() {
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let style = if picker.cursor == i {
+            selected_render_index = items.len();
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
@@ -376,18 +383,20 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let index = picker.channels.len() + i;
         let style = if picker.cursor == index {
+            selected_render_index = items.len();
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
         };
         items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
     }
-    frame.render_widget(List::new(items), layout[0]);
+    let mut list_state = ListState::default().with_selected(Some(selected_render_index));
+    frame.render_stateful_widget(List::new(items), layout[0], &mut list_state);
 
     let status_line = match &picker.status {
         SlackPickerStatus::Saving => "저장 중...",
         SlackPickerStatus::Saved => "저장됨!",
-        _ => "j/k: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+        _ => "↑/↓: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
@@ -523,12 +532,14 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
         };
         items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
     }
-    frame.render_widget(List::new(items), layout[0]);
+    // Same scrolling fix as the GitHub/Slack pickers (`step29.md`).
+    let mut list_state = ListState::default().with_selected(Some(picker.cursor));
+    frame.render_stateful_widget(List::new(items), layout[0], &mut list_state);
 
     let status_line = match &picker.status {
         CalendarPickerStatus::Saving => "저장 중...",
         CalendarPickerStatus::Saved => "저장됨!",
-        _ => "j/k: 이동  Space: 선택/해제  e: 이름 변경  Enter: 저장  Esc: 닫기",
+        _ => "↑/↓: 이동  Space: 선택/해제  e: 이름 변경  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
@@ -832,12 +843,18 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         };
         items.push(ListItem::new(format!("  {checkbox} {}", row.label)).style(style));
     }
-    frame.render_widget(List::new(items), layout[0]);
+    // Real regression fix: a plain `List::new(items)` + `render_widget`
+    // never scrolls -- the cursor could move past the bottom of a long
+    // list with no visual indication anything was still selected
+    // (`step29.md`). A `ListState` with the cursor selected makes ratatui
+    // shift the viewport to keep the highlighted row visible.
+    let mut list_state = ListState::default().with_selected(Some(picker.cursor));
+    frame.render_stateful_widget(List::new(items), layout[0], &mut list_state);
 
     let status_line = match &picker.status {
         GitHubPickerStatus::Saving => "저장 중...",
         GitHubPickerStatus::Saved => "저장됨!",
-        _ => "j/k: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+        _ => "↑/↓: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
@@ -2477,6 +2494,50 @@ mod tests {
         assert!(text.contains("[ ] #random"));
     }
 
+    /// Real regression guard, same root cause as
+    /// `github_picker_scrolls_the_viewport_to_keep_a_faroff_cursor_visible`
+    /// (`step29.md`) -- but for Slack's picker specifically, since its
+    /// combined channels-then-users list has two bold section headers
+    /// interspersed, so the logical `cursor` index doesn't map 1:1 onto
+    /// the rendered row index the way GitHub's/Calendar's flat lists do.
+    /// A cursor deep in the *users* section (not just a long list) proves
+    /// that index translation is correct, not just that scrolling happens
+    /// at all.
+    #[test]
+    fn slack_picker_scrolls_to_a_faroff_cursor_in_the_users_section() {
+        let channels: Vec<PickerRow> = (0..20)
+            .map(|i| PickerRow {
+                id: format!("C{i}"),
+                label: format!("channel-{i}"),
+                selected: false,
+            })
+            .collect();
+        let users: Vec<PickerRow> = (0..10)
+            .map(|i| PickerRow {
+                id: format!("U{i}"),
+                label: format!("user-{i}"),
+                selected: false,
+            })
+            .collect();
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::SlackPicker,
+            slack_picker: SlackPickerState {
+                channels,
+                users,
+                cursor: 25, // logical index 25 = 5th user (20 channels + 5)
+                status: SlackPickerStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(
+            contains_ignoring_whitespace(&text, "user-5"),
+            "expected the cursor's row (5th user, far past the first screenful) \
+             to have scrolled into view:\n{text}"
+        );
+    }
+
     #[test]
     fn slack_picker_overlay_shows_the_failure_reason() {
         let state = WorkspaceState {
@@ -2925,6 +2986,39 @@ mod tests {
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(text.contains("[x] owner/repo-one"));
         assert!(text.contains("[ ] owner/repo-two"));
+    }
+
+    /// Real regression guard, reported via live use with a large
+    /// repository list: the picker used to render `List` statelessly, so
+    /// the cursor could move past the bottom of the visible window with
+    /// no scrolling at all -- the highlighted row just went off-screen
+    /// (`step29.md`). A list long enough to overflow a normal popup, with
+    /// the cursor near the end, should still show that row.
+    #[test]
+    fn github_picker_scrolls_the_viewport_to_keep_a_faroff_cursor_visible() {
+        let repositories: Vec<PickerRow> = (0..30)
+            .map(|i| PickerRow {
+                id: format!("owner/repo-{i}"),
+                label: format!("owner/repo-{i}"),
+                selected: false,
+            })
+            .collect();
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: crate::state::GitHubPickerState {
+                repositories,
+                cursor: 25,
+                status: GitHubPickerStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(
+            contains_ignoring_whitespace(&text, "owner/repo-25"),
+            "expected the cursor's row (far past the first screenful) to have scrolled \
+             into view:\n{text}"
+        );
     }
 
     #[test]

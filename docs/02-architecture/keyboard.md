@@ -24,7 +24,7 @@ The system operates in one of three modes:
 | `Shift + Tab`| Focus Prev Pane | Global | Cycles focus counter-clockwise through visible layout panes. |
 | `?` | Show Help Dialog | Global | Renders an overlay listing all context-aware shortcuts. |
 | `Ctrl + s` | Slack Setup | Global | Opens the Slack Bot Token entry overlay (`step7.md`) — masked input, connects immediately on submit. |
-| `Ctrl + p` | Slack Channel/User Picker | Global | Opens the channel/watched-user picker (`step8.md`) — `j`/`k` move, `Space` toggles, `Enter` saves and restarts polling. |
+| `Ctrl + p` | Slack Channel/User Picker | Global | Opens the channel/watched-user picker (`step8.md`) — arrow keys move (`step29.md`: `j`/`k` no longer advertised, though still accepted), `Space` toggles, `Enter` saves and restarts polling. |
 
 ---
 
@@ -32,12 +32,11 @@ The system operates in one of three modes:
 
 When a specific panel is focused in **Normal Mode**, keys change behavior:
 
-### 1. General Panel Navigation (Vim Keys Supported)
-- `k` or `Up Arrow`: Move selection up.
-- `j` or `Down Arrow`: Move selection down.
-- `h` or `Left Arrow`: Collapse node / scroll left.
-- `l` or `Right Arrow`: Expand node / scroll right / view details.
+### 1. General Panel Navigation
+- `Up Arrow`: Move selection up.
+- `Down Arrow`: Move selection down.
 - `Enter`: Activate item (e.g., open thread, edit event).
+- **`step29.md`**: `j`/`k` (and, in overlays that historically accepted `h`/`l` too) are no longer documented as the primary navigation — arrow keys are the one advertised method everywhere, consistent with the Calendar grid view's arrow-only navigation (`step26.md`/`step27.md`). Existing `j`/`k` key bindings in list pickers are left functionally in place (removing them wasn't requested, only the help text advertising them was), so muscle memory built on the old hint still works.
 
 ### 2. Quick Focus Switchers (Global shortcuts)
 - `Ctrl + 1` or `Ctrl + t`: Focus Team Panel.

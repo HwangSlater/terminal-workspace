@@ -13,6 +13,7 @@ Implements `IntegrationAdapter` (`docs/04-extensions/integration-contract.md`) v
 The Slack App must be installed with these Bot Token scopes:
 - `channels:history` — read messages from public channels the bot has been added to.
 - `channels:read` — resolve channel IDs.
+- `groups:history` / `groups:read` — the private-channel equivalents of the two scopes above (`step29.md`) — required for private channels to appear in the `Ctrl+P` picker and for `conversations.history` to work on them once selected. Without these, a private channel the bot was invited to still won't show up even after the `step29.md` `types` fix, since Slack's API itself will reject the request.
 - `users:read` — resolve display names and presence for `watched_user_ids`.
 - `chat:write` — required for `Command::SendSlackMessage` (`chat.postMessage`).
 
@@ -47,7 +48,9 @@ On a Slack `429`, read the `Retry-After` header, pause outbound calls for that d
 
 ## Picking channels/users (`step8.md`, `Ctrl+P`)
 
-`channel_ids`/`watched_user_ids` no longer need hand-editing `config.toml` — the `Ctrl+P` overlay fetches live lists via `conversations.list` (`types=public_channel`, filtered to `is_member: true` — only channels the bot has already been invited to, since `conversations.history` fails otherwise) and `users.list` (filtered to exclude bots and deleted accounts), both cursor-paginated. No new scopes needed: `channels:read`/`users:read` above already cover them. Selecting rows and pressing `Enter` dispatches `Command::ApplySlackSelection`, which overwrites `config.toml`'s `channel_ids`/`watched_user_ids` (see Configuration below) and restarts the poll loop with them immediately — no restart required. Manually editing `config.toml` still works too; the picker is a convenience, not the only way in.
+`channel_ids`/`watched_user_ids` no longer need hand-editing `config.toml` — the `Ctrl+P` overlay fetches live lists via `conversations.list` (`types=public_channel,private_channel` — see `step29.md`, `types` was `public_channel` only until a real bug report showed a just-invited private channel never appearing — filtered to `is_member: true` — only channels the bot has already been invited to, since `conversations.history` fails otherwise) and `users.list` (filtered to exclude bots and deleted accounts), both cursor-paginated. `channels:read`/`users:read` above cover public channels; a private channel additionally needs `groups:read`/`groups:history` (`step29.md`) or it still won't appear even with the corrected `types` param. Selecting rows and pressing `Enter` dispatches `Command::ApplySlackSelection`, which overwrites `config.toml`'s `channel_ids`/`watched_user_ids` (see Configuration below) and restarts the poll loop with them immediately — no restart required. Manually editing `config.toml` still works too; the picker is a convenience, not the only way in.
+
+The picker's second section, "사용자" (users), is unrelated to channels/DMs — selecting a person there adds them to `watched_user_ids`, a presence watch-list polled via `users.getPresence` (see Receiving below). It does not open, create, or list any kind of direct-message channel.
 
 ## Configuration
 

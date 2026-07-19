@@ -242,8 +242,14 @@ pub struct PickerUser {
 /// belong on the write path; `crates/ui` holds this port directly.
 #[async_trait]
 pub trait SlackPicker: Send + Sync {
-    /// Public channels the bot has already been invited to (`step8.md`
-    /// Decision 3 — channels it hasn't joined would fail if selected).
+    /// Public *and* private channels the bot has already been invited to
+    /// (`step8.md` Decision 3 — channels it hasn't joined would fail if
+    /// selected; `step29.md` — a real bug report: a channel the bot was
+    /// just invited to didn't appear here because it was private and
+    /// `conversations.list`'s `types` param was hardcoded to
+    /// `public_channel` only. Reading a private channel's history also
+    /// needs the `groups:history`/`groups:read` bot scopes in addition to
+    /// `channels:history`/`channels:read` — see `docs/04-extensions/integrations/slack.md`).
     async fn list_channels(&self) -> Result<Vec<PickerChannel>>;
     /// Non-bot, non-deleted workspace members.
     async fn list_users(&self) -> Result<Vec<PickerUser>>;
@@ -740,8 +746,14 @@ async fn fetch_channel_list(http: &reqwest::Client, token: &str) -> Result<Vec<P
     let mut all = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
+        // `types` was hardcoded to `public_channel` only, which silently
+        // dropped every private channel regardless of `is_member` --
+        // real bug report (`step29.md`), a channel the bot was just
+        // invited to never showed up here because Slack's
+        // `conversations.list` won't return private conversations at all
+        // unless `private_channel` is explicitly requested.
         let mut query = vec![
-            ("types", "public_channel".to_string()),
+            ("types", "public_channel,private_channel".to_string()),
             ("limit", "200".to_string()),
         ];
         if let Some(c) = &cursor {
