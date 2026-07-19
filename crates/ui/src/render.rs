@@ -11,11 +11,12 @@ use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel}
 use events::IntegrationConnectionStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use registry::UiDockSlot;
 use scheduler::{PomodoroMode, PomodoroSnapshot};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
@@ -231,14 +232,20 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
 ];
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(60, 60, area);
-    frame.render_widget(Clear, popup);
-
     let mut items: Vec<ListItem> = Vec::new();
+    // A fixed 60%-of-screen popup was fine when this list was short, but
+    // it stopped fitting once Calendar's shortcuts (`step25.md`) pushed
+    // the content past that budget -- the overlay silently clipped
+    // everything after the GitHub category with no scroll to reach the
+    // rest. Sizing to the real content (clamped to the terminal, same as
+    // `centered_rect_fixed`) means it can never truncate again as new
+    // categories are added, short of the terminal itself being too small.
+    let mut content_width: u16 = UnicodeWidthStr::width("도움말") as u16;
     for (i, (title, entries)) in HELP_CATEGORIES.iter().enumerate() {
         if i > 0 {
             items.push(ListItem::new(""));
         }
+        content_width = content_width.max(UnicodeWidthStr::width(*title) as u16);
         items.push(ListItem::new(Span::styled(
             *title,
             Style::default()
@@ -246,12 +253,19 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )));
         for entry in *entries {
-            items.push(ListItem::new(format!(
-                "  {:<20} {}",
-                entry.key, entry.description
-            )));
+            let line = format!("  {:<20} {}", entry.key, entry.description);
+            content_width = content_width.max(UnicodeWidthStr::width(line.as_str()) as u16);
+            items.push(ListItem::new(line));
         }
     }
+
+    let content_height = u16::try_from(items.len()).unwrap_or(u16::MAX);
+    let popup = centered_rect_fixed(
+        content_width.saturating_add(4),
+        content_height.saturating_add(2),
+        area,
+    );
+    frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .title("도움말")
@@ -747,6 +761,52 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+/// Centers a popup sized to its actual content (`width`/`height` in
+/// terminal columns/rows), clamped to `area` so it never claims more space
+/// than the real terminal has. Unlike `centered_rect`'s percent-of-`area`
+/// idiom, this is for overlays whose content size varies (the Help overlay
+/// grew past a fixed 60% height once Calendar's shortcuts were added,
+/// silently truncating the last category — this is the fix).
+fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// Hard-wraps `text` to `width` terminal columns, honoring wide (e.g.
+/// Korean) characters via `unicode-width` rather than counting `char`s 1:1
+/// -- the Calendar panel's fixed `RIGHT_DOCK_WIDTH` clips long event titles
+/// with no way to see the rest otherwise. Breaks mid-word rather than at
+/// word boundaries: this panel is narrow enough (32 columns minus borders)
+/// that word-wrapping would frequently orphan a single word onto its own
+/// line for little readability gain, not worth the extra complexity.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(1);
+        if current_width + ch_width > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn render_too_small(frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new("터미널 크기가 너무 작습니다. 화면을 넓혀주세요.")
         .style(Style::default().fg(Color::Red))
@@ -1085,6 +1145,11 @@ fn render_calendar_panel(
         return;
     }
 
+    // Inner width available for text once the block's left/right borders
+    // are subtracted -- ratatui's `List` doesn't wrap long lines on its
+    // own, it clips them, which is exactly what was hiding the rest of
+    // long event titles.
+    let inner_width = area.width.saturating_sub(2).max(1) as usize;
     let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
@@ -1096,7 +1161,11 @@ fn render_calendar_panel(
             } else {
                 Style::default()
             };
-            ListItem::new(line).style(style)
+            let wrapped: Vec<Line> = wrap_to_width(&line, inner_width)
+                .into_iter()
+                .map(Line::from)
+                .collect();
+            ListItem::new(Text::from(wrapped)).style(style)
         })
         .collect();
     frame.render_widget(List::new(list_items).block(block), area);
@@ -1485,6 +1554,25 @@ mod tests {
     }
 
     #[test]
+    fn wrap_to_width_keeps_every_character_across_the_split() {
+        let text = "이것은 아주 긴 문장입니다 매우 매우 매우 길게 만든 문장";
+        let wrapped = wrap_to_width(text, 10);
+        assert!(wrapped.len() > 1, "expected the text to actually wrap");
+        for line in &wrapped {
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= 10,
+                "line {line:?} exceeds the requested width"
+            );
+        }
+        assert_eq!(wrapped.concat(), text, "wrapping must not drop characters");
+    }
+
+    #[test]
+    fn wrap_to_width_leaves_short_text_on_one_line() {
+        assert_eq!(wrap_to_width("short", 30), vec!["short".to_string()]);
+    }
+
+    #[test]
     fn format_occurrence_time_renders_local_month_day_and_time() {
         // 2025-01-01T09:00:00Z -- checked against a fixed UTC instant
         // (not "now") so the test doesn't depend on the machine's local
@@ -1563,6 +1651,39 @@ mod tests {
         assert!(
             sooner_pos < later_pos,
             "expected the sooner event to render first:\n{text}"
+        );
+    }
+
+    /// Real regression test, reported via live use: `List` doesn't wrap
+    /// long lines on its own, it clips them at the panel's edge, so an
+    /// event title that didn't fit in the Calendar dock's fixed 32-column
+    /// width was simply invisible past the cutoff with no way to see the
+    /// rest. Confirms the full title now reaches the buffer somewhere
+    /// (wrapped across rows), not just the prefix that fit on one row.
+    #[test]
+    fn calendar_panel_wraps_long_titles_instead_of_clipping_them() {
+        let long_title =
+            "이것은 한 줄에 다 들어가지 않을 정도로 아주 아주 길게 지어진 회의 이름입니다";
+        let model = DashboardReadModel {
+            unread_notifications: vec![sample_notification_for(
+                IntegrationSource::Calendar,
+                long_title,
+            )],
+            ..Default::default()
+        };
+        let text = draw(140, 30, &WorkspaceState::default(), &model);
+        // Checks the *tail* of the title, not the whole reassembled
+        // string: the old bug clipped the line at the panel's width, so
+        // the tail never reached the screen at all -- that's the real
+        // regression guard. A full-string contiguous match isn't used
+        // here because the flattened buffer text joins terminal *rows*,
+        // and an adjoining panel's own border character lands between two
+        // of the Calendar panel's wrapped rows in that flattening even
+        // though the wrap itself is correct -- a `TestBackend` scraping
+        // gotcha (see `buffer_text`'s doc comment), not a real bug.
+        assert!(
+            contains_ignoring_whitespace(&text, "회의 이름입니다"),
+            "expected the tail of the long title to be visible (wrapped), not clipped:\n{text}"
         );
     }
 
@@ -1870,6 +1991,35 @@ mod tests {
         assert!(contains_ignoring_whitespace(&text, "Ctrl+S"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+G"));
         assert!(contains_ignoring_whitespace(&text, "Ctrl+L"));
+    }
+
+    /// Real regression test, reported via live use: the overlay used to be
+    /// a fixed 60%-of-terminal-height popup, which silently clipped
+    /// everything after the GitHub category on any terminal shorter than
+    /// ~55 rows -- ordinary terminal sizes, not an edge case. This uses a
+    /// height picked to be comfortably enough for the content but well
+    /// under what the old 60% formula would have needed, proving the fix
+    /// sizes the popup to its actual content instead of a fraction of the
+    /// screen.
+    #[test]
+    fn help_overlay_is_not_truncated_on_an_ordinary_sized_terminal() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            ..Default::default()
+        };
+        let text = draw(140, 34, &state, &DashboardReadModel::default());
+        assert!(
+            contains_ignoring_whitespace(&text, "기타"),
+            "last category was clipped:\n{text}"
+        );
+        assert!(
+            contains_ignoring_whitespace(&text, "Ctrl+Q"),
+            "last category's entries were clipped:\n{text}"
+        );
+        assert!(
+            contains_ignoring_whitespace(&text, "Ctrl+M"),
+            "Calendar's grid-view shortcut was clipped:\n{text}"
+        );
     }
 
     /// `/pomodoro` was a real, shipped command (`step18.md`) that the help

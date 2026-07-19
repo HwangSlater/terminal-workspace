@@ -3223,6 +3223,7 @@ dependencies = [
  "scheduler",
  "tokio",
  "tracing",
+ "unicode-width",
  "uuid",
 ]
 
