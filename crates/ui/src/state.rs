@@ -460,6 +460,11 @@ pub struct WorkspaceState {
     pub calendar_connection_status: IntegrationConnectionStatus,
     /// Active theme name (`docs/02-architecture/theme.md` lists valid values).
     pub active_theme: String,
+    /// Animation frame counter (`step30.md`), incremented on a periodic
+    /// redraw tick (`crates/ui/src/lib.rs`'s `event_loop`) — drives the
+    /// loading spinner's frame (`theme::spinner_frame`). Not tied to real
+    /// time itself; only its parity/modulus matters.
+    pub anim_tick: u64,
     /// Selected index within the focused pane's list (Team/Notification).
     pub selected_index: usize,
     /// Set by the global quit shortcut (`Ctrl+Q`); the run loop exits once true.
@@ -493,6 +498,7 @@ impl Default for WorkspaceState {
             // Same placeholder reasoning as slack_connection_status above.
             calendar_connection_status: IntegrationConnectionStatus::Disconnected,
             active_theme: "default-dark".to_string(),
+            anim_tick: 0,
             selected_index: 0,
             should_quit: false,
         }

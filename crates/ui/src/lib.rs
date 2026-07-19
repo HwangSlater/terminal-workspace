@@ -6,6 +6,7 @@
 mod keyboard;
 mod render;
 mod state;
+mod theme;
 
 pub use keyboard::{handle_key, KeyOutcome, PaneAction};
 pub use state::{ActiveLayout, CommandBufferState, FocusMode, PanelId, WorkspaceState};
@@ -31,9 +32,21 @@ use state::{
 use std::collections::HashMap;
 use std::io::Stdout;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::MissedTickBehavior;
 
 type Backend = CrosstermBackend<Stdout>;
+
+/// Redraw cadence for animated UI (the loading spinner, `step30.md`) --
+/// smooth enough to read as motion without redrawing so often it wastes
+/// CPU on a background desktop tool that's usually just sitting idle. A
+/// real side effect: this is also what makes the header's Pomodoro
+/// countdown genuinely live for the first time (`step30.md` Decision 3) --
+/// before this tick existed, the whole render loop only ever redrew in
+/// response to a keypress or a domain-bus event, so the countdown only
+/// visually advanced whenever one of those happened to fire.
+const ANIM_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 fn io_err(e: std::io::Error) -> WorkspaceError {
     WorkspaceError::Internal(e.to_string())
@@ -166,8 +179,22 @@ impl TuiRenderer {
     ) -> Result<()> {
         self.draw(terminal, state).await?;
 
+        // Drives the loading spinner and (as a side effect) makes the
+        // Pomodoro countdown genuinely live (`step30.md`, `ANIM_TICK_INTERVAL`'s
+        // doc comment). `Delay`, not `Burst`: if a draw takes longer than
+        // one interval (e.g. a slow terminal write), catch up with a
+        // single tick on the next wake rather than firing a burst of
+        // back-to-back ticks to make up the difference -- a spinner
+        // doesn't need to "catch up," it just needs to keep moving.
+        let mut anim_interval = tokio::time::interval(ANIM_TICK_INTERVAL);
+        anim_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
+                _ = anim_interval.tick() => {
+                    state.anim_tick = state.anim_tick.wrapping_add(1);
+                    self.draw(terminal, state).await?;
+                }
                 input = rx.recv() => {
                     let Some(input) = input else { break; };
                     if let InputEvent::Key(key) = input {

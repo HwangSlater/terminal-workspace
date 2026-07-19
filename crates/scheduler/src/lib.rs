@@ -141,6 +141,11 @@ pub struct PomodoroSnapshot {
     pub has_been_started: bool,
     /// Seconds left in the current phase.
     pub remaining_secs: u64,
+    /// The current phase's total length in seconds (`work_duration_secs`/
+    /// `break_duration_secs`) -- `step30.md`, for computing an elapsed
+    /// ratio (the header's progress bar). Not derivable from
+    /// `remaining_secs` alone once a session is underway.
+    pub total_secs: u64,
 }
 
 /// Dynamic Agenda scheduler managing Pomodoro work/break cycles.
@@ -216,6 +221,7 @@ impl AgendaScheduler {
             is_running: state.is_running,
             has_been_started: state.has_been_started,
             remaining_secs: state.remaining_secs(),
+            total_secs: state.current_duration_secs(),
         }
     }
 
@@ -362,6 +368,22 @@ mod tests {
         assert!(snapshot.is_running);
         assert_eq!(snapshot.mode, PomodoroMode::Work);
         assert_eq!(snapshot.remaining_secs, 25 * 60);
+        assert_eq!(snapshot.total_secs, 25 * 60);
+    }
+
+    #[tokio::test]
+    async fn total_secs_stays_the_phase_length_as_remaining_secs_counts_down() {
+        // `step30.md` -- `total_secs` is the header progress bar's
+        // denominator; it must not itself decrease as time passes, or
+        // every ratio computed from it would be wrong.
+        let event_bus = Arc::new(InProcessEventBus::new(16)) as Arc<dyn EventBus>;
+        let scheduler = AgendaScheduler::new(event_bus);
+        scheduler.start(25, 5).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let snapshot = scheduler.snapshot().await;
+        assert_eq!(snapshot.total_secs, 25 * 60);
+        assert!(snapshot.remaining_secs <= snapshot.total_secs);
     }
 
     #[tokio::test(start_paused = true)]

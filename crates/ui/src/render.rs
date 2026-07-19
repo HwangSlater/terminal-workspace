@@ -6,6 +6,7 @@ use crate::state::{
     GitHubPickerStatus, GitHubSetupStatus, OverlayKind, SlackPickerStatus, SlackSetupStatus,
     WorkspaceState,
 };
+use crate::theme;
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel};
 use events::IntegrationConnectionStatus;
@@ -256,7 +257,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         items.push(ListItem::new(Span::styled(
             *title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )));
         for entry in *entries {
@@ -277,7 +278,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title("도움말")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme::ACCENT));
     frame.render_widget(List::new(items).block(block), popup);
 }
 
@@ -292,7 +293,9 @@ fn render_slack_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceSt
     let masked: String = "*".repeat(state.slack_setup.token_input.chars().count());
     let status_line = match &state.slack_setup.status {
         SlackSetupStatus::Idle => "Bot Token을 입력하고 Enter를 누르세요.".to_string(),
-        SlackSetupStatus::Connecting => "연결 중...".to_string(),
+        SlackSetupStatus::Connecting => {
+            format!("{} 연결 중...", theme::spinner_frame(state.anim_tick))
+        }
         SlackSetupStatus::Connected => "연결됨.".to_string(),
         SlackSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
     };
@@ -301,7 +304,7 @@ fn render_slack_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceSt
     let block = Block::default()
         .title("Slack 연결 설정")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -319,11 +322,18 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     let block = Block::default()
         .title("Slack 채널/사용자 선택")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
 
     match &picker.status {
         SlackPickerStatus::Loading => {
-            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} 불러오는 중...",
+                    theme::spinner_frame(state.anim_tick)
+                ))
+                .block(block),
+                popup,
+            );
             return;
         }
         SlackPickerStatus::Failed(reason) => {
@@ -369,7 +379,7 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let style = if picker.cursor == i {
             selected_render_index = items.len();
-            Style::default().add_modifier(Modifier::REVERSED)
+            theme::selected_style()
         } else {
             Style::default()
         };
@@ -384,7 +394,7 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         let index = picker.channels.len() + i;
         let style = if picker.cursor == index {
             selected_render_index = items.len();
-            Style::default().add_modifier(Modifier::REVERSED)
+            theme::selected_style()
         } else {
             Style::default()
         };
@@ -399,7 +409,7 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
         _ => "↑/↓: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
-        Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(status_line).style(Style::default().fg(theme::MUTED)),
         layout[1],
     );
 }
@@ -413,7 +423,9 @@ fn render_github_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     let masked: String = "*".repeat(state.github_setup.token_input.chars().count());
     let status_line = match &state.github_setup.status {
         GitHubSetupStatus::Idle => "Personal Access Token을 입력하고 Enter를 누르세요.".to_string(),
-        GitHubSetupStatus::Connecting => "연결 중...".to_string(),
+        GitHubSetupStatus::Connecting => {
+            format!("{} 연결 중...", theme::spinner_frame(state.anim_tick))
+        }
         GitHubSetupStatus::Connected => "연결됨.".to_string(),
         GitHubSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
     };
@@ -422,7 +434,7 @@ fn render_github_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     let block = Block::default()
         .title("GitHub 연결 설정")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -457,7 +469,9 @@ fn render_calendar_setup_overlay(frame: &mut Frame, area: Rect, state: &Workspac
             }
             CalendarSetupField::Url => "비공개 iCal 주소를 입력하고 Enter를 누르세요.".to_string(),
         },
-        CalendarSetupStatus::Connecting => "연결 중...".to_string(),
+        CalendarSetupStatus::Connecting => {
+            format!("{} 연결 중...", theme::spinner_frame(state.anim_tick))
+        }
         CalendarSetupStatus::Connected => "연결됨.".to_string(),
         CalendarSetupStatus::Failed(reason) => format!("연결 실패: {reason}"),
     };
@@ -466,7 +480,7 @@ fn render_calendar_setup_overlay(frame: &mut Frame, area: Rect, state: &Workspac
     let block = Block::default()
         .title("캘린더 추가")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -487,11 +501,18 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     let block = Block::default()
         .title("캘린더 관리 (선택 해제 후 저장 시 제거)")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
 
     match &picker.status {
         CalendarPickerStatus::Loading => {
-            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} 불러오는 중...",
+                    theme::spinner_frame(state.anim_tick)
+                ))
+                .block(block),
+                popup,
+            );
             return;
         }
         CalendarPickerStatus::Failed(reason) => {
@@ -526,7 +547,7 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     for (i, row) in picker.calendars.iter().enumerate() {
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let style = if picker.cursor == i {
-            Style::default().add_modifier(Modifier::REVERSED)
+            theme::selected_style()
         } else {
             Style::default()
         };
@@ -542,7 +563,7 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
         _ => "↑/↓: 이동  Space: 선택/해제  e: 이름 변경  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
-        Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(status_line).style(Style::default().fg(theme::MUTED)),
         layout[1],
     );
 }
@@ -561,7 +582,7 @@ fn render_calendar_rename_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     let block = Block::default()
         .title("캘린더 이름 변경")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -606,11 +627,18 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         )
         .title(Title::from("Esc: 닫기").alignment(Alignment::Right))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
 
     match &grid.status {
         CalendarGridStatus::Loading => {
-            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} 불러오는 중...",
+                    theme::spinner_frame(state.anim_tick)
+                ))
+                .block(block),
+                popup,
+            );
             return;
         }
         CalendarGridStatus::Failed(reason) => {
@@ -678,8 +706,8 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         .enumerate()
         .map(|(i, wd)| {
             let style = match i {
-                0 => Style::default().fg(Color::Red),
-                6 => Style::default().fg(Color::Blue),
+                0 => Style::default().fg(theme::ERROR),
+                6 => Style::default().fg(theme::INFO),
                 _ => Style::default(),
             }
             .add_modifier(Modifier::BOLD);
@@ -720,19 +748,17 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
                 let is_today = is_current_month && d == today.day();
                 let marker = if has_event { "●" } else { " " };
                 let style = if d == grid.cursor_day {
-                    Style::default()
-                        .add_modifier(Modifier::REVERSED)
-                        .add_modifier(Modifier::BOLD)
+                    theme::selected_style()
                 } else if is_today {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::ACCENT_BRIGHT)
                         .add_modifier(Modifier::BOLD)
                 } else if has_event {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(theme::WARNING)
                 } else if weekday == 0 {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(theme::ERROR)
                 } else if weekday == 6 {
-                    Style::default().fg(Color::Blue)
+                    Style::default().fg(theme::INFO)
                 } else {
                     Style::default()
                 };
@@ -767,12 +793,12 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     if day_events.is_empty() {
         event_lines.push(Line::from(Span::styled(
             "  일정 없음",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )));
     } else {
         for item in &day_events {
             event_lines.push(Line::from(vec![
-                Span::styled("  ● ", Style::default().fg(Color::Yellow)),
+                Span::styled("  ● ", Style::default().fg(theme::WARNING)),
                 Span::raw(format!("{} ", format_occurrence_clock(item.timestamp_ms))),
                 Span::raw(item.title.clone()),
             ]));
@@ -785,7 +811,7 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
 
     frame.render_widget(
         Paragraph::new("←/→: 날짜 이동  [/]: 이전/다음 달  Esc: 닫기")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(theme::MUTED)),
         layout[4],
     );
 }
@@ -800,11 +826,18 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     let block = Block::default()
         .title("GitHub 저장소 선택")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
 
     match &picker.status {
         GitHubPickerStatus::Loading => {
-            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} 불러오는 중...",
+                    theme::spinner_frame(state.anim_tick)
+                ))
+                .block(block),
+                popup,
+            );
             return;
         }
         GitHubPickerStatus::Failed(reason) => {
@@ -837,7 +870,7 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     for (i, row) in picker.repositories.iter().enumerate() {
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
         let style = if picker.cursor == i {
-            Style::default().add_modifier(Modifier::REVERSED)
+            theme::selected_style()
         } else {
             Style::default()
         };
@@ -857,7 +890,7 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         _ => "↑/↓: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
-        Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(status_line).style(Style::default().fg(theme::MUTED)),
         layout[1],
     );
 }
@@ -932,7 +965,7 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
 
 fn render_too_small(frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new("터미널 크기가 너무 작습니다. 화면을 넓혀주세요.")
-        .style(Style::default().fg(Color::Red))
+        .style(Style::default().fg(theme::ERROR))
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
 }
@@ -955,9 +988,9 @@ fn presence_status_label(status: PresenceStatus) -> &'static str {
 /// gone") -- a fifth distinct color for that nuance wasn't worth it.
 fn presence_status_color(status: PresenceStatus) -> Color {
     match status {
-        PresenceStatus::Active => Color::Green,
-        PresenceStatus::Away | PresenceStatus::Meeting | PresenceStatus::Lunch => Color::Yellow,
-        PresenceStatus::Offline => Color::DarkGray,
+        PresenceStatus::Active => theme::SUCCESS,
+        PresenceStatus::Away | PresenceStatus::Meeting | PresenceStatus::Lunch => theme::WARNING,
+        PresenceStatus::Offline => theme::MUTED,
     }
 }
 
@@ -967,9 +1000,9 @@ fn presence_status_color(status: PresenceStatus) -> Color {
 /// extremes (`step19.md`) stand out.
 fn priority_color(priority: PriorityLevel) -> Color {
     match priority {
-        PriorityLevel::High => Color::Red,
+        PriorityLevel::High => theme::ERROR,
         PriorityLevel::Medium => Color::Reset,
-        PriorityLevel::Low => Color::DarkGray,
+        PriorityLevel::Low => theme::MUTED,
     }
 }
 
@@ -980,11 +1013,11 @@ fn priority_color(priority: PriorityLevel) -> Color {
 /// (`step17.md`), which always puts the level right after the timestamp.
 fn log_line_color(line: &str) -> Color {
     if line.contains("ERROR") {
-        Color::Red
+        theme::ERROR
     } else if line.contains("WARN") {
-        Color::Yellow
+        theme::WARNING
     } else if line.contains("DEBUG") || line.contains("TRACE") {
-        Color::DarkGray
+        theme::MUTED
     } else {
         Color::Reset
     }
@@ -1013,7 +1046,7 @@ fn dock_block(
     let focused = state.focused_dock == slot;
     let style = if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme::ACCENT)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -1067,11 +1100,14 @@ fn render_header(
     );
 
     let (slack_text, slack_color) =
-        connection_status_label("Slack", &state.slack_connection_status);
+        connection_status_label("Slack", &state.slack_connection_status, state.anim_tick);
     let (github_text, github_color) =
-        connection_status_label("GitHub", &state.github_connection_status);
-    let (calendar_text, calendar_color) =
-        connection_status_label("Calendar", &state.calendar_connection_status);
+        connection_status_label("GitHub", &state.github_connection_status, state.anim_tick);
+    let (calendar_text, calendar_color) = connection_status_label(
+        "Calendar",
+        &state.calendar_connection_status,
+        state.anim_tick,
+    );
 
     let status_line = Line::from(vec![
         Span::styled(slack_text, Style::default().fg(slack_color)),
@@ -1092,10 +1128,12 @@ fn render_header(
     }
 }
 
-/// `🍅 24:35 (Work)` while running, `⏸` swapped in and dimmed while paused
-/// (`step18.md` Decision 5) -- `None` (nothing shown) if no session has
-/// ever been started, keeping the header uncluttered until the feature is
-/// actually in use.
+/// `🍅 [████░░░░░░] 24:35 (Work)` while running, `⏸` swapped in and dimmed
+/// while paused (`step18.md` Decision 5) -- `None` (nothing shown) if no
+/// session has ever been started, keeping the header uncluttered until the
+/// feature is actually in use. The bracketed bar (`step30.md`) is new --
+/// `remaining_secs` alone told you how much is *left*, not how far into
+/// the phase the session already is.
 fn pomodoro_label(pomodoro: &PomodoroSnapshot) -> Option<(String, Color)> {
     if !pomodoro.has_been_started {
         return None;
@@ -1106,15 +1144,24 @@ fn pomodoro_label(pomodoro: &PomodoroSnapshot) -> Option<(String, Color)> {
         PomodoroMode::Work => "Work",
         PomodoroMode::Break => "Break",
     };
+    let elapsed_ratio = if pomodoro.total_secs == 0 {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        // session lengths are minutes, nowhere near f64's precision limit
+        let ratio = 1.0 - (pomodoro.remaining_secs as f64 / pomodoro.total_secs as f64);
+        ratio
+    };
+    let bar = theme::progress_bar(elapsed_ratio, 10);
     if pomodoro.is_running {
         Some((
-            format!("🍅 {minutes:02}:{seconds:02} ({mode_label})"),
-            Color::Green,
+            format!("🍅 [{bar}] {minutes:02}:{seconds:02} ({mode_label})"),
+            theme::SUCCESS,
         ))
     } else {
         Some((
-            format!("⏸ {minutes:02}:{seconds:02} ({mode_label}, 일시정지)"),
-            Color::Yellow,
+            format!("⏸ [{bar}] {minutes:02}:{seconds:02} ({mode_label}, 일시정지)"),
+            theme::WARNING,
         ))
     }
 }
@@ -1122,17 +1169,25 @@ fn pomodoro_label(pomodoro: &PomodoroSnapshot) -> Option<(String, Color)> {
 /// Kept current purely by the `EventBus` subscription in `crates/ui/src/lib.rs`'s
 /// event loop (`step9.md`, ADR-0016) — not polled, genuinely live. Generic
 /// across integrations since `step10.md` (was `slack_status_label`,
-/// Slack-only) — `label` is the integration's display name.
+/// Slack-only) — `label` is the integration's display name. `tick`
+/// (`step30.md`) animates the Connecting/Reconnecting spinner.
 fn connection_status_label(
     label: &'static str,
     status: &IntegrationConnectionStatus,
+    tick: u64,
 ) -> (String, Color) {
     let (suffix, color) = match status {
-        IntegrationConnectionStatus::Disconnected => ("연결 안 됨", Color::DarkGray),
-        IntegrationConnectionStatus::Connecting => ("연결 중...", Color::Yellow),
-        IntegrationConnectionStatus::Connected => ("연결됨", Color::Green),
-        IntegrationConnectionStatus::Reconnecting => ("재연결 중...", Color::Yellow),
-        IntegrationConnectionStatus::Failed(_) => ("연결 실패", Color::Red),
+        IntegrationConnectionStatus::Disconnected => ("연결 안 됨".to_string(), theme::MUTED),
+        IntegrationConnectionStatus::Connecting => (
+            format!("{} 연결 중...", theme::spinner_frame(tick)),
+            theme::WARNING,
+        ),
+        IntegrationConnectionStatus::Connected => ("연결됨".to_string(), theme::SUCCESS),
+        IntegrationConnectionStatus::Reconnecting => (
+            format!("{} 재연결 중...", theme::spinner_frame(tick)),
+            theme::WARNING,
+        ),
+        IntegrationConnectionStatus::Failed(_) => ("연결 실패".to_string(), theme::ERROR),
     };
     (format!("{label}: {suffix}"), color)
 }
@@ -1170,7 +1225,7 @@ fn render_team_panel(
                 Span::raw("]"),
             ]);
             let style = if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::selected_style()
             } else {
                 Style::default()
             };
@@ -1233,7 +1288,7 @@ fn render_notification_panel(
             let selected = state.focused_dock == UiDockSlot::Center && i == state.selected_index;
             let line = format!("[{}] {}", integration_source_label(item.source), item.title);
             let style = if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::selected_style()
             } else {
                 Style::default().fg(priority_color(item.priority))
             };
@@ -1305,7 +1360,7 @@ fn render_calendar_panel(
             let when = format_occurrence_time(item.timestamp_ms);
             let full_line = format!("{when}  {}", item.title);
             let style = if state.focused_dock == UiDockSlot::Right && i == state.selected_index {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::selected_style()
             } else {
                 Style::default()
             };
@@ -1317,7 +1372,7 @@ fn render_calendar_panel(
             // complexity for what's already a fallback path.
             let lines: Vec<Line> = if UnicodeWidthStr::width(full_line.as_str()) <= inner_width {
                 vec![Line::from(vec![
-                    Span::styled(when, Style::default().fg(Color::DarkGray)),
+                    Span::styled(when, Style::default().fg(theme::MUTED)),
                     Span::raw(format!("  {}", item.title)),
                 ])]
             } else {
@@ -1375,7 +1430,7 @@ fn render_log_viewer_overlay(frame: &mut Frame, area: Rect, log_lines: &[String]
     let block = Block::default()
         .title("로그 (Esc: 닫기)")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme::ACCENT));
 
     if log_lines.is_empty() {
         let placeholder = Paragraph::new("(아직 로그가 없습니다)")
@@ -1404,7 +1459,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
     if let Some(error) = &state.cmd_buffer.last_error {
         let text = format!(":{}  {error}", state.cmd_buffer.raw_text);
         frame.render_widget(
-            Paragraph::new(text).style(Style::default().fg(Color::Red)),
+            Paragraph::new(text).style(Style::default().fg(theme::ERROR)),
             area,
         );
         return;
@@ -1420,24 +1475,21 @@ fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
     // layout row or overlay (Decision 3: not enough candidates at once to
     // justify either).
     if !state.cmd_buffer.autocomplete_suggestions.is_empty() {
-        spans.push(Span::styled(
-            "  (Tab: ",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("  (Tab: ", Style::default().fg(theme::MUTED)));
         for (i, candidate) in state.cmd_buffer.autocomplete_suggestions.iter().enumerate() {
             if i > 0 {
-                spans.push(Span::styled(", ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(", ", Style::default().fg(theme::MUTED)));
             }
             let style = if state.cmd_buffer.selected_suggestion_index == Some(i) {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme::MUTED)
             };
             spans.push(Span::styled(candidate.clone(), style));
         }
-        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(")", Style::default().fg(theme::MUTED)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -1446,7 +1498,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
     let footer = Paragraph::new(
         "Tab:다음 패널  Ctrl+1~3:포커스 이동  Ctrl+4:로그 보기  ::명령줄  ?:도움말  Ctrl+Q:종료",
     )
-    .style(Style::default().fg(Color::DarkGray));
+    .style(Style::default().fg(theme::MUTED));
     frame.render_widget(footer, area);
 }
 
@@ -2040,7 +2092,7 @@ mod tests {
         );
         let info_color = fg_color_of(&terminal, "routine");
         let error_color = fg_color_of(&terminal, "something");
-        assert_eq!(error_color, Color::Red);
+        assert_eq!(error_color, theme::ERROR);
         assert_ne!(info_color, error_color);
     }
 
@@ -2236,8 +2288,8 @@ mod tests {
             DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
-        assert_eq!(fg_color_of(&terminal, "활동중"), Color::Green);
-        assert_eq!(fg_color_of(&terminal, "오프라인"), Color::DarkGray);
+        assert_eq!(fg_color_of(&terminal, "활동중"), theme::SUCCESS);
+        assert_eq!(fg_color_of(&terminal, "오프라인"), theme::MUTED);
     }
 
     #[test]
@@ -2267,7 +2319,7 @@ mod tests {
         );
         let high_color = fg_color_of(&terminal, "urgent");
         let low_color = fg_color_of(&terminal, "fyi");
-        assert_eq!(high_color, Color::Red);
+        assert_eq!(high_color, theme::ERROR);
         assert_ne!(high_color, low_color);
     }
 
@@ -2625,6 +2677,7 @@ mod tests {
             is_running: true,
             has_been_started: true,
             remaining_secs: 24 * 60 + 35,
+            total_secs: 25 * 60,
         };
         let text = draw_with_logs_and_pomodoro(
             140,
@@ -2646,6 +2699,7 @@ mod tests {
             is_running: false,
             has_been_started: true,
             remaining_secs: 90,
+            total_secs: 5 * 60,
         };
         let text = draw_with_logs_and_pomodoro(
             140,
@@ -2657,6 +2711,69 @@ mod tests {
         );
         assert!(contains_ignoring_whitespace(&text, "01:30"));
         assert!(contains_ignoring_whitespace(&text, "일시정지"));
+    }
+
+    /// Real regression guard for `step30.md`'s progress bar -- proves the
+    /// bracketed bar actually reflects `remaining_secs`/`total_secs`, not
+    /// just that some fixed-looking bar string is present.
+    #[test]
+    fn pomodoro_label_includes_a_progress_bar_reflecting_the_elapsed_ratio() {
+        let pomodoro = PomodoroSnapshot {
+            mode: PomodoroMode::Work,
+            session_count: 0,
+            is_running: true,
+            has_been_started: true,
+            remaining_secs: 5,
+            total_secs: 10,
+        };
+        let (text, _color) =
+            pomodoro_label(&pomodoro).expect("a started session must have a label");
+        // 50% elapsed at the bar's fixed width of 10 -> 5 filled, 5 empty.
+        assert!(
+            text.contains(&theme::progress_bar(0.5, 10)),
+            "expected a half-filled progress bar in {text:?}"
+        );
+    }
+
+    /// Real regression guard for `step30.md`'s loading spinner -- proves
+    /// the glyph actually advances with `anim_tick` through the full
+    /// render pipeline (not just `theme::spinner_frame` in isolation,
+    /// which `theme::tests` already covers), for a representative loading
+    /// overlay.
+    #[test]
+    fn github_picker_loading_spinner_frame_changes_with_anim_tick() {
+        let picker_loading = || crate::state::GitHubPickerState {
+            status: GitHubPickerStatus::Loading,
+            ..Default::default()
+        };
+        let state_tick0 = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: picker_loading(),
+            anim_tick: 0,
+            ..Default::default()
+        };
+        let state_tick1 = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::GitHubPicker,
+            github_picker: picker_loading(),
+            anim_tick: 1,
+            ..Default::default()
+        };
+        let text_tick0 = draw(140, 30, &state_tick0, &DashboardReadModel::default());
+        let text_tick1 = draw(140, 30, &state_tick1, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(
+            &text_tick0,
+            &format!("{} 불러오는 중", theme::spinner_frame(0))
+        ));
+        assert!(contains_ignoring_whitespace(
+            &text_tick1,
+            &format!("{} 불러오는 중", theme::spinner_frame(1))
+        ));
+        assert_ne!(
+            text_tick0, text_tick1,
+            "expected the spinner glyph to differ between ticks 0 and 1"
+        );
     }
 
     #[test]
@@ -2800,7 +2917,7 @@ mod tests {
         // (no events, so the day-events list below doesn't repeat it) --
         // and it's the first such glyph scanning top-to-bottom, since the
         // weekday header row sits above everything else in the popup.
-        assert_eq!(fg_color_of(&terminal, "일"), Color::Red);
+        assert_eq!(fg_color_of(&terminal, "일"), theme::ERROR);
     }
 
     /// Real regression guard for `step28.md` -- the cursor day's heading
