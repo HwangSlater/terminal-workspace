@@ -330,7 +330,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let shortcuts_block = Block::default()
         .title(HelpSection::Shortcuts.title())
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::HELP));
     frame.render_widget(
         List::new(shortcuts_items).block(shortcuts_block),
         columns[0],
@@ -339,7 +339,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let commands_block = Block::default()
         .title(HelpSection::Commands.title())
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::HELP));
     frame.render_widget(List::new(commands_items).block(commands_block), columns[2]);
 }
 
@@ -365,7 +365,7 @@ fn render_slack_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceSt
     let block = Block::default()
         .title("Slack 연결 설정")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::SLACK));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -383,7 +383,7 @@ fn render_slack_picker_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     let block = Block::default()
         .title("Slack 채널/사용자 선택")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::SLACK));
 
     match &picker.status {
         SlackPickerStatus::Loading => {
@@ -538,7 +538,7 @@ fn render_github_setup_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceS
     let block = Block::default()
         .title("GitHub 연결 설정")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::TEXT_BRIGHT));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -584,7 +584,7 @@ fn render_calendar_setup_overlay(frame: &mut Frame, area: Rect, state: &Workspac
     let block = Block::default()
         .title("캘린더 추가")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::SUCCESS));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -605,7 +605,7 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     let block = Block::default()
         .title("캘린더 관리 (선택 해제 후 저장 시 제거)")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::SUCCESS));
 
     match &picker.status {
         CalendarPickerStatus::Loading => {
@@ -686,7 +686,7 @@ fn render_calendar_rename_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     let block = Block::default()
         .title("캘린더 이름 변경")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::SUCCESS));
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
         popup,
@@ -731,7 +731,7 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         )
         .title(Title::from("Esc: 닫기").alignment(Alignment::Right))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::SUCCESS));
 
     match &grid.status {
         CalendarGridStatus::Loading => {
@@ -930,7 +930,7 @@ fn render_github_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     let block = Block::default()
         .title("GitHub 저장소 선택")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::TEXT_BRIGHT));
 
     match &picker.status {
         GitHubPickerStatus::Loading => {
@@ -1539,7 +1539,7 @@ fn render_log_viewer_overlay(frame: &mut Frame, area: Rect, log_lines: &[String]
     let block = Block::default()
         .title("로그 (Esc: 닫기)")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ACCENT));
+        .border_style(Style::default().fg(theme::LOG));
 
     if log_lines.is_empty() {
         let placeholder = Paragraph::new("(아직 로그가 없습니다)")
@@ -2553,6 +2553,53 @@ mod tests {
             shortcuts_pos < commands_pos,
             "단축키 section should render before 커맨드"
         );
+    }
+
+    /// `step39.md`, requested directly: every overlay used to share the
+    /// same `ACCENT` border, making them hard to tell apart at a glance.
+    /// Calls each `render_*_overlay` function directly on its own small
+    /// buffer (bypassing the full `render()` dispatch entirely) so the
+    /// popup's border is the *only* border in the buffer -- going through
+    /// the full dashboard instead would risk a body panel's own
+    /// `ACCENT`-colored border sharing a row with the popup and being
+    /// picked up by mistake. Checks the border-line character itself, not
+    /// the title text (`Block` renders titles in their own unstyled
+    /// default regardless of `border_style`).
+    #[test]
+    fn overlay_border_colors_differ_by_overlay_family() {
+        // The popup is centered within its area, not flush at (0, 0) --
+        // but since the render function is called in isolation (nothing
+        // else drawn on this buffer), its border is the *only* non-blank
+        // content, so the first non-blank cell found while scanning is
+        // unambiguously the popup's own top-left corner.
+        fn border_color(render_fn: impl FnOnce(&mut Frame, Rect)) -> Color {
+            let backend = TestBackend::new(60, 20);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render_fn(frame, frame.size()))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .find(|cell| !cell.symbol().trim().is_empty())
+                .map(|cell| cell.fg)
+                .expect("overlay should have rendered a visible border")
+        }
+
+        let help_color = border_color(render_help_overlay);
+        let slack_color = border_color(|frame, area| {
+            render_slack_setup_overlay(frame, area, &WorkspaceState::default());
+        });
+        let log_color = border_color(|frame, area| render_log_viewer_overlay(frame, area, &[]));
+
+        assert_eq!(help_color, theme::HELP);
+        assert_eq!(slack_color, theme::SLACK);
+        assert_eq!(log_color, theme::LOG);
+        assert_ne!(help_color, slack_color);
+        assert_ne!(slack_color, log_color);
+        assert_ne!(help_color, log_color);
     }
 
     /// Real regression test, reported via live use: the overlay used to be

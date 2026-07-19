@@ -35,14 +35,11 @@ pub const NORD6: Color = Color::Rgb(236, 239, 244);
 pub const NORD7: Color = Color::Rgb(143, 188, 187);
 pub const NORD8: Color = Color::Rgb(136, 192, 208);
 pub const NORD9: Color = Color::Rgb(129, 161, 193);
-#[allow(dead_code)] // part of the named palette; no call site needs nord10 specifically yet
 pub const NORD10: Color = Color::Rgb(94, 129, 172);
 pub const NORD11: Color = Color::Rgb(191, 97, 106);
-#[allow(dead_code)] // part of the named palette; no call site needs nord12 specifically yet
 pub const NORD12: Color = Color::Rgb(208, 135, 112);
 pub const NORD13: Color = Color::Rgb(235, 203, 139);
 pub const NORD14: Color = Color::Rgb(163, 190, 140);
-#[allow(dead_code)] // part of the named palette; no call site needs nord15 specifically yet
 pub const NORD15: Color = Color::Rgb(180, 142, 173);
 
 /// Focused borders, primary interactive accents (block titles, help
@@ -64,6 +61,17 @@ pub const WARNING: Color = NORD13;
 pub const ERROR: Color = NORD11;
 /// A secondary accent distinct from `ACCENT` — Saturday's weekend color.
 pub const INFO: Color = NORD9;
+/// `?` help overlay's border/section-header color (`step39.md`, requested
+/// directly — every popup used the same `ACCENT` border, making them hard
+/// to tell apart from a glance; each overlay family gets its own color
+/// now). Also reused, alongside `SLACK`/`LOG` below, `SUCCESS` (Calendar
+/// overlays) and `TEXT_BRIGHT` (GitHub overlays) rather than inventing a
+/// fifth and sixth constant for the same hues.
+pub const HELP: Color = NORD15;
+/// Slack setup/picker overlay border (`step39.md`).
+pub const SLACK: Color = NORD10;
+/// Log Viewer overlay border (`step39.md`).
+pub const LOG: Color = NORD12;
 /// Selected-row background (`step30.md` Decision 2 — replaces bare
 /// `Modifier::REVERSED`, which just swaps whatever fg/bg a cell already
 /// has rather than using this palette).
