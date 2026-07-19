@@ -78,10 +78,16 @@ pub fn render(
             }
         }
     } else {
+        // `left_dock_width` (`config.toml`, step26.md) is a ceiling, not a
+        // fixed value (step27.md): a short roster shouldn't force a wide
+        // empty-looking box, and the Notification panel is already fluid
+        // (`Constraint::Min(0)`), so it automatically reclaims whatever
+        // width Team doesn't need.
+        let team_width = team_panel_natural_width(model).min(left_dock_width).max(10);
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(left_dock_width),
+                Constraint::Length(team_width),
                 Constraint::Min(0),
                 Constraint::Length(right_dock_width),
             ])
@@ -601,18 +607,52 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    // Widened from the original 4-column day cell (`step25.md`) and given
+    // a blank spacer row between weeks (`step27.md`) -- the grid itself
+    // used to stay a small, left-aligned block even after the popup grew
+    // (`step26.md`); this is what actually makes it read as bigger, not
+    // just the popup around it.
+    const CELL_WIDTH: u16 = 6;
+    const GRID_WIDTH: u16 = CELL_WIDTH * 7;
+    // 6 week rows, each followed by a blank spacer row (the last one just
+    // borders the event list below, harmless).
+    const GRID_HEIGHT: u16 = 12;
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // weekday header
-            Constraint::Length(6), // up to 6 week rows
-            Constraint::Length(1), // spacer
-            Constraint::Min(1),    // highlighted day's events
-            Constraint::Length(1), // status line
+            Constraint::Length(1),           // weekday header
+            Constraint::Length(GRID_HEIGHT), // week rows + spacers
+            Constraint::Length(1),           // spacer
+            Constraint::Min(1),              // highlighted day's events
+            Constraint::Length(1),           // status line
         ])
         .split(inner);
 
-    frame.render_widget(Paragraph::new("일  월  화  수  목  금  토"), layout[0]);
+    // Centers the fixed-width grid within the popup's (much wider) inner
+    // area instead of leaving it flush against the left edge.
+    let centered_header = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(GRID_WIDTH),
+            Constraint::Min(0),
+        ])
+        .split(layout[0])[1];
+    let centered_grid = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(GRID_WIDTH),
+            Constraint::Min(0),
+        ])
+        .split(layout[1])[1];
+
+    let header_spans: Vec<Span> = ["일", "월", "화", "수", "목", "금", "토"]
+        .into_iter()
+        .map(|wd| Span::raw(format!(" {wd}   ")))
+        .collect();
+    frame.render_widget(Paragraph::new(Line::from(header_spans)), centered_header);
 
     let days_with_events: std::collections::HashSet<u32> = grid
         .events
@@ -630,7 +670,7 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         let mut spans = Vec::new();
         for _weekday in 0..7 {
             if day < 1 || day > i64::from(last_day) {
-                spans.push(Span::raw("    "));
+                spans.push(Span::raw(" ".repeat(CELL_WIDTH as usize)));
             } else {
                 // Safe: bounded by `1..=last_day` (a real month never
                 // exceeds 31), well within u32 range.
@@ -644,13 +684,14 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
                 } else {
                     Style::default()
                 };
-                spans.push(Span::styled(format!("{d:>2}{marker} "), style));
+                spans.push(Span::styled(format!(" {d:>2}{marker}  "), style));
             }
             day += 1;
         }
         week_lines.push(Line::from(spans));
+        week_lines.push(Line::from(""));
     }
-    frame.render_widget(Paragraph::new(week_lines), layout[1]);
+    frame.render_widget(Paragraph::new(week_lines), centered_grid);
 
     let day_events: Vec<&NotificationItem> = grid
         .events
@@ -672,7 +713,7 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     );
 
     frame.render_widget(
-        Paragraph::new("방향키: 날짜 이동  [/]: 이전/다음 달  Esc: 닫기")
+        Paragraph::new("←/→: 날짜 이동  [/]: 이전/다음 달  Esc: 닫기")
             .style(Style::default().fg(Color::DarkGray)),
         layout[4],
     );
@@ -1060,6 +1101,31 @@ fn render_team_panel(
         })
         .collect();
     frame.render_widget(List::new(items).block(block), area);
+}
+
+/// How wide the Team dock actually needs to be for its real content
+/// (`step27.md`) -- the longest `"{display_name} [{status_label}]"` line
+/// (or the empty-state text), plus 2 for the block's borders. The caller
+/// still clamps this against the configured `left_dock_width` (a ceiling,
+/// not a target) and a floor, so this function itself doesn't need to
+/// know either bound.
+fn team_panel_natural_width(model: &DashboardReadModel) -> u16 {
+    let content_width = if model.team_presence.is_empty() {
+        UnicodeWidthStr::width("(아직 팀원이 없습니다)")
+    } else {
+        model
+            .team_presence
+            .iter()
+            .map(|member| {
+                UnicodeWidthStr::width(member.display_name.as_str())
+                    + UnicodeWidthStr::width(presence_status_label(member.status))
+                    + " [".len()
+                    + "]".len()
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    u16::try_from(content_width + 2).unwrap_or(u16::MAX)
 }
 
 fn render_notification_panel(
@@ -1944,6 +2010,60 @@ mod tests {
         );
     }
 
+    /// Real regression guard for `step27.md`'s content-sized Team dock --
+    /// a short roster should render narrower than the *configured*
+    /// `left_dock_width`, with the Notification panel's border shifting
+    /// left to reclaim the difference (same cell-position technique as
+    /// `configured_dock_widths_change_where_the_body_panels_split`, since
+    /// `left_dock_width` is now a ceiling, not the exact width used).
+    #[test]
+    fn a_short_roster_shrinks_the_team_dock_below_the_configured_ceiling() {
+        let model = DashboardReadModel {
+            team_presence: vec![MemberPresence {
+                user_id: UserId("u1".into()),
+                display_name: "ab".into(),
+                status: PresenceStatus::Active,
+                custom_status_text: None,
+                last_updated_ms: 0,
+            }],
+            unread_notifications: Vec::new(),
+        };
+        // "ab [활동중]" is far narrower than this configured ceiling.
+        let configured_left_dock_width = 40u16;
+        let total_width = 140;
+        let terminal = draw_terminal(
+            total_width,
+            30,
+            &WorkspaceState::default(),
+            &model,
+            &[],
+            &PomodoroSnapshot::default(),
+            configured_left_dock_width,
+            DEFAULT_RIGHT_DOCK_WIDTH,
+        );
+        let buffer = terminal.backend().buffer();
+        let body_top_row = 3;
+        // "ab" (width 2) + " [" (2) + "활동중" (width 6) + "]" (1) + 2
+        // border columns = 13 -- well short of the 40-column ceiling.
+        let expected_team_width = 13;
+        let notification_corner = buffer.get(expected_team_width, body_top_row).symbol();
+        assert_eq!(
+            notification_corner, "┌",
+            "expected the Team dock to shrink to its content width ({expected_team_width}), \
+             not stay at the configured ceiling ({configured_left_dock_width}); \
+             found {notification_corner:?} at x={expected_team_width}"
+        );
+        // And *not* still sitting at the old, unshrunk ceiling.
+        let stale_corner = buffer
+            .get(configured_left_dock_width, body_top_row)
+            .symbol();
+        assert_ne!(
+            stale_corner, "┌",
+            "the Notification panel should have already started before \
+             the configured ceiling ({configured_left_dock_width})"
+        );
+    }
+
     /// A wider configured Calendar dock should mean less wrapping
     /// (`wrap_to_width`'s regression fix from earlier this phase) -- ties
     /// the two `step26.md`-adjacent fixes together: a title that needs two
@@ -2513,6 +2633,57 @@ mod tests {
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "Design Review"));
+    }
+
+    /// Real regression guard for `step27.md`'s grid centering -- the
+    /// weekday header (and the day-number grid beneath it) used to render
+    /// flush against the popup's left edge even after the popup itself
+    /// grew (`step26.md`), leaving a small block surrounded by empty
+    /// space. Scans the actual buffer cells for the "일" (Sunday) label's
+    /// column, rather than a byte-offset text search, since the popup's
+    /// margins can show dashboard content with its own multi-byte glyphs
+    /// that would throw off a naive string search.
+    #[test]
+    fn calendar_grid_overlay_centers_the_day_grid_instead_of_flush_left() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                year: 2026,
+                month: 6,
+                cursor_day: 15,
+                events: Vec::new(),
+                status: CalendarGridStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let total_width = 200;
+        let terminal = draw_terminal(
+            total_width,
+            40,
+            &state,
+            &DashboardReadModel::default(),
+            &[],
+            &PomodoroSnapshot::default(),
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
+        );
+        let buffer = terminal.backend().buffer();
+        let mut header_x = None;
+        'outer: for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer.get(x, y).symbol() == "일" {
+                    header_x = Some(x);
+                    break 'outer;
+                }
+            }
+        }
+        let header_x = header_x.expect("weekday header '일' not found in the rendered buffer");
+        assert!(
+            header_x > total_width / 4,
+            "expected the weekday header to be horizontally centered, not flush against \
+             the popup's left edge; found '일' at column {header_x}"
+        );
     }
 
     #[test]

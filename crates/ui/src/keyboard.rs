@@ -514,10 +514,9 @@ fn capture_calendar_rename_input(state: &mut WorkspaceState, key: KeyEvent) -> K
 /// `OpenCalendarGrid` for the caller to re-fetch -- the exact same outcome
 /// `Ctrl+M` itself produces, since both need the identical
 /// fetch-and-populate sequence.
-// Arrow keys only, not the usual `h`/`j`/`k`/`l` vim-style alternative
-// every other overlay in this app accepts -- explicitly requested for the
-// grid specifically, since `h`/`j`/`k`/`l` read as ordinary date-adjacent
-// text here in a way they don't in a plain list picker.
+// Left/Right (day-by-day) only -- no `h`/`j`/`k`/`l` (`step26.md`) and, as
+// of `step27.md`, no Up/Down week-jump either, dropped rather than kept as
+// an arrow-key equivalent. `[`/`]` (month switching) are unaffected.
 fn capture_calendar_grid_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
     let grid = &mut state.calendar_grid;
     let last_day = crate::state::days_in_month(grid.year, grid.month);
@@ -528,14 +527,6 @@ fn capture_calendar_grid_input(state: &mut WorkspaceState, key: KeyEvent) -> Key
         }
         KeyCode::Right => {
             grid.cursor_day = (grid.cursor_day + 1).min(last_day);
-            KeyOutcome::Handled
-        }
-        KeyCode::Up => {
-            grid.cursor_day = grid.cursor_day.saturating_sub(7).max(1);
-            KeyOutcome::Handled
-        }
-        KeyCode::Down => {
-            grid.cursor_day = (grid.cursor_day + 7).min(last_day);
             KeyOutcome::Handled
         }
         KeyCode::Char('[') => {
@@ -1762,24 +1753,27 @@ mod tests {
     }
 
     #[test]
-    fn calendar_grid_down_and_up_arrows_move_by_a_week_clamped_to_the_month() {
+    fn calendar_grid_up_and_down_arrows_no_longer_move_the_cursor() {
+        // step27.md: the week-jump behavior was dropped entirely, not just
+        // its `j`/`k` letter alternative (step26.md) -- Up/Down are now a
+        // no-op here, unlike every other overlay's list navigation.
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarGrid,
-            calendar_grid: grid_state_for(2026, 6, 28),
+            calendar_grid: grid_state_for(2026, 6, 15),
             ..Default::default()
         };
         handle_key(&mut state, key(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(state.calendar_grid.cursor_day, 30); // clamped, June has 30
+        assert_eq!(state.calendar_grid.cursor_day, 15);
         handle_key(&mut state, key(KeyCode::Up, KeyModifiers::NONE));
-        assert_eq!(state.calendar_grid.cursor_day, 23);
+        assert_eq!(state.calendar_grid.cursor_day, 15);
     }
 
     #[test]
     fn calendar_grid_h_j_k_l_letters_do_not_move_the_cursor() {
         // Explicitly requested: unlike every other overlay in this app,
-        // the grid accepts arrow keys only -- `h`/`j`/`k`/`l` fall through
-        // as a no-op rather than moving the day cursor.
+        // the grid accepts Left/Right arrow keys only -- `h`/`j`/`k`/`l`
+        // fall through as a no-op rather than moving the day cursor.
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
             active_overlay: OverlayKind::CalendarGrid,
