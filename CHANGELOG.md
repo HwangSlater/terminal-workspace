@@ -2,13 +2,13 @@
 
 All notable changes to Terminal Workspace are documented here. Full development history — what was built when and why — lives in [`docs/07-implementation-log/`](docs/07-implementation-log/).
 
-## [1.0.0] - 2026-07-19
+## [1.0.0] - 2026-07-20
 
 First public release.
 
 ### Added
 
-- **Interactive TUI shell** — Vim-inspired modal keyboard control, responsive layout down to an 80×24 terminal, an always-visible Team roster in the header plus Notification/Calendar body panels.
+- **Interactive TUI shell** — Vim-inspired modal keyboard control, responsive layout down to an 80×24 terminal, an always-visible Team roster in the header plus Notification/Calendar body panels, color-coded popup borders so Help/Slack/GitHub/Calendar/Log overlays are distinguishable at a glance.
 - **Slack integration** — Bot Token setup in-app, channel/user picker, `/send`/presence commands with autocomplete, live connection status.
 - **GitHub integration** — Personal Access Token setup, repository picker, open PR notifications.
 - **Calendar integration** — private iCal feed URL (no OAuth), upcoming/recurring event reminders.
