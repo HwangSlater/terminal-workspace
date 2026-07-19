@@ -177,7 +177,10 @@ impl CalendarPoller {
     ) -> (PollResult, Option<u64>) {
         let response = match self.http.get(url).send().await {
             Ok(r) => r,
-            Err(_) => return (PollResult::Failure, None),
+            Err(e) => {
+                tracing::warn!("Calendar poll failed: request error: {e}");
+                return (PollResult::Failure, None);
+            }
         };
 
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -187,16 +190,32 @@ impl CalendarPoller {
             );
         }
         if !response.status().is_success() {
+            // The single most common real-world cause: the secret iCal URL
+            // is wrong (a stale/revoked link, or the "public" calendar HTML
+            // page URL pasted in by mistake instead of Settings -> "Secret
+            // address in iCal format") -- surfacing the actual status code
+            // is the difference between a user staring at a silently-stuck
+            // "연결 중..." header and being able to self-diagnose via Ctrl+4.
+            tracing::warn!(
+                "Calendar poll failed: HTTP {} from the configured iCal URL",
+                response.status()
+            );
             return (PollResult::Failure, None);
         }
         let body = match response.text().await {
             Ok(b) => b,
-            Err(_) => return (PollResult::Failure, None),
+            Err(e) => {
+                tracing::warn!("Calendar poll failed: reading response body: {e}");
+                return (PollResult::Failure, None);
+            }
         };
 
         let calendar = match parse_first_calendar(&body) {
             Ok(cal) => cal,
-            Err(_) => return (PollResult::Failure, None),
+            Err(e) => {
+                tracing::warn!("Calendar poll failed: could not parse iCal feed: {e}");
+                return (PollResult::Failure, None);
+            }
         };
 
         let now = Utc::now();
