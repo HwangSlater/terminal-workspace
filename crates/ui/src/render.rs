@@ -9,9 +9,10 @@ use crate::state::{
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel};
 use events::IntegrationConnectionStatus;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::block::Title;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use registry::UiDockSlot;
@@ -569,8 +570,10 @@ fn local_day_of(timestamp_ms: u64) -> Option<u32> {
 
 /// Month grid view (`Ctrl+M`, `step25.md`) — a real calendar grid, not the
 /// right dock's flat "upcoming reminders" list. Read-only: shows which
-/// days in the displayed month have at least one event (a `•` marker,
-/// colored) and the highlighted day's events by title, underneath.
+/// days in the displayed month have at least one event (a yellow `●`
+/// marker), today's real date (bold cyan, independent of the cursor), and
+/// weekends in the usual red-Sunday/blue-Saturday convention (`step28.md`)
+/// — and the highlighted day's events by time and title, underneath.
 fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
     use chrono::Datelike;
 
@@ -583,7 +586,14 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
 
     let grid = &state.calendar_grid;
     let block = Block::default()
-        .title(format!("{}년 {}월 (Esc: 닫기)", grid.year, grid.month))
+        .title(
+            Title::from(Span::styled(
+                format!("{}년 {}월", grid.year, grid.month),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+        )
+        .title(Title::from("Esc: 닫기").alignment(Alignment::Right))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -648,9 +658,22 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         ])
         .split(layout[1])[1];
 
+    // Sunday/Saturday get the same red/blue convention most calendar apps
+    // use, on both the header and the day cells beneath it -- a plain
+    // grid of same-colored numbers didn't read as a *calendar* so much as
+    // a generic number grid.
     let header_spans: Vec<Span> = ["일", "월", "화", "수", "목", "금", "토"]
         .into_iter()
-        .map(|wd| Span::raw(format!(" {wd}   ")))
+        .enumerate()
+        .map(|(i, wd)| {
+            let style = match i {
+                0 => Style::default().fg(Color::Red),
+                6 => Style::default().fg(Color::Blue),
+                _ => Style::default(),
+            }
+            .add_modifier(Modifier::BOLD);
+            Span::styled(format!(" {wd}   "), style)
+        })
         .collect();
     frame.render_widget(Paragraph::new(Line::from(header_spans)), centered_header);
 
@@ -664,11 +687,18 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         .map_or(0, |d| d.weekday().num_days_from_sunday());
     let last_day = crate::state::days_in_month(grid.year, grid.month);
 
+    // Real "today," not just the cursor -- distinct from the cursor day so
+    // navigating away from today doesn't lose track of it, the same way a
+    // real calendar app keeps today visually marked regardless of what's
+    // currently selected.
+    let today = chrono::Local::now().date_naive();
+    let is_current_month = grid.year == today.year() && grid.month == today.month();
+
     let mut week_lines: Vec<Line> = Vec::new();
     let mut day = 1_i64 - i64::from(first_weekday);
     for _week in 0..6 {
         let mut spans = Vec::new();
-        for _weekday in 0..7 {
+        for weekday in 0..7u32 {
             if day < 1 || day > i64::from(last_day) {
                 spans.push(Span::raw(" ".repeat(CELL_WIDTH as usize)));
             } else {
@@ -676,11 +706,22 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
                 // exceeds 31), well within u32 range.
                 let d = u32::try_from(day).unwrap_or(0);
                 let has_event = days_with_events.contains(&d);
-                let marker = if has_event { "•" } else { " " };
+                let is_today = is_current_month && d == today.day();
+                let marker = if has_event { "●" } else { " " };
                 let style = if d == grid.cursor_day {
-                    Style::default().add_modifier(Modifier::REVERSED)
+                    Style::default()
+                        .add_modifier(Modifier::REVERSED)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_today {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else if has_event {
                     Style::default().fg(Color::Yellow)
+                } else if weekday == 0 {
+                    Style::default().fg(Color::Red)
+                } else if weekday == 6 {
+                    Style::default().fg(Color::Blue)
                 } else {
                     Style::default()
                 };
@@ -698,17 +739,36 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
         .iter()
         .filter(|item| local_day_of(item.timestamp_ms) == Some(grid.cursor_day))
         .collect();
-    let event_text = if day_events.is_empty() {
-        format!("{}일: (일정 없음)", grid.cursor_day)
+    // Weekday name alongside the day number, so this heading reads the
+    // same way a real date would ("7월 15일 (월)") instead of a bare
+    // number -- and a styled bullet per event instead of a plain "-".
+    let cursor_weekday_label =
+        chrono::NaiveDate::from_ymd_opt(grid.year, grid.month, grid.cursor_day)
+            .map(|d| {
+                ["일", "월", "화", "수", "목", "금", "토"]
+                    [d.weekday().num_days_from_sunday() as usize]
+            })
+            .unwrap_or("");
+    let mut event_lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!("{}일 ({cursor_weekday_label}) 일정", grid.cursor_day),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    if day_events.is_empty() {
+        event_lines.push(Line::from(Span::styled(
+            "  일정 없음",
+            Style::default().fg(Color::DarkGray),
+        )));
     } else {
-        let lines: Vec<String> = day_events
-            .iter()
-            .map(|i| format!("- {} {}", format_occurrence_clock(i.timestamp_ms), i.title))
-            .collect();
-        format!("{}일:\n{}", grid.cursor_day, lines.join("\n"))
-    };
+        for item in &day_events {
+            event_lines.push(Line::from(vec![
+                Span::styled("  ● ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{} ", format_occurrence_clock(item.timestamp_ms))),
+                Span::raw(item.title.clone()),
+            ]));
+        }
+    }
     frame.render_widget(
-        Paragraph::new(event_text).wrap(Wrap { trim: true }),
+        Paragraph::new(event_lines).wrap(Wrap { trim: true }),
         layout[3],
     );
 
@@ -1226,17 +1286,30 @@ fn render_calendar_panel(
         .enumerate()
         .map(|(i, item)| {
             let when = format_occurrence_time(item.timestamp_ms);
-            let line = format!("{when}  {}", item.title);
+            let full_line = format!("{when}  {}", item.title);
             let style = if state.focused_dock == UiDockSlot::Right && i == state.selected_index {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
-            let wrapped: Vec<Line> = wrap_to_width(&line, inner_width)
-                .into_iter()
-                .map(Line::from)
-                .collect();
-            ListItem::new(Text::from(wrapped)).style(style)
+            // Dims the timestamp so the title (the part actually worth
+            // scanning) stands out more -- only when the line fits on one
+            // row; the wrapped case falls back to plain text, since
+            // `wrap_to_width` operates on a flat string and re-deriving
+            // span boundaries across wrapped rows isn't worth the
+            // complexity for what's already a fallback path.
+            let lines: Vec<Line> = if UnicodeWidthStr::width(full_line.as_str()) <= inner_width {
+                vec![Line::from(vec![
+                    Span::styled(when, Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("  {}", item.title)),
+                ])]
+            } else {
+                wrap_to_width(&full_line, inner_width)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect()
+            };
+            ListItem::new(Text::from(lines)).style(style)
         })
         .collect();
     frame.render_widget(List::new(list_items).block(block), area);
@@ -2633,6 +2706,74 @@ mod tests {
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "Design Review"));
+    }
+
+    /// Real regression guard for `step28.md`'s calendar-app color
+    /// convention -- Sunday's weekday-header label should read distinctly
+    /// from the rest, not the same default color as every other day.
+    #[test]
+    fn calendar_grid_overlay_colors_sunday_in_the_weekday_header() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                year: 2026,
+                month: 6,
+                cursor_day: 15,
+                events: Vec::new(),
+                status: CalendarGridStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let terminal = draw_terminal(
+            200,
+            40,
+            &state,
+            &DashboardReadModel::default(),
+            &[],
+            &PomodoroSnapshot::default(),
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
+        );
+        // "일" only appears as the Sunday header label in this scenario
+        // (no events, so the day-events list below doesn't repeat it) --
+        // and it's the first such glyph scanning top-to-bottom, since the
+        // weekday header row sits above everything else in the popup.
+        assert_eq!(fg_color_of(&terminal, "일"), Color::Red);
+    }
+
+    /// Real regression guard for `step28.md` -- the cursor day's heading
+    /// now includes its weekday name, not just the bare day number, so it
+    /// reads like an actual date. Computes the expected weekday the same
+    /// way the production code does rather than hardcoding one, so this
+    /// doesn't silently start asserting the wrong day if the fixture date
+    /// ever changes.
+    #[test]
+    fn calendar_grid_overlay_shows_the_weekday_name_next_to_the_cursor_day() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                year: 2026,
+                month: 6,
+                cursor_day: 15,
+                events: Vec::new(),
+                status: CalendarGridStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        use chrono::Datelike;
+        let expected_weekday = ["일", "월", "화", "수", "목", "금", "토"]
+            [chrono::NaiveDate::from_ymd_opt(2026, 6, 15)
+                .unwrap()
+                .weekday()
+                .num_days_from_sunday() as usize];
+        let needle = format!("15일 ({expected_weekday})");
+        assert!(
+            contains_ignoring_whitespace(&text, &needle),
+            "expected {needle:?} in:\n{text}"
+        );
     }
 
     /// Real regression guard for `step27.md`'s grid centering -- the
