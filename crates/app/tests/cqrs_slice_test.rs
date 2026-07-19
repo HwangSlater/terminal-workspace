@@ -54,6 +54,7 @@ async fn cqrs_write_path_flows_through_storage_and_events() -> Result<()> {
         HashMap::new(),
         HashMap::new(),
         AgendaScheduler::new(Arc::clone(&event_bus) as Arc<dyn EventBus>),
+        None,
     ));
     let command_dispatcher = InMemoryCommandDispatcher::new(handler);
 

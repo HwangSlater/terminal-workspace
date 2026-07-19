@@ -1,6 +1,6 @@
 # Calendar Integration
 
-Implements `IntegrationAdapter` (`docs/04-extensions/integration-contract.md`) via one or more Google Calendars' **secret iCal feed URLs**, not OAuth. See `step12.md` for the original single-calendar design decisions (secret URL over OAuth device flow, a real `RRULE`-expansion dependency over hand-rolled parsing) and `step24.md` for multi-calendar support.
+Implements `IntegrationAdapter` (`docs/04-extensions/integration-contract.md`) via one or more Google Calendars' **secret iCal feed URLs**, not OAuth. See `step12.md` for the original single-calendar design decisions (secret URL over OAuth device flow, a real `RRULE`-expansion dependency over hand-rolled parsing), `step24.md` for multi-calendar support, and `step25.md` for the lookahead command, rename, and month grid view.
 
 ## Authentication
 
@@ -10,6 +10,7 @@ Implements `IntegrationAdapter` (`docs/04-extensions/integration-contract.md`) v
 - No connections saved → `initialize()` returns `Ok(())` with the adapter reporting `ConnectionStatus::Disconnected`; see `integration-contract.md` §2.3.
 - **Multiple calendars per connection (`step24.md`)**, up from the original one. There is still no "list my calendars" discovery API under this auth model, so `Ctrl+K`'s picker overlay (`Picker`/`SelectionApplier`) is a *local* read of already-connected calendars for removal — check which to keep, `Enter` removes the rest — not a remote discovery list the way Slack's/GitHub's pickers are.
 - **Upgrade compatibility**: an install from before `step24.md` has a secret saved under the old singular key, `CALENDAR_ICAL_URL`. `initialize()` checks the new list key first and falls back to reading the old one (auto-labeled, since no label was ever collected for it) rather than dropping that connection on upgrade.
+- **Renaming (`step25.md`)**: pressing `e` on a highlighted calendar in `Ctrl+K`'s picker opens a plain-text rename prompt, pre-filled with the current label. Only the label changes — a calendar's URL can't be edited in place, only removed (`Ctrl+K`) and re-added (`Ctrl+L`) with a new one, since revealing a masked secret field to edit it isn't meaningfully better UX than a fresh paste.
 
 ## Permissions
 
@@ -31,6 +32,19 @@ Polling loop (`tokio::time::interval`, period = `[integrations.calendar].sync_in
 4. Dedup via an in-memory `(calendar connection id, event UID, occurrence start epoch millis)` seen-set — the connection id is included (`step24.md`) so two different calendars can never cross-suppress each other even in the extremely unlikely case they share an event UID.
 5. Maps to `NotificationItem`: `source = IntegrationSource::Calendar`, `title` = `"[{label}] {SUMMARY}"` (the connection's label prefixed, `step24.md` — how multiple calendars stay distinguishable once merged into one panel), `body` = the event's `LOCATION` if present, `timestamp_ms` = the occurrence's start time, `priority = PriorityLevel::Medium`, `is_read = false`, `action_link` = the event's `URL` property if the feed provides one.
 6. **One bad calendar doesn't mask the others working** (`step24.md`): the poll cycle as a whole only reports `Failure` if *every* configured calendar failed that cycle. Each failing connection still logs its own reason independently (`tracing::warn!`, visible via `Ctrl+4`'s log viewer).
+
+## Month Grid View (`step25.md`)
+
+`Ctrl+M` opens a real month calendar grid — the right dock's "upcoming reminders" list stays a flat, `lookahead_hours`-bounded list; the grid is a separate, on-demand view with its own fetch, entirely independent of the reminder poll loop:
+
+- `CalendarManager::events_in_range(after, before)` re-fetches every connected calendar fresh (via the same `fetch_calendar_feed` helper the poll loop uses) and expands occurrences for `[after, before)` — a whole month, not `lookahead_hours`. No dedup/seen-state interaction (that's specific to "fire a reminder once"); no publish to the Event Bus (this is a read, not a trigger).
+- Days with at least one event get a marker (`•`, colored) in the grid; the highlighted day's events are listed by title underneath.
+- `h`/`j`/`k`/`l` (and arrows) move the day cursor within the displayed month, clamped to its real day count — no wraparound into an adjacent month (that would need a mid-navigation re-fetch, deliberately out of scope). `[`/`]` explicitly change the displayed month and trigger a fresh fetch.
+- The fetch range uses UTC month boundaries rather than local-midnight-with-DST-handling — a deliberate simplification, since the range only bounds *which* occurrences get fetched; which day cell each one's marker lands on is computed correctly in local time separately.
+
+## Lookahead Range Command (`step25.md`)
+
+`/calendar-range <hours>` changes `lookahead_hours` at runtime via `CalendarManager::set_lookahead_hours`, which updates the config and restarts polling (the running poll loop snapshotted its config once at `start()` time, so a live config change needs a restart to take effect — same pattern `keep_only` already established).
 
 ## Sending
 
@@ -67,3 +81,4 @@ The secret iCal URL is **not** in this file — see Authentication above.
 - No-credential behavior: `initialize()` with an empty `SecretProviderChain` asserts `ConnectionStatus::Disconnected`, not an error and not synthetic data.
 - No live-network integration test exists (no test Google Calendar / CI secret) — manual verification with a real secret iCal URL is the acceptance check for this phase.
 - `step24.md`: the legacy-single-URL migration path, adding a second calendar without dropping the first, `Picker`/`SelectionApplier` reflecting exactly the connected set, and a partial-failure poll cycle (one bad calendar, one good) still delivering the good one's reminders and still reporting overall success.
+- `step25.md`: `set_lookahead_hours` actually updates the config and keeps polling (not left disconnected); `rename` updates and persists the label without touching the URL or polling; a real, unknown-id rename is an error; the `days_in_month`/`shift_month` pure helpers behind the grid's navigation (normal months, February in leap vs. non-leap years, December→January year rollover in both directions).

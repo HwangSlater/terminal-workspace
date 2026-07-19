@@ -3,9 +3,9 @@
 //! diagram, not a new design.
 
 use crate::state::{
-    CalendarPickerStatus, CalendarSetupField, CalendarSetupStatus, FocusMode, GitHubPickerStatus,
-    GitHubSetupStatus, OverlayKind, SlackPickerState, SlackPickerStatus, SlackSetupStatus,
-    WorkspaceState,
+    CalendarGridStatus, CalendarPickerStatus, CalendarRenameState, CalendarSetupField,
+    CalendarSetupStatus, FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind,
+    SlackPickerState, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
 };
 use commands::Command;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,6 +24,7 @@ const COMMAND_HEADS: &[&str] = &[
     "/meeting",
     "/lunch",
     "/pomodoro",
+    "/calendar-range",
 ];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
@@ -88,6 +89,18 @@ pub enum KeyOutcome {
     /// command (`/send`, `/away`, ...) — the caller dispatches it through
     /// `CommandDispatcher` (`step9.md`).
     SubmitCommand(Command),
+    /// `Ctrl+M` opened the month grid view, or `[`/`]` changed its
+    /// displayed month (`step25.md`) — the caller fetches
+    /// `CalendarManager::events_in_range` for the given month (network I/O
+    /// `handle_key` can't perform synchronously) and populates
+    /// `state.calendar_grid`. Reused for both "open" and "navigate months"
+    /// since both need the identical fetch-and-populate sequence.
+    OpenCalendarGrid {
+        /// Year to fetch and display.
+        year: i32,
+        /// Month to fetch and display, 1-12.
+        month: u32,
+    },
     /// Recognized as "nothing to do" in the current context.
     Ignored,
 }
@@ -118,6 +131,8 @@ pub fn handle_key(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
             OverlayKind::GitHubPicker => capture_github_picker_input(state, key),
             OverlayKind::CalendarSetup => capture_calendar_setup_input(state, key),
             OverlayKind::CalendarPicker => capture_calendar_picker_input(state, key),
+            OverlayKind::CalendarRename => capture_calendar_rename_input(state, key),
+            OverlayKind::CalendarGrid => capture_calendar_grid_input(state, key),
         },
         FocusMode::Normal => {
             if let Some(outcome) = try_global_shortcut(state, key) {
@@ -193,6 +208,23 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.active_overlay = OverlayKind::CalendarPicker;
             state.calendar_picker.status = CalendarPickerStatus::Loading;
             Some(KeyOutcome::OpenPicker(IntegrationSource::Calendar))
+        }
+        (KeyCode::Char('m'), m) if m.contains(KeyModifiers::CONTROL) => {
+            state.focus_mode = FocusMode::Overlay;
+            state.active_overlay = OverlayKind::CalendarGrid;
+            state.calendar_grid.status = CalendarGridStatus::Loading;
+            // Always open on *today's* month, not wherever a previous
+            // session left the grid -- `CalendarGridState::default()`'s
+            // "land on now" reasoning applies every time it's opened, not
+            // just the first time (`step25.md`).
+            let today = chrono::Local::now().date_naive();
+            state.calendar_grid.year = chrono::Datelike::year(&today);
+            state.calendar_grid.month = chrono::Datelike::month(&today);
+            state.calendar_grid.cursor_day = chrono::Datelike::day(&today);
+            Some(KeyOutcome::OpenCalendarGrid {
+                year: state.calendar_grid.year,
+                month: state.calendar_grid.month,
+            })
         }
         (KeyCode::Tab, _) => {
             focus_dock(state, 1);
@@ -420,6 +452,102 @@ fn capture_calendar_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> K
             picker.status = CalendarPickerStatus::Saving;
             KeyOutcome::SubmitSelection(IntegrationSource::Calendar, keep_ids)
         }
+        // Rename the highlighted calendar (`step25.md`) -- pre-fills the
+        // rename prompt with its current label so `e` is "edit this," not
+        // "clear and retype from scratch."
+        KeyCode::Char('e') => {
+            if let Some(row) = picker.calendars.get(picker.cursor) {
+                state.calendar_rename = CalendarRenameState {
+                    id: row.id.clone(),
+                    label_input: row.label.clone(),
+                };
+                state.active_overlay = OverlayKind::CalendarRename;
+            }
+            KeyOutcome::Handled
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
+/// Text capture for the Calendar rename prompt (`step25.md`) -- a single
+/// plain-text field, pre-filled by `capture_calendar_picker_input`'s `e`
+/// handler. `Enter` on a non-empty value dispatches `Command::RenameCalendar`
+/// directly (reusing the generic `KeyOutcome::SubmitCommand` path -- a
+/// rename is a `Command` like any other, not a new outcome variant) and
+/// switches back to the picker overlay, reflecting the new label in its
+/// row immediately rather than waiting on a re-fetch.
+fn capture_calendar_rename_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let rename = &mut state.calendar_rename;
+    match key.code {
+        KeyCode::Char(c) => {
+            rename.label_input.push(c);
+            KeyOutcome::Handled
+        }
+        KeyCode::Backspace => {
+            rename.label_input.pop();
+            KeyOutcome::Handled
+        }
+        KeyCode::Enter if !rename.label_input.is_empty() => {
+            let id = rename.id.clone();
+            let label = rename.label_input.clone();
+            if let Some(row) = state
+                .calendar_picker
+                .calendars
+                .iter_mut()
+                .find(|r| r.id == id)
+            {
+                row.label.clone_from(&label);
+            }
+            state.active_overlay = OverlayKind::CalendarPicker;
+            KeyOutcome::SubmitCommand(Command::RenameCalendar { id, label })
+        }
+        _ => KeyOutcome::Handled,
+    }
+}
+
+/// Navigation for the month grid view (`Ctrl+M`, `step25.md`). `h/j/k/l`
+/// (and arrows) move the day cursor within the displayed month, clamped to
+/// its real day range -- no wraparound into an adjacent month, which would
+/// need a re-fetch mid-navigation (kept out of scope; `[`/`]` are the
+/// explicit, deliberate way to change months). `[`/`]` shift the displayed
+/// month and reset the cursor to day 1, returning a fresh
+/// `OpenCalendarGrid` for the caller to re-fetch -- the exact same outcome
+/// `Ctrl+M` itself produces, since both need the identical
+/// fetch-and-populate sequence.
+fn capture_calendar_grid_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
+    let grid = &mut state.calendar_grid;
+    let last_day = crate::state::days_in_month(grid.year, grid.month);
+    match key.code {
+        KeyCode::Char('h') | KeyCode::Left => {
+            grid.cursor_day = grid.cursor_day.saturating_sub(1).max(1);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            grid.cursor_day = (grid.cursor_day + 1).min(last_day);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            grid.cursor_day = grid.cursor_day.saturating_sub(7).max(1);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            grid.cursor_day = (grid.cursor_day + 7).min(last_day);
+            KeyOutcome::Handled
+        }
+        KeyCode::Char('[') => {
+            let (year, month) = crate::state::shift_month(grid.year, grid.month, -1);
+            grid.year = year;
+            grid.month = month;
+            grid.cursor_day = 1;
+            KeyOutcome::OpenCalendarGrid { year, month }
+        }
+        KeyCode::Char(']') => {
+            let (year, month) = crate::state::shift_month(grid.year, grid.month, 1);
+            grid.year = year;
+            grid.month = month;
+            grid.cursor_day = 1;
+            KeyOutcome::OpenCalendarGrid { year, month }
+        }
         _ => KeyOutcome::Handled,
     }
 }
@@ -643,8 +771,20 @@ fn parse_command(text: &str, picker: &SlackPickerState) -> Result<Option<Command
         "/meeting" => Ok(Some(presence_command(PresenceStatus::Meeting, rest))),
         "/lunch" => Ok(Some(presence_command(PresenceStatus::Lunch, rest))),
         "/pomodoro" => parse_pomodoro_command(rest),
+        "/calendar-range" => parse_calendar_range_command(rest),
         _ => Ok(None),
     }
+}
+
+/// `/calendar-range <hours>` (`step25.md`) — how many hours ahead the
+/// Calendar reminder poll looks. Mirrors `/pomodoro`'s "leading `/` but
+/// bad/missing arguments is a real error, not a silent fallthrough" rule.
+fn parse_calendar_range_command(rest: &str) -> Result<Option<Command>, String> {
+    let hours: u64 = rest
+        .trim()
+        .parse()
+        .map_err(|_| "사용법: /calendar-range <시간> (예: /calendar-range 48)".to_string())?;
+    Ok(Some(Command::SetCalendarLookaheadHours { hours }))
 }
 
 /// `/pomodoro start [work_min] [break_min]` (defaults if omitted),
@@ -1016,6 +1156,41 @@ mod tests {
             ..Default::default()
         };
         let outcome = type_and_submit(&mut state, "/pomodoro bogus");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn calendar_range_with_a_valid_number_dispatches_the_command() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/calendar-range 48");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::SetCalendarLookaheadHours { hours: 48 })
+        );
+    }
+
+    #[test]
+    fn calendar_range_with_a_non_numeric_value_is_a_real_error() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/calendar-range abc");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn calendar_range_with_no_argument_is_a_real_error() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/calendar-range");
         assert_eq!(outcome, KeyOutcome::Handled);
         assert!(state.cmd_buffer.last_error.is_some());
     }
@@ -1449,6 +1624,193 @@ mod tests {
             outcome,
             KeyOutcome::SubmitSelection(IntegrationSource::Calendar, vec!["id-2".to_string()])
         );
+    }
+
+    #[test]
+    fn calendar_picker_e_opens_the_rename_prompt_prefilled_with_the_current_label() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarPicker,
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.active_overlay, OverlayKind::CalendarRename);
+        assert_eq!(state.calendar_rename.id, "id-1");
+        assert_eq!(state.calendar_rename.label_input, "회사");
+    }
+
+    #[test]
+    fn calendar_rename_enter_submits_the_command_and_updates_the_picker_row_immediately() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarRename,
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            calendar_rename: crate::state::CalendarRenameState {
+                id: "id-1".to_string(),
+                label_input: "회사".to_string(),
+            },
+            ..Default::default()
+        };
+        // Backspace the pre-filled label, retype a corrected one.
+        for _ in 0.."회사".chars().count() {
+            handle_key(&mut state, key(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        for c in "새이름".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::RenameCalendar {
+                id: "id-1".to_string(),
+                label: "새이름".to_string(),
+            })
+        );
+        // Switches back to the picker, showing the new label right away --
+        // not waiting on a re-fetch that would otherwise show the old one.
+        assert_eq!(state.active_overlay, OverlayKind::CalendarPicker);
+        assert_eq!(state.calendar_picker.calendars[0].label, "새이름");
+    }
+
+    #[test]
+    fn calendar_rename_enter_with_an_empty_label_does_not_submit() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarRename,
+            calendar_rename: crate::state::CalendarRenameState {
+                id: "id-1".to_string(),
+                label_input: String::new(),
+            },
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.active_overlay, OverlayKind::CalendarRename);
+    }
+
+    #[test]
+    fn ctrl_m_opens_the_calendar_grid_on_todays_month() {
+        use chrono::Datelike;
+        let today = chrono::Local::now().date_naive();
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert_eq!(
+            outcome,
+            KeyOutcome::OpenCalendarGrid {
+                year: today.year(),
+                month: today.month(),
+            }
+        );
+        assert_eq!(state.focus_mode, FocusMode::Overlay);
+        assert_eq!(state.active_overlay, OverlayKind::CalendarGrid);
+    }
+
+    fn grid_state_for(year: i32, month: u32, cursor_day: u32) -> crate::state::CalendarGridState {
+        crate::state::CalendarGridState {
+            year,
+            month,
+            cursor_day,
+            events: Vec::new(),
+            status: crate::state::CalendarGridStatus::Loaded,
+        }
+    }
+
+    #[test]
+    fn calendar_grid_l_moves_the_cursor_forward_one_day() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: grid_state_for(2026, 6, 15),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_grid.cursor_day, 16);
+    }
+
+    #[test]
+    fn calendar_grid_l_does_not_run_past_the_last_day_of_the_month() {
+        // June has 30 days -- no wraparound into July (step25.md: month
+        // changes are only via the explicit `[`/`]` keys, which trigger a
+        // real re-fetch; day-cursor movement never silently crosses that
+        // boundary).
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: grid_state_for(2026, 6, 30),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_grid.cursor_day, 30);
+    }
+
+    #[test]
+    fn calendar_grid_h_does_not_go_below_day_one() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: grid_state_for(2026, 6, 1),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_grid.cursor_day, 1);
+    }
+
+    #[test]
+    fn calendar_grid_j_and_k_move_by_a_week_clamped_to_the_month() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: grid_state_for(2026, 6, 28),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_grid.cursor_day, 30); // clamped, June has 30
+        handle_key(&mut state, key(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(state.calendar_grid.cursor_day, 23);
+    }
+
+    #[test]
+    fn calendar_grid_bracket_right_advances_a_month_resets_cursor_and_refetches() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: grid_state_for(2026, 12, 15),
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::OpenCalendarGrid {
+                year: 2027,
+                month: 1,
+            }
+        );
+        assert_eq!(state.calendar_grid.year, 2027);
+        assert_eq!(state.calendar_grid.month, 1);
+        assert_eq!(state.calendar_grid.cursor_day, 1);
+    }
+
+    #[test]
+    fn calendar_grid_bracket_left_goes_back_a_month_across_a_year_boundary() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: grid_state_for(2026, 1, 10),
+            ..Default::default()
+        };
+        let outcome = handle_key(&mut state, key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(
+            outcome,
+            KeyOutcome::OpenCalendarGrid {
+                year: 2025,
+                month: 12,
+            }
+        );
+        assert_eq!(state.calendar_grid.year, 2025);
+        assert_eq!(state.calendar_grid.month, 12);
+        assert_eq!(state.calendar_grid.cursor_day, 1);
     }
 
     #[test]

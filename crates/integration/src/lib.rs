@@ -1,7 +1,9 @@
 //! Integration Adapter abstractions. See `docs/04-extensions/integration-contract.md`.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use common::Result;
+use domain::NotificationItem;
 use events::EventBus;
 use secrets::SecretProvider;
 use std::sync::Arc;
@@ -54,6 +56,40 @@ pub struct PickerItem {
 pub trait Picker: Send + Sync {
     /// Items the authenticated account can access.
     async fn list_items(&self) -> Result<Vec<PickerItem>>;
+}
+
+/// Calendar-specific management operations (`step25.md`) that don't fit
+/// `IntegrationConnector`/`Picker`/`SelectionApplier`'s shapes — defined
+/// here (not `crates/commands`) so `CalendarAdapter` can implement it
+/// directly with no `crates/app` bridge type, the same reasoning
+/// `IntegrationConnector`/`Picker` already get away without one for
+/// (`step24.md`'s Implementation Notes: only traits defined in
+/// `crates/commands` need a bridge, since `crates/commands` depends on
+/// `crates/integration` and not the other way around).
+#[async_trait]
+pub trait CalendarManager: Send + Sync {
+    /// Updates how many hours ahead the reminder poll looks, then restarts
+    /// polling with the new value (`CalendarPoller` snapshots its config
+    /// once at `start()` time rather than re-reading it live).
+    async fn set_lookahead_hours(&self, event_bus: Arc<dyn EventBus>, hours: u64) -> Result<()>;
+
+    /// Renames a connected calendar (`id`, per [`PickerItem::id`]) without
+    /// touching its URL or restarting polling — a label is cosmetic
+    /// (prefixed onto reminder titles), not something the poll loop's
+    /// fetch/parse logic depends on.
+    async fn rename(&self, id: String, new_label: String) -> Result<()>;
+
+    /// A fresh, on-demand fetch of every connected calendar's occurrences
+    /// in `[after, before)` — independent of the reminder poll loop's
+    /// `lookahead_hours` window and its "fire once" dedup state entirely.
+    /// Backs the month grid view (`Ctrl+M`): a whole month's worth of
+    /// "which days have something on them" has nothing to do with what
+    /// the near-term reminder mechanism has already surfaced.
+    async fn events_in_range(
+        &self,
+        after: DateTime<Utc>,
+        before: DateTime<Utc>,
+    ) -> Result<Vec<NotificationItem>>;
 }
 
 /// Operational connection health status. See

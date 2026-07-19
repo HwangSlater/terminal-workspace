@@ -15,9 +15,9 @@ use events::{
     EventBus, EventDispatcher, EventHandler, InProcessEventBus, IntegrationConnectionStatus,
 };
 use integration::{
-    CalendarAdapter, CalendarConfig, ConnectionStatus, GitHubAdapter, GitHubConfig,
-    IntegrationAdapter, IntegrationConnector, Picker, SlackAdapter, SlackConfig, SlackMessenger,
-    SlackPicker,
+    CalendarAdapter, CalendarConfig, CalendarManager, ConnectionStatus, GitHubAdapter,
+    GitHubConfig, IntegrationAdapter, IntegrationConnector, Picker, SlackAdapter, SlackConfig,
+    SlackMessenger, SlackPicker,
 };
 use ipc::{IpcClient, IpcRequest, IpcResponse, IpcServer, IpcStatusProvider, IpcStatusSnapshot};
 use logging::{init_logger, spans::application_span};
@@ -470,6 +470,7 @@ async fn main() -> Result<()> {
         connectors,
         selection_appliers,
         Arc::clone(&scheduler),
+        Some(Arc::clone(&calendar_adapter) as Arc<dyn CalendarManager>),
     ));
     let dispatcher: Arc<dyn CommandDispatcher> = Arc::new(InMemoryCommandDispatcher::new(handler));
 
@@ -651,6 +652,7 @@ async fn main() -> Result<()> {
         initial_calendar_status,
         log_buffer,
         scheduler,
+        Some(Arc::clone(&calendar_adapter) as Arc<dyn CalendarManager>),
     );
     renderer.run_loop().await?;
 

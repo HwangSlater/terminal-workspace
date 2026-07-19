@@ -7,7 +7,7 @@ use domain::{
     PresenceRepository, PresenceStatus, UserId,
 };
 use events::{Event, EventBus, EventHandler};
-use integration::{IntegrationConnector, SlackMessenger};
+use integration::{CalendarManager, IntegrationConnector, SlackMessenger};
 use logging::{spans::command_span, TraceContext};
 use scheduler::AgendaScheduler;
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,22 @@ pub enum Command {
 
     /// Stop and clear the Pomodoro timer entirely, back to never-started.
     ResetPomodoro,
+
+    /// Change how many hours ahead the Calendar reminder poll looks
+    /// (`step25.md`, `/calendar-range <hours>`).
+    SetCalendarLookaheadHours {
+        /// New lookahead window, in hours.
+        hours: u64,
+    },
+
+    /// Rename a connected calendar (`step25.md`, `Ctrl+K`'s picker
+    /// overlay) without touching its URL or restarting polling.
+    RenameCalendar {
+        /// Which connection (`PickerItem::id`, a UUID string).
+        id: String,
+        /// New display label.
+        label: String,
+    },
 }
 
 /// Narrow port for `Command::ApplySlackSelection`: persist a channel/user
@@ -180,6 +196,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::StartPomodoro { .. } => "StartPomodoro",
         Command::PausePomodoro => "PausePomodoro",
         Command::ResetPomodoro => "ResetPomodoro",
+        Command::SetCalendarLookaheadHours { .. } => "SetCalendarLookaheadHours",
+        Command::RenameCalendar { .. } => "RenameCalendar",
     }
 }
 
@@ -214,6 +232,10 @@ pub struct WorkspaceCommandHandler {
     /// `Option`, since it isn't gated behind "configured or not" the way
     /// integrations are; it's always available.
     scheduler: Arc<AgendaScheduler>,
+    /// `SetCalendarLookaheadHours`/`RenameCalendar`'s target (`step25.md`).
+    /// `None` when no Calendar adapter was constructed at all, same
+    /// reasoning as `slack_messenger` above.
+    calendar_manager: Option<Arc<dyn CalendarManager>>,
 }
 
 /// Looks up `source` in a connector/applier registry, or returns the same
@@ -243,6 +265,7 @@ impl WorkspaceCommandHandler {
         connectors: HashMap<IntegrationSource, Arc<dyn IntegrationConnector>>,
         selection_appliers: HashMap<IntegrationSource, Arc<dyn SelectionApplier>>,
         scheduler: Arc<AgendaScheduler>,
+        calendar_manager: Option<Arc<dyn CalendarManager>>,
     ) -> Self {
         Self {
             presence_repo,
@@ -253,6 +276,7 @@ impl WorkspaceCommandHandler {
             connectors,
             selection_appliers,
             scheduler,
+            calendar_manager,
         }
     }
 }
@@ -332,6 +356,22 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                 self.scheduler.reset().await;
                 Ok(())
             }
+            Command::SetCalendarLookaheadHours { hours } => match &self.calendar_manager {
+                Some(manager) => {
+                    manager
+                        .set_lookahead_hours(Arc::clone(&self.event_bus), hours)
+                        .await
+                }
+                None => Err(WorkspaceError::Integration(
+                    "Calendar integration not configured".into(),
+                )),
+            },
+            Command::RenameCalendar { id, label } => match &self.calendar_manager {
+                Some(manager) => manager.rename(id, label).await,
+                None => Err(WorkspaceError::Integration(
+                    "Calendar integration not configured".into(),
+                )),
+            },
         }
     }
 }
@@ -537,6 +577,29 @@ mod tests {
         )
     }
 
+    /// Like [`make_handler`], but with a real `calendar_manager` wired in
+    /// -- the other fixtures always pass `None` (`step25.md`'s
+    /// `SetCalendarLookaheadHours`/`RenameCalendar` are the only commands
+    /// that need one).
+    fn make_handler_with_calendar_manager(
+        calendar_manager: Arc<dyn CalendarManager>,
+    ) -> Arc<WorkspaceCommandHandler> {
+        let presence = Arc::new(MockPresenceRepo::default());
+        let notifications = Arc::new(MockNotificationRepo::default());
+        let bus = Arc::new(InProcessEventBus::new(10));
+        Arc::new(WorkspaceCommandHandler::new(
+            presence as Arc<dyn PresenceRepository>,
+            notifications as Arc<dyn NotificationRepository>,
+            Arc::clone(&bus) as Arc<dyn EventBus>,
+            None,
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            AgendaScheduler::new(bus as Arc<dyn EventBus>),
+            Some(calendar_manager),
+        ))
+    }
+
     fn make_handler_with(
         slack_messenger: Option<Arc<dyn SlackMessenger>>,
         slack_selection_applier: Option<Arc<dyn SlackSelectionApplier>>,
@@ -555,6 +618,7 @@ mod tests {
             connectors,
             selection_appliers,
             AgendaScheduler::new(Arc::clone(&bus) as Arc<dyn EventBus>),
+            None,
         ));
         (handler, presence, notifications, bus)
     }
@@ -577,6 +641,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             Arc::clone(&scheduler),
+            None,
         ));
         (handler, scheduler)
     }
@@ -919,6 +984,88 @@ mod tests {
             self.applied.lock().await.push(items);
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct MockCalendarManager {
+        lookahead_calls: Mutex<Vec<u64>>,
+        rename_calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl CalendarManager for MockCalendarManager {
+        async fn set_lookahead_hours(
+            &self,
+            _event_bus: Arc<dyn EventBus>,
+            hours: u64,
+        ) -> Result<()> {
+            self.lookahead_calls.lock().await.push(hours);
+            Ok(())
+        }
+
+        async fn rename(&self, id: String, new_label: String) -> Result<()> {
+            self.rename_calls.lock().await.push((id, new_label));
+            Ok(())
+        }
+
+        async fn events_in_range(
+            &self,
+            _after: chrono::DateTime<chrono::Utc>,
+            _before: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<domain::NotificationItem>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn set_calendar_lookahead_hours_errors_without_a_calendar_adapter() {
+        let (handler, ..) = make_handler();
+        let result = handler
+            .handle(Command::SetCalendarLookaheadHours { hours: 48 })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_calendar_lookahead_hours_dispatches_to_the_calendar_manager() {
+        let manager = Arc::new(MockCalendarManager::default());
+        let handler =
+            make_handler_with_calendar_manager(Arc::clone(&manager) as Arc<dyn CalendarManager>);
+        handler
+            .handle(Command::SetCalendarLookaheadHours { hours: 48 })
+            .await
+            .unwrap();
+        assert_eq!(manager.lookahead_calls.lock().await.as_slice(), [48]);
+    }
+
+    #[tokio::test]
+    async fn rename_calendar_errors_without_a_calendar_adapter() {
+        let (handler, ..) = make_handler();
+        let result = handler
+            .handle(Command::RenameCalendar {
+                id: "some-id".to_string(),
+                label: "새이름".to_string(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rename_calendar_dispatches_to_the_calendar_manager() {
+        let manager = Arc::new(MockCalendarManager::default());
+        let handler =
+            make_handler_with_calendar_manager(Arc::clone(&manager) as Arc<dyn CalendarManager>);
+        handler
+            .handle(Command::RenameCalendar {
+                id: "some-id".to_string(),
+                label: "새이름".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.rename_calls.lock().await.as_slice(),
+            [("some-id".to_string(), "새이름".to_string())]
+        );
     }
 
     #[tokio::test]

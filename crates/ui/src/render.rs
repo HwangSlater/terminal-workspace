@@ -2,8 +2,9 @@
 //! layout this implements (Phase 5 subset — see `step5.md`).
 
 use crate::state::{
-    CalendarPickerStatus, CalendarSetupField, CalendarSetupStatus, FocusMode, GitHubPickerStatus,
-    GitHubSetupStatus, OverlayKind, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
+    CalendarGridStatus, CalendarPickerStatus, CalendarSetupField, CalendarSetupStatus, FocusMode,
+    GitHubPickerStatus, GitHubSetupStatus, OverlayKind, SlackPickerStatus, SlackSetupStatus,
+    WorkspaceState,
 };
 use commands::DashboardReadModel;
 use domain::{IntegrationSource, NotificationItem, PresenceStatus, PriorityLevel};
@@ -102,6 +103,8 @@ pub fn render(
             OverlayKind::LogViewer => render_log_viewer_overlay(frame, area, log_lines),
             OverlayKind::CalendarSetup => render_calendar_setup_overlay(frame, area, state),
             OverlayKind::CalendarPicker => render_calendar_picker_overlay(frame, area, state),
+            OverlayKind::CalendarRename => render_calendar_rename_overlay(frame, area, state),
+            OverlayKind::CalendarGrid => render_calendar_grid_overlay(frame, area, state),
         }
     }
 }
@@ -160,6 +163,10 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
                 description: "뽀모도로 타이머 시작/일시정지/재설정",
             },
             HelpEntry {
+                key: "/calendar-range <시간>",
+                description: "캘린더 알림이 몇 시간 앞까지 보일지 변경",
+            },
+            HelpEntry {
                 key: "Tab",
                 description: "명령어/채널 자동완성 (연속 Tab: 다음 후보)",
             },
@@ -200,7 +207,11 @@ const HELP_CATEGORIES: &[(&str, &[HelpEntry])] = &[
             },
             HelpEntry {
                 key: "Ctrl+K",
-                description: "연결된 캘린더 관리/제거",
+                description: "연결된 캘린더 관리/제거/이름 변경(e)",
+            },
+            HelpEntry {
+                key: "Ctrl+M",
+                description: "달력 그리드 뷰 ([/]: 이전/다음 달)",
             },
         ],
     ),
@@ -496,11 +507,156 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     let status_line = match &picker.status {
         CalendarPickerStatus::Saving => "저장 중...",
         CalendarPickerStatus::Saved => "저장됨!",
-        _ => "j/k: 이동  Space: 선택/해제  Enter: 저장  Esc: 닫기",
+        _ => "j/k: 이동  Space: 선택/해제  e: 이름 변경  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray)),
         layout[1],
+    );
+}
+
+/// Calendar rename prompt (`e` inside `Ctrl+K`'s picker, `step25.md`) --
+/// mirrors the setup overlays' single-field shape, but plain text, not
+/// masked (a label isn't a secret).
+fn render_calendar_rename_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    let popup = centered_rect(50, 20, area);
+    frame.render_widget(Clear, popup);
+
+    let text = format!(
+        "새 이름: {}_\n\n엔터로 저장, Esc: 닫기",
+        state.calendar_rename.label_input
+    );
+    let block = Block::default()
+        .title("캘린더 이름 변경")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    frame.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+/// The local calendar day (1-31) `timestamp_ms` (epoch millis, UTC) falls
+/// on, converted to the user's local time -- same "never display raw UTC"
+/// reasoning `format_occurrence_time` already established. `None` only for
+/// a value so far out of range it can't be represented at all, which
+/// nothing in this codebase actually produces.
+fn local_day_of(timestamp_ms: u64) -> Option<u32> {
+    use chrono::Datelike;
+    let utc = chrono::DateTime::from_timestamp_millis(i64::try_from(timestamp_ms).ok()?)?;
+    Some(utc.with_timezone(&chrono::Local).day())
+}
+
+/// Month grid view (`Ctrl+M`, `step25.md`) — a real calendar grid, not the
+/// right dock's flat "upcoming reminders" list. Read-only: shows which
+/// days in the displayed month have at least one event (a `•` marker,
+/// colored) and the highlighted day's events by title, underneath.
+fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
+    use chrono::Datelike;
+
+    let popup = centered_rect(70, 80, area);
+    frame.render_widget(Clear, popup);
+
+    let grid = &state.calendar_grid;
+    let block = Block::default()
+        .title(format!("{}년 {}월 (Esc: 닫기)", grid.year, grid.month))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    match &grid.status {
+        CalendarGridStatus::Loading => {
+            frame.render_widget(Paragraph::new("불러오는 중...").block(block), popup);
+            return;
+        }
+        CalendarGridStatus::Failed(reason) => {
+            frame.render_widget(
+                Paragraph::new(format!("불러오기 실패: {reason}\n\nEsc: 닫기"))
+                    .block(block)
+                    .wrap(Wrap { trim: true }),
+                popup,
+            );
+            return;
+        }
+        CalendarGridStatus::Idle | CalendarGridStatus::Loaded => {}
+    }
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // weekday header
+            Constraint::Length(6), // up to 6 week rows
+            Constraint::Length(1), // spacer
+            Constraint::Min(1),    // highlighted day's events
+            Constraint::Length(1), // status line
+        ])
+        .split(inner);
+
+    frame.render_widget(Paragraph::new("일  월  화  수  목  금  토"), layout[0]);
+
+    let days_with_events: std::collections::HashSet<u32> = grid
+        .events
+        .iter()
+        .filter_map(|item| local_day_of(item.timestamp_ms))
+        .collect();
+
+    let first_weekday = chrono::NaiveDate::from_ymd_opt(grid.year, grid.month, 1)
+        .map_or(0, |d| d.weekday().num_days_from_sunday());
+    let last_day = crate::state::days_in_month(grid.year, grid.month);
+
+    let mut week_lines: Vec<Line> = Vec::new();
+    let mut day = 1_i64 - i64::from(first_weekday);
+    for _week in 0..6 {
+        let mut spans = Vec::new();
+        for _weekday in 0..7 {
+            if day < 1 || day > i64::from(last_day) {
+                spans.push(Span::raw("    "));
+            } else {
+                // Safe: bounded by `1..=last_day` (a real month never
+                // exceeds 31), well within u32 range.
+                let d = u32::try_from(day).unwrap_or(0);
+                let has_event = days_with_events.contains(&d);
+                let marker = if has_event { "•" } else { " " };
+                let style = if d == grid.cursor_day {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else if has_event {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(format!("{d:>2}{marker} "), style));
+            }
+            day += 1;
+        }
+        week_lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(week_lines), layout[1]);
+
+    let day_events: Vec<&NotificationItem> = grid
+        .events
+        .iter()
+        .filter(|item| local_day_of(item.timestamp_ms) == Some(grid.cursor_day))
+        .collect();
+    let event_text = if day_events.is_empty() {
+        format!("{}일: (일정 없음)", grid.cursor_day)
+    } else {
+        let lines: Vec<String> = day_events
+            .iter()
+            .map(|i| format!("- {}", i.title))
+            .collect();
+        format!("{}일:\n{}", grid.cursor_day, lines.join("\n"))
+    };
+    frame.render_widget(
+        Paragraph::new(event_text).wrap(Wrap { trim: true }),
+        layout[3],
+    );
+
+    frame.render_widget(
+        Paragraph::new("h/j/k/l: 날짜 이동  [/]: 이전/다음 달  Esc: 닫기")
+            .style(Style::default().fg(Color::DarkGray)),
+        layout[4],
     );
 }
 
@@ -2002,6 +2158,95 @@ mod tests {
         };
         let text = draw(140, 30, &state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "feed unreachable"));
+    }
+
+    #[test]
+    fn calendar_grid_overlay_shows_loading_state() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                status: CalendarGridStatus::Loading,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "불러오는 중"));
+    }
+
+    #[test]
+    fn calendar_grid_overlay_shows_the_failure_reason() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                status: CalendarGridStatus::Failed("network error".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "network error"));
+    }
+
+    #[test]
+    fn calendar_grid_overlay_shows_the_cursor_days_events() {
+        let event = sample_notification_for(IntegrationSource::Calendar, "[회사] Design Review");
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                year: 2026,
+                month: 6,
+                cursor_day: 15,
+                events: vec![NotificationItem {
+                    timestamp_ms: u64::try_from(
+                        chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+                            .unwrap()
+                            .timestamp_millis(),
+                    )
+                    .unwrap(),
+                    ..event
+                }],
+                status: CalendarGridStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "Design Review"));
+    }
+
+    #[test]
+    fn calendar_grid_overlay_shows_no_events_text_for_a_day_with_nothing_on_it() {
+        let state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarGrid,
+            calendar_grid: crate::state::CalendarGridState {
+                year: 2026,
+                month: 6,
+                cursor_day: 15,
+                events: Vec::new(),
+                status: CalendarGridStatus::Loaded,
+            },
+            ..Default::default()
+        };
+        let text = draw(140, 30, &state, &DashboardReadModel::default());
+        assert!(contains_ignoring_whitespace(&text, "일정 없음"));
+    }
+
+    #[test]
+    fn local_day_of_converts_epoch_millis_to_the_correct_local_day() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        // Whatever this machine's local timezone is, the result must be a
+        // real day-of-month (1-31) -- the exact value depends on the
+        // offset (a UTC instant near midnight can land on an adjacent
+        // local day), which is the entire reason this conversion exists
+        // rather than displaying raw UTC.
+        let day = local_day_of(u64::try_from(ts).unwrap());
+        assert!(day.is_some_and(|d| (1..=31).contains(&d)));
     }
 
     #[test]

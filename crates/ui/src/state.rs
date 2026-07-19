@@ -1,5 +1,6 @@
 //! `docs/03-domain/workspace-state.md`.
 
+use domain::NotificationItem;
 use events::IntegrationConnectionStatus;
 use registry::UiDockSlot;
 use std::collections::HashMap;
@@ -46,6 +47,18 @@ pub enum OverlayKind {
     /// calendars" discovery call (the secret-URL auth model still has no
     /// such API).
     CalendarPicker,
+    /// Rename prompt for the calendar highlighted in `Ctrl+K`'s picker
+    /// (`e`, `step25.md`) — a single plain-text field (a label isn't a
+    /// secret), pre-filled with the current name.
+    CalendarRename,
+    /// Month grid view (`Ctrl+M`, `step25.md`) — a real calendar grid, not
+    /// the flat "upcoming reminders" list the right dock shows. Read-only:
+    /// navigate months and days, see which days have something on them.
+    /// Fetches fresh via `CalendarManager::events_in_range` on open and on
+    /// every month change -- independent of the reminder poll loop's
+    /// `lookahead_hours` window entirely (a whole month's events has
+    /// nothing to do with what the near-term reminder mechanism surfaces).
+    CalendarGrid,
     /// Full scrollback view of the app's own log buffer (`Ctrl+4`,
     /// `step19.md`) — opened directly, the same way `Ctrl+S`/`Ctrl+G`/
     /// `Ctrl+L` open their setup overlays, rather than a "focus a dock,
@@ -231,6 +244,17 @@ pub struct CalendarSetupState {
     pub status: CalendarSetupStatus,
 }
 
+/// State for the Calendar rename prompt (`e` inside `Ctrl+K`'s picker,
+/// `step25.md`) — a single plain-text field, pre-filled with the current
+/// label when opened.
+#[derive(Debug, Clone, Default)]
+pub struct CalendarRenameState {
+    /// Which connection (`PickerItem::id`, a UUID string).
+    pub id: String,
+    /// New label as typed so far, pre-filled with the current one.
+    pub label_input: String,
+}
+
 /// Outcome of the Calendar picker's fetch/apply flow (`step24.md`).
 /// Structurally identical to [`GitHubPickerStatus`] — "fetch" here is a
 /// local read of already-connected calendars, not a network call, but the
@@ -263,6 +287,95 @@ pub struct CalendarPickerState {
     pub cursor: usize,
     /// Current fetch/apply outcome.
     pub status: CalendarPickerStatus,
+}
+
+/// Outcome of the month grid's on-demand fetch (`step25.md`). Simpler than
+/// [`CalendarPickerStatus`] -- there's no "apply a selection" step here,
+/// just fetch and display.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CalendarGridStatus {
+    /// Overlay not open, or open but not yet fetched.
+    #[default]
+    Idle,
+    /// `CalendarManager::events_in_range` in flight for the displayed month.
+    Loading,
+    /// Fetched successfully; `events` reflects the displayed month.
+    Loaded,
+    /// The fetch failed; the message is shown to the user.
+    Failed(String),
+}
+
+/// State for the month grid view (`Ctrl+M`, `step25.md`).
+#[derive(Debug, Clone)]
+pub struct CalendarGridState {
+    /// Displayed month's year (e.g. `2026`).
+    pub year: i32,
+    /// Displayed month, 1-12.
+    pub month: u32,
+    /// Day-of-month the cursor is on, 1-based. Clamped to the displayed
+    /// month's real day count, not carried over verbatim across a month
+    /// change (a `31` selected in a 31-day month would be invalid in the
+    /// next, shorter one).
+    pub cursor_day: u32,
+    /// Every occurrence fetched for the displayed month, across every
+    /// connected calendar, labeled (`"[label] title"`) the same way the
+    /// Notification/Calendar panel's reminders are. Rendering derives
+    /// "which days have something" and "the cursor day's events" from
+    /// this directly rather than pre-grouping it into a day map — the
+    /// list is small (one month, from a handful of calendars) and
+    /// re-filtering per render is simpler than keeping a derived
+    /// structure in sync.
+    pub events: Vec<NotificationItem>,
+    /// Current fetch outcome.
+    pub status: CalendarGridStatus,
+}
+
+impl Default for CalendarGridState {
+    /// Defaults to *today's* year/month/day, not `0`/`1` -- opening the
+    /// grid for the first time should land on "now," matching what every
+    /// real calendar app does, not January of year zero.
+    fn default() -> Self {
+        use chrono::Datelike;
+        let today = chrono::Local::now().date_naive();
+        Self {
+            year: today.year(),
+            month: today.month(),
+            cursor_day: today.day(),
+            events: Vec::new(),
+            status: CalendarGridStatus::default(),
+        }
+    }
+}
+
+/// Number of days in `(year, month)` -- shared by `keyboard.rs` (clamping
+/// cursor movement) and `render.rs` (drawing the grid), so it's defined
+/// once here rather than duplicated (`step25.md`). Computed as "one day
+/// before the first of next month" since `chrono` has no direct
+/// days-in-month query; handles the December -> January-of-next-year
+/// rollover the same way month navigation itself does.
+pub(crate) fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::Datelike;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|d| d.pred_opt())
+        .map_or(30, |d| d.day())
+}
+
+/// `(year, month)` shifted by `delta` months (positive = forward,
+/// negative = back), wrapping the year at the December/January boundary.
+/// Shared by the same two callers as [`days_in_month`].
+pub(crate) fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
+    let zero_based = i64::from(month) - 1 + i64::from(delta);
+    let year_offset = zero_based.div_euclid(12);
+    let new_month = zero_based.rem_euclid(12) + 1;
+    (
+        year + i32::try_from(year_offset).unwrap_or(0),
+        u32::try_from(new_month).unwrap_or(1),
+    )
 }
 
 /// `docs/03-domain/workspace-state.md`'s `ActiveLayout`.
@@ -337,6 +450,11 @@ pub struct WorkspaceState {
     pub calendar_setup: CalendarSetupState,
     /// Calendar picker overlay's fetched rows and selection (`step24.md`).
     pub calendar_picker: CalendarPickerState,
+    /// Calendar rename prompt's target id and text input (`step25.md`).
+    pub calendar_rename: CalendarRenameState,
+    /// Month grid view's displayed month, cursor, and fetched events
+    /// (`step25.md`).
+    pub calendar_grid: CalendarGridState,
     /// Calendar's connection status, kept current the same way
     /// `slack_connection_status` is (`step12.md`).
     pub calendar_connection_status: IntegrationConnectionStatus,
@@ -370,11 +488,65 @@ impl Default for WorkspaceState {
             github_connection_status: IntegrationConnectionStatus::Disconnected,
             calendar_setup: CalendarSetupState::default(),
             calendar_picker: CalendarPickerState::default(),
+            calendar_rename: CalendarRenameState::default(),
+            calendar_grid: CalendarGridState::default(),
             // Same placeholder reasoning as slack_connection_status above.
             calendar_connection_status: IntegrationConnectionStatus::Disconnected,
             active_theme: "default-dark".to_string(),
             selected_index: 0,
             should_quit: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn days_in_month_handles_a_normal_month() {
+        assert_eq!(days_in_month(2026, 1), 31);
+        assert_eq!(days_in_month(2026, 4), 30);
+    }
+
+    #[test]
+    fn days_in_month_handles_february_leap_and_non_leap_years() {
+        assert_eq!(days_in_month(2024, 2), 29); // leap year
+        assert_eq!(days_in_month(2026, 2), 28); // not a leap year
+    }
+
+    #[test]
+    fn days_in_month_handles_the_december_year_rollover() {
+        assert_eq!(days_in_month(2026, 12), 31);
+    }
+
+    #[test]
+    fn shift_month_moves_forward_within_the_same_year() {
+        assert_eq!(shift_month(2026, 6, 1), (2026, 7));
+    }
+
+    #[test]
+    fn shift_month_moves_backward_within_the_same_year() {
+        assert_eq!(shift_month(2026, 6, -1), (2026, 5));
+    }
+
+    #[test]
+    fn shift_month_rolls_forward_into_the_next_year() {
+        assert_eq!(shift_month(2026, 12, 1), (2027, 1));
+    }
+
+    #[test]
+    fn shift_month_rolls_backward_into_the_previous_year() {
+        assert_eq!(shift_month(2026, 1, -1), (2025, 12));
+    }
+
+    #[test]
+    fn calendar_grid_state_defaults_to_todays_date_not_january_of_year_zero() {
+        use chrono::Datelike;
+        let today = chrono::Local::now().date_naive();
+        let grid = CalendarGridState::default();
+        assert_eq!(grid.year, today.year());
+        assert_eq!(grid.month, today.month());
+        assert_eq!(grid.cursor_day, today.day());
     }
 }

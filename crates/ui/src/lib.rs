@@ -18,15 +18,15 @@ use crossterm::terminal::{
 };
 use domain::IntegrationSource;
 use events::{Event as DomainEvent, EventBus, IntegrationConnectionStatus};
-use integration::{Picker, SlackPicker};
+use integration::{CalendarManager, Picker, SlackPicker};
 use logging::LogBuffer;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use registry::UiRegistry;
 use scheduler::AgendaScheduler;
 use state::{
-    CalendarPickerStatus, CalendarSetupStatus, GitHubPickerStatus, GitHubSetupStatus, PickerRow,
-    SlackPickerStatus, SlackSetupStatus,
+    CalendarGridStatus, CalendarPickerStatus, CalendarSetupStatus, GitHubPickerStatus,
+    GitHubSetupStatus, PickerRow, SlackPickerStatus, SlackSetupStatus,
 };
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -82,6 +82,10 @@ pub struct TuiRenderer {
     /// Backs the header's Pomodoro segment (`step18.md`) — snapshotted
     /// fresh each frame, same pattern as `log_buffer`.
     scheduler: Arc<AgendaScheduler>,
+    /// Backs the month grid view's on-demand fetch (`Ctrl+M`, `step25.md`).
+    /// `None` when no Calendar adapter was constructed at all, same
+    /// reasoning `slack_messenger`-style `Option` fields use elsewhere.
+    calendar_manager: Option<Arc<dyn CalendarManager>>,
 }
 
 impl TuiRenderer {
@@ -100,6 +104,7 @@ impl TuiRenderer {
         initial_calendar_status: IntegrationConnectionStatus,
         log_buffer: Arc<LogBuffer>,
         scheduler: Arc<AgendaScheduler>,
+        calendar_manager: Option<Arc<dyn CalendarManager>>,
     ) -> Self {
         Self {
             ui_registry,
@@ -113,6 +118,7 @@ impl TuiRenderer {
             initial_calendar_status,
             log_buffer,
             scheduler,
+            calendar_manager,
         }
     }
 
@@ -177,6 +183,9 @@ impl TuiRenderer {
                             }
                             KeyOutcome::SubmitCommand(command) => {
                                 self.submit_command(terminal, state, command).await?;
+                            }
+                            KeyOutcome::OpenCalendarGrid { year, month } => {
+                                self.open_calendar_grid(terminal, state, year, month).await?;
                             }
                             KeyOutcome::Handled | KeyOutcome::Ignored => {}
                         }
@@ -442,6 +451,61 @@ impl TuiRenderer {
                 state.calendar_picker.status = CalendarPickerStatus::Failed(e.to_string());
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Fetches every connected calendar's events for `[year, month)` and
+    /// populates the month grid view (`Ctrl+M`, `step25.md`) — handles both
+    /// the initial open and every subsequent `[`/`]` month change, since
+    /// both need the identical fetch-and-populate sequence.
+    async fn open_calendar_grid(
+        &self,
+        terminal: &mut Terminal<Backend>,
+        state: &mut WorkspaceState,
+        year: i32,
+        month: u32,
+    ) -> Result<()> {
+        self.draw(terminal, state).await?;
+
+        let Some(manager) = &self.calendar_manager else {
+            state.calendar_grid.status =
+                CalendarGridStatus::Failed("Calendar 연동이 설정되지 않았습니다".to_string());
+            return Ok(());
+        };
+
+        let (next_year, next_month) = state::shift_month(year, month, 1);
+        let bounds = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+            .zip(chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1));
+        let Some((start, end)) = bounds else {
+            state.calendar_grid.status =
+                CalendarGridStatus::Failed("잘못된 날짜입니다".to_string());
+            return Ok(());
+        };
+        // UTC month boundaries rather than local-midnight-with-DST-handling
+        // -- a deliberate simplification: this only feeds "which day cell
+        // does an event's dot land in," which is computed correctly in
+        // local time separately (`render::local_day_of`), so being off by
+        // a few hours right at the very edge of the month is an acceptable
+        // trade against the real complexity of ambiguous/nonexistent local
+        // times across a DST transition.
+        let after = start
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 is always a valid time")
+            .and_utc();
+        let before = end
+            .and_hms_opt(0, 0, 0)
+            .expect("00:00:00 is always a valid time")
+            .and_utc();
+
+        match manager.events_in_range(after, before).await {
+            Ok(events) => {
+                state.calendar_grid.events = events;
+                state.calendar_grid.status = CalendarGridStatus::Loaded;
+            }
+            Err(e) => {
+                state.calendar_grid.status = CalendarGridStatus::Failed(e.to_string());
+            }
         }
         Ok(())
     }

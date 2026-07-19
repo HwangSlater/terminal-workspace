@@ -8,7 +8,7 @@ use crate::polling::{next_status, retry_after_seconds, to_event_status, PollResu
 use crate::ConnectionStatus;
 use crate::{IntegrationAdapter, IntegrationConnector, Picker, PickerItem};
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use common::{Result, WorkspaceError};
 use domain::{IntegrationSource, NotificationId, NotificationItem, PriorityLevel};
 use events::{Event, EventBus, IntegrationConnectionStatus};
@@ -296,6 +296,67 @@ impl Picker for CalendarAdapter {
     }
 }
 
+#[async_trait]
+impl crate::CalendarManager for CalendarAdapter {
+    async fn set_lookahead_hours(&self, event_bus: Arc<dyn EventBus>, hours: u64) -> Result<()> {
+        self.config.write().await.lookahead_hours = hours;
+        // The running poller snapshotted the old config at `start()` time
+        // (`step12.md`'s original shape, unchanged by `step24.md`) -- a
+        // restart is the only way a config change reaches it, same
+        // approach `keep_only` already uses.
+        self.shutdown().await?;
+        self.start(event_bus).await
+    }
+
+    async fn rename(&self, id: String, new_label: String) -> Result<()> {
+        let Ok(target) = id.parse::<Uuid>() else {
+            return Err(WorkspaceError::Integration(format!(
+                "'{id}' is not a valid calendar id"
+            )));
+        };
+        let connections = {
+            let mut state = self.state.write().await;
+            let Some(connection) = state.connections.iter_mut().find(|c| c.id == target) else {
+                return Err(WorkspaceError::Integration(
+                    "no connected calendar with that id".into(),
+                ));
+            };
+            connection.label = new_label;
+            state.connections.clone()
+        };
+        // Cosmetic only -- doesn't affect fetching, so no poll restart
+        // needed, just persist the renamed label.
+        self.persist_connections(&connections).await
+    }
+
+    async fn events_in_range(
+        &self,
+        after: DateTime<Utc>,
+        before: DateTime<Utc>,
+    ) -> Result<Vec<NotificationItem>> {
+        let connections = self.state.read().await.connections.clone();
+        let mut items = Vec::new();
+        for connection in &connections {
+            let calendar = match fetch_calendar_feed(&self.http, connection).await {
+                FetchOutcome::Success(cal) => cal,
+                // Best-effort, same "one bad calendar doesn't block the
+                // others" spirit as the poll loop (`step24.md` Decision
+                // 5) -- a grid view with one calendar's worth of gaps is
+                // still useful; an all-or-nothing failure wouldn't be.
+                FetchOutcome::RateLimited(_) | FetchOutcome::Failure => continue,
+            };
+            for event in &calendar.events {
+                if let Ok(occurrences) = expand_occurrences(event, after, before) {
+                    for occurrence in occurrences {
+                        items.push(map_occurrence(event, occurrence, &connection.label));
+                    }
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
 struct CalendarPoller {
     http: reqwest::Client,
     config: CalendarConfig,
@@ -313,57 +374,12 @@ impl CalendarPoller {
         event_bus: &Arc<dyn EventBus>,
         connection: &CalendarConnection,
     ) -> (PollResult, Option<u64>) {
-        let response = match self.http.get(&connection.url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    "Calendar poll failed for '{}': request error: {e}",
-                    connection.label
-                );
-                return (PollResult::Failure, None);
+        let calendar = match fetch_calendar_feed(&self.http, connection).await {
+            FetchOutcome::Success(cal) => cal,
+            FetchOutcome::RateLimited(retry_after) => {
+                return (PollResult::RateLimited, retry_after)
             }
-        };
-
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return (
-                PollResult::RateLimited,
-                retry_after_seconds(response.headers()),
-            );
-        }
-        if !response.status().is_success() {
-            // The single most common real-world cause: the secret iCal URL
-            // is wrong (a stale/revoked link, or the "public" calendar HTML
-            // page URL pasted in by mistake instead of Settings -> "Secret
-            // address in iCal format") -- surfacing the actual status code
-            // is the difference between a user staring at a silently-stuck
-            // "연결 중..." header and being able to self-diagnose via Ctrl+4.
-            tracing::warn!(
-                "Calendar poll failed for '{}': HTTP {} from the configured iCal URL",
-                connection.label,
-                response.status()
-            );
-            return (PollResult::Failure, None);
-        }
-        let body = match response.text().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(
-                    "Calendar poll failed for '{}': reading response body: {e}",
-                    connection.label
-                );
-                return (PollResult::Failure, None);
-            }
-        };
-
-        let calendar = match parse_first_calendar(&body) {
-            Ok(cal) => cal,
-            Err(e) => {
-                tracing::warn!(
-                    "Calendar poll failed for '{}': could not parse iCal feed: {e}",
-                    connection.label
-                );
-                return (PollResult::Failure, None);
-            }
+            FetchOutcome::Failure => return (PollResult::Failure, None),
         };
 
         let now = Utc::now();
@@ -484,6 +500,78 @@ impl CalendarPoller {
                 _ => base_interval,
             };
             tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+/// Outcome of fetching and parsing one calendar's feed -- shared between
+/// [`CalendarPoller::poll_one`] and [`CalendarAdapter::events_in_range`]
+/// (`step25.md`), which both need "get me this connection's `VCALENDAR`"
+/// but differ in what to do with a rate limit (the poller waits and
+/// retries; a one-shot grid-view fetch just gives up on that connection
+/// for this request) and dedup/publish (only the poller's job).
+enum FetchOutcome {
+    Success(ical::parser::ical::component::IcalCalendar),
+    RateLimited(Option<u64>),
+    Failure,
+}
+
+/// `GET`s `connection.url` and parses the returned feed. Every failure
+/// path logs the real reason via `tracing::warn!` (visible in the `Ctrl+4`
+/// log viewer) before returning -- the same diagnostic discipline a live
+/// "stuck on 연결 중..." bug established for the poll loop specifically;
+/// this fetch path serves both callers, so both get it.
+async fn fetch_calendar_feed(
+    http: &reqwest::Client,
+    connection: &CalendarConnection,
+) -> FetchOutcome {
+    let response = match http.get(&connection.url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "Calendar fetch failed for '{}': request error: {e}",
+                connection.label
+            );
+            return FetchOutcome::Failure;
+        }
+    };
+
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return FetchOutcome::RateLimited(retry_after_seconds(response.headers()));
+    }
+    if !response.status().is_success() {
+        // The single most common real-world cause: the secret iCal URL is
+        // wrong (a stale/revoked link, or the "public" calendar HTML page
+        // URL pasted in by mistake instead of Settings -> "Secret address
+        // in iCal format") -- surfacing the actual status code is the
+        // difference between a user staring at a silently-stuck "연결
+        // 중..." header and being able to self-diagnose via Ctrl+4.
+        tracing::warn!(
+            "Calendar fetch failed for '{}': HTTP {} from the configured iCal URL",
+            connection.label,
+            response.status()
+        );
+        return FetchOutcome::Failure;
+    }
+    let body = match response.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                "Calendar fetch failed for '{}': reading response body: {e}",
+                connection.label
+            );
+            return FetchOutcome::Failure;
+        }
+    };
+
+    match parse_first_calendar(&body) {
+        Ok(cal) => FetchOutcome::Success(cal),
+        Err(e) => {
+            tracing::warn!(
+                "Calendar fetch failed for '{}': could not parse iCal feed: {e}",
+                connection.label
+            );
+            FetchOutcome::Failure
         }
     }
 }
@@ -848,6 +936,73 @@ mod tests {
         let (_, saved_json) = last_write.last().unwrap();
         let saved: Vec<CalendarConnection> = serde_json::from_str(saved_json).unwrap();
         assert_eq!(saved.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_lookahead_hours_updates_the_config_and_keeps_polling() {
+        use crate::CalendarManager;
+
+        let (adapter, _writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+        adapter
+            .connect(
+                Arc::clone(&event_bus),
+                connect_token("회사", "https://example.com/work.ics"),
+            )
+            .await
+            .unwrap();
+
+        adapter
+            .set_lookahead_hours(Arc::clone(&event_bus), 48)
+            .await
+            .unwrap();
+
+        assert_eq!(adapter.config.read().await.lookahead_hours, 48);
+        // Restarted, not left disconnected -- a config change shouldn't
+        // silently drop the connection.
+        assert_eq!(
+            adapter.health_check().await.unwrap(),
+            ConnectionStatus::Connecting
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_updates_the_label_and_persists_it() {
+        use crate::CalendarManager;
+
+        let (adapter, writer) = test_adapter();
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+        adapter
+            .connect(
+                Arc::clone(&event_bus),
+                connect_token("오타있는이름", "https://example.com/work.ics"),
+            )
+            .await
+            .unwrap();
+        let id = adapter.list_items().await.unwrap()[0].id.clone();
+
+        adapter
+            .rename(id.clone(), "회사".to_string())
+            .await
+            .unwrap();
+
+        let items = adapter.list_items().await.unwrap();
+        assert_eq!(items[0].label, "회사");
+        let last_write = writer.written.lock().await;
+        let (_, saved_json) = last_write.last().unwrap();
+        let saved: Vec<CalendarConnection> = serde_json::from_str(saved_json).unwrap();
+        assert_eq!(saved[0].label, "회사");
+    }
+
+    #[tokio::test]
+    async fn rename_with_an_unknown_id_is_a_real_error() {
+        use crate::CalendarManager;
+
+        let (adapter, _writer) = test_adapter();
+        let result = adapter
+            .rename(Uuid::new_v4().to_string(), "안될이름".to_string())
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
