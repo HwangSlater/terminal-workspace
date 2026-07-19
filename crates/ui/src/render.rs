@@ -258,6 +258,22 @@ const HELP_CATEGORIES: &[HelpCategory] = &[
                 description: "캘린더 알림이 몇 시간 앞까지 보일지 변경",
             },
             HelpEntry {
+                key: "/slack-watch #채널 [#채널2 ...]",
+                description: "메시지 알림 받을 채널 목록 교체",
+            },
+            HelpEntry {
+                key: "/repo-watch owner/repo [...]",
+                description: "PR 알림 받을 저장소 목록 교체",
+            },
+            HelpEntry {
+                key: "/calendar-rename <기존 이름> <새 이름>",
+                description: "연결된 캘린더 이름 변경",
+            },
+            HelpEntry {
+                key: "/calendar-remove <이름>",
+                description: "연결된 캘린더 제거",
+            },
+            HelpEntry {
                 key: "Tab",
                 description: "명령어/채널 자동완성 (연속 Tab: 다음 후보)",
             },

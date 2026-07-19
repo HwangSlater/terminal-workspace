@@ -3,9 +3,10 @@
 //! diagram, not a new design.
 
 use crate::state::{
-    CalendarGridStatus, CalendarPickerStatus, CalendarRenameState, CalendarSetupField,
-    CalendarSetupStatus, FocusMode, GitHubPickerStatus, GitHubSetupStatus, OverlayKind,
-    SlackPickerState, SlackPickerStatus, SlackSetupStatus, WorkspaceState,
+    CalendarGridStatus, CalendarPickerState, CalendarPickerStatus, CalendarRenameState,
+    CalendarSetupField, CalendarSetupStatus, FocusMode, GitHubPickerState, GitHubPickerStatus,
+    GitHubSetupStatus, OverlayKind, SlackPickerState, SlackPickerStatus, SlackSetupStatus,
+    WorkspaceState,
 };
 use commands::Command;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -16,6 +17,13 @@ use scheduler::{DEFAULT_BREAK_MINUTES, DEFAULT_WORK_MINUTES};
 /// Every recognized command head, in the same order `parse_command`
 /// matches them — the single source of truth `compute_suggestions`
 /// (`step13.md`) filters against, so the two can't drift apart.
+/// `/slack-watch`/`/repo-watch`/`/calendar-rename`/`/calendar-remove`
+/// (`step41.md`) let the channel/repo/calendar picker overlays'
+/// selection-management be driven entirely from the command line — the
+/// one deliberately-excluded category is credential entry (`Ctrl+S`/
+/// `Ctrl+G`/`Ctrl+L`), which stays overlay-only since the command bar's
+/// `history` is plain text and a `/connect ... <token>` command would
+/// put a live secret there (`step41.md`'s Context).
 const COMMAND_HEADS: &[&str] = &[
     "/send",
     "/away",
@@ -25,6 +33,10 @@ const COMMAND_HEADS: &[&str] = &[
     "/lunch",
     "/pomodoro",
     "/calendar-range",
+    "/slack-watch",
+    "/repo-watch",
+    "/calendar-rename",
+    "/calendar-remove",
 ];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
@@ -712,7 +724,7 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
             state.cmd_buffer.autocomplete_suggestions = Vec::new();
             state.cmd_buffer.selected_suggestion_index = None;
 
-            let result = parse_command(&text, &state.slack_picker);
+            let result = parse_command(&text, state);
             state.cmd_buffer.history.push(text);
             match result {
                 Ok(command) => {
@@ -824,8 +836,11 @@ fn compute_suggestions(text: &str, cursor: usize, picker: &SlackPickerState) -> 
 /// dispatched. `Ok(Some(_))`: parsed successfully. `Err(_)`: looked like a
 /// deliberate command attempt (leading `/`) but failed to parse or resolve
 /// — surfaced to the user (`state.cmd_buffer.last_error`) rather than
-/// silently doing nothing, unlike plain chat-style text.
-fn parse_command(text: &str, picker: &SlackPickerState) -> Result<Option<Command>, String> {
+/// silently doing nothing, unlike plain chat-style text. Takes the whole
+/// `WorkspaceState` (not just `slack_picker`, `step41.md`) since the
+/// selection-management commands need to resolve names against the
+/// GitHub/Calendar pickers too.
+fn parse_command(text: &str, state: &WorkspaceState) -> Result<Option<Command>, String> {
     let mut top = text.splitn(2, ' ');
     let head = top.next().unwrap_or("");
     let rest = top.next().unwrap_or("").trim();
@@ -838,7 +853,7 @@ fn parse_command(text: &str, picker: &SlackPickerState) -> Result<Option<Command
             if target.is_empty() || message.is_empty() {
                 return Err("사용법: /send #채널이름 메시지".to_string());
             }
-            let channel_id = resolve_channel_id(target, picker).ok_or_else(|| {
+            let channel_id = resolve_channel_id(target, &state.slack_picker).ok_or_else(|| {
                 format!(
                     "'{target}' 채널을 찾을 수 없습니다 — 먼저 Ctrl+P로 채널 목록을 불러와주세요."
                 )
@@ -855,8 +870,156 @@ fn parse_command(text: &str, picker: &SlackPickerState) -> Result<Option<Command
         "/lunch" => Ok(Some(presence_command(PresenceStatus::Lunch, rest))),
         "/pomodoro" => parse_pomodoro_command(rest),
         "/calendar-range" => parse_calendar_range_command(rest),
+        "/slack-watch" => parse_slack_watch_command(rest, &state.slack_picker),
+        "/repo-watch" => parse_repo_watch_command(rest, &state.github_picker),
+        "/calendar-rename" => parse_calendar_rename_command(rest, &state.calendar_picker),
+        "/calendar-remove" => parse_calendar_remove_command(rest, &state.calendar_picker),
         _ => Ok(None),
     }
+}
+
+/// `/slack-watch #채널 [#채널2 ...]` (`step41.md`) — replaces the full
+/// message-watch channel list in one shot, the command-line equivalent of
+/// checking exactly these channels in `Ctrl+P` and saving. Deliberately
+/// *replaces* rather than *adds to* the list, mirroring the picker
+/// overlay's own "`Enter` submits exactly what's checked" semantics
+/// rather than inventing a second, inconsistent meaning. Preserves
+/// whatever presence watch-list (`watched_user_ids`) the picker already
+/// has selected -- this command only touches channels.
+fn parse_slack_watch_command(
+    rest: &str,
+    picker: &SlackPickerState,
+) -> Result<Option<Command>, String> {
+    let targets: Vec<&str> = rest.split_whitespace().collect();
+    if targets.is_empty() {
+        return Err("사용법: /slack-watch #채널1 [#채널2 ...]".to_string());
+    }
+    let mut channel_ids = Vec::with_capacity(targets.len());
+    for target in targets {
+        let id = resolve_channel_id(target, picker).ok_or_else(|| {
+            format!("'{target}' 채널을 찾을 수 없습니다 — 먼저 Ctrl+P로 채널 목록을 불러와주세요.")
+        })?;
+        channel_ids.push(id);
+    }
+    let watched_user_ids = picker
+        .users
+        .iter()
+        .filter(|u| u.selected)
+        .map(|u| u.id.clone())
+        .collect();
+    Ok(Some(Command::ApplySlackSelection {
+        channel_ids,
+        watched_user_ids,
+    }))
+}
+
+/// Resolves `owner/repo` against the repositories the `Ctrl+R` picker
+/// last fetched, mirroring `resolve_channel_id`'s pattern exactly.
+fn resolve_repo_id(target: &str, picker: &GitHubPickerState) -> Option<String> {
+    picker
+        .repositories
+        .iter()
+        .find(|r| r.label.eq_ignore_ascii_case(target))
+        .map(|r| r.id.clone())
+}
+
+/// `/repo-watch owner/repo [owner/repo2 ...]` (`step41.md`) — the
+/// command-line equivalent of `Ctrl+R`'s picker, same "replaces the full
+/// list" semantics as `/slack-watch`.
+fn parse_repo_watch_command(
+    rest: &str,
+    picker: &GitHubPickerState,
+) -> Result<Option<Command>, String> {
+    let targets: Vec<&str> = rest.split_whitespace().collect();
+    if targets.is_empty() {
+        return Err("사용법: /repo-watch owner/repo [owner/repo2 ...]".to_string());
+    }
+    let mut items = Vec::with_capacity(targets.len());
+    for target in targets {
+        let id = resolve_repo_id(target, picker).ok_or_else(|| {
+            format!(
+                "'{target}' 저장소를 찾을 수 없습니다 — 먼저 Ctrl+R로 저장소 목록을 불러와주세요."
+            )
+        })?;
+        items.push(id);
+    }
+    Ok(Some(Command::ApplySelection {
+        source: IntegrationSource::GitHub,
+        items,
+    }))
+}
+
+/// Splits `rest` into `(matching connection id, remainder after the
+/// label)` by finding the *longest* connected calendar label that
+/// prefix-matches `rest` (case-insensitively) -- calendar labels are
+/// free text and can contain spaces (`"[회사] Design Review"`-style
+/// prefixes, `step24.md`), so a naive "first word is the label" split
+/// would break on any multi-word label. Preferring the longest match
+/// disambiguates the rare case where one label is itself a prefix of
+/// another (e.g. "회사" vs. "회사 (백업)").
+fn split_calendar_label<'a>(
+    rest: &'a str,
+    picker: &CalendarPickerState,
+) -> Option<(String, &'a str)> {
+    picker
+        .calendars
+        .iter()
+        .filter(|c| rest.to_lowercase().starts_with(&c.label.to_lowercase()))
+        .max_by_key(|c| c.label.len())
+        .map(|c| (c.id.clone(), rest[c.label.len()..].trim()))
+}
+
+/// `/calendar-rename <기존 이름> <새 이름>` (`step41.md`) — the
+/// command-line equivalent of `Ctrl+K`'s `e` rename prompt.
+fn parse_calendar_rename_command(
+    rest: &str,
+    picker: &CalendarPickerState,
+) -> Result<Option<Command>, String> {
+    if rest.is_empty() {
+        return Err("사용법: /calendar-rename <기존 이름> <새 이름>".to_string());
+    }
+    let (id, new_label) = split_calendar_label(rest, picker).ok_or_else(|| {
+        format!("'{rest}' 캘린더를 찾을 수 없습니다 — 먼저 Ctrl+K로 목록을 불러와주세요.")
+    })?;
+    if new_label.is_empty() {
+        return Err("사용법: /calendar-rename <기존 이름> <새 이름>".to_string());
+    }
+    Ok(Some(Command::RenameCalendar {
+        id,
+        label: new_label.to_string(),
+    }))
+}
+
+/// `/calendar-remove <이름>` (`step41.md`) — the command-line equivalent
+/// of unchecking a calendar in `Ctrl+K`'s picker and saving. `Command::
+/// ApplySelection` for Calendar is "keep exactly these ids" (`step24.md`),
+/// so this resolves the target then submits every *other* connected
+/// calendar's id.
+fn parse_calendar_remove_command(
+    rest: &str,
+    picker: &CalendarPickerState,
+) -> Result<Option<Command>, String> {
+    let label = rest.trim();
+    if label.is_empty() {
+        return Err("사용법: /calendar-remove <이름>".to_string());
+    }
+    let target = picker
+        .calendars
+        .iter()
+        .find(|c| c.label.eq_ignore_ascii_case(label))
+        .ok_or_else(|| {
+            format!("'{label}' 캘린더를 찾을 수 없습니다 — 먼저 Ctrl+K로 목록을 불러와주세요.")
+        })?;
+    let keep: Vec<String> = picker
+        .calendars
+        .iter()
+        .filter(|c| c.id != target.id)
+        .map(|c| c.id.clone())
+        .collect();
+    Ok(Some(Command::ApplySelection {
+        source: IntegrationSource::Calendar,
+        items: keep,
+    }))
 }
 
 /// `/calendar-range <hours>` (`step25.md`) — how many hours ahead the
@@ -1199,6 +1362,193 @@ mod tests {
 
         assert!(state.cmd_buffer.last_error.is_none());
         assert!(!state.cmd_buffer.autocomplete_suggestions.is_empty());
+    }
+
+    fn state_with_two_channels_one_selected_user() -> WorkspaceState {
+        WorkspaceState {
+            focus_mode: FocusMode::Input,
+            slack_picker: SlackPickerState {
+                channels: vec![
+                    PickerRow {
+                        id: "C1".into(),
+                        label: "general".into(),
+                        selected: false,
+                    },
+                    PickerRow {
+                        id: "C2".into(),
+                        label: "random".into(),
+                        selected: false,
+                    },
+                ],
+                users: vec![PickerRow {
+                    id: "U1".into(),
+                    label: "Alice".into(),
+                    selected: true,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn slack_watch_replaces_the_channel_list_and_preserves_watched_users() {
+        let mut state = state_with_two_channels_one_selected_user();
+        let outcome = type_and_submit(&mut state, "/slack-watch #general #random");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::ApplySlackSelection {
+                channel_ids: vec!["C1".to_string(), "C2".to_string()],
+                watched_user_ids: vec!["U1".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn slack_watch_with_an_unknown_channel_is_a_real_error() {
+        let mut state = state_with_two_channels_one_selected_user();
+        let outcome = type_and_submit(&mut state, "/slack-watch #nope");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn slack_watch_with_no_channels_is_a_usage_error() {
+        let mut state = state_with_two_channels_one_selected_user();
+        let outcome = type_and_submit(&mut state, "/slack-watch");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    fn state_with_two_repos() -> WorkspaceState {
+        WorkspaceState {
+            focus_mode: FocusMode::Input,
+            github_picker: crate::state::GitHubPickerState {
+                repositories: vec![
+                    PickerRow {
+                        id: "owner/repo-one".into(),
+                        label: "owner/repo-one".into(),
+                        selected: false,
+                    },
+                    PickerRow {
+                        id: "owner/repo-two".into(),
+                        label: "owner/repo-two".into(),
+                        selected: false,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn repo_watch_replaces_the_repository_list() {
+        let mut state = state_with_two_repos();
+        let outcome = type_and_submit(&mut state, "/repo-watch owner/repo-one owner/repo-two");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::ApplySelection {
+                source: IntegrationSource::GitHub,
+                items: vec!["owner/repo-one".to_string(), "owner/repo-two".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn repo_watch_with_an_unknown_repo_is_a_real_error() {
+        let mut state = state_with_two_repos();
+        let outcome = type_and_submit(&mut state, "/repo-watch owner/nope");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn repo_watch_with_no_repos_is_a_usage_error() {
+        let mut state = state_with_two_repos();
+        let outcome = type_and_submit(&mut state, "/repo-watch");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    fn state_with_two_calendars() -> WorkspaceState {
+        WorkspaceState {
+            focus_mode: FocusMode::Input,
+            calendar_picker: crate::state::CalendarPickerState {
+                calendars: vec![
+                    PickerRow {
+                        id: "cal-1".into(),
+                        label: "회사".into(),
+                        selected: true,
+                    },
+                    PickerRow {
+                        id: "cal-2".into(),
+                        label: "개인 일정".into(),
+                        selected: true,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn calendar_rename_resolves_a_multi_word_label_and_renames_it() {
+        let mut state = state_with_two_calendars();
+        let outcome = type_and_submit(&mut state, "/calendar-rename 개인 일정 새 이름");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::RenameCalendar {
+                id: "cal-2".to_string(),
+                label: "새 이름".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn calendar_rename_with_an_unknown_label_is_a_real_error() {
+        let mut state = state_with_two_calendars();
+        let outcome = type_and_submit(&mut state, "/calendar-rename 없음 새 이름");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn calendar_rename_with_no_new_label_is_a_usage_error() {
+        let mut state = state_with_two_calendars();
+        let outcome = type_and_submit(&mut state, "/calendar-rename 회사");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn calendar_remove_keeps_every_other_connected_calendar() {
+        let mut state = state_with_two_calendars();
+        let outcome = type_and_submit(&mut state, "/calendar-remove 회사");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::ApplySelection {
+                source: IntegrationSource::Calendar,
+                items: vec!["cal-2".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn calendar_remove_with_an_unknown_label_is_a_real_error() {
+        let mut state = state_with_two_calendars();
+        let outcome = type_and_submit(&mut state, "/calendar-remove 없음");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
+    }
+
+    #[test]
+    fn calendar_remove_with_no_label_is_a_usage_error() {
+        let mut state = state_with_two_calendars();
+        let outcome = type_and_submit(&mut state, "/calendar-remove");
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert!(state.cmd_buffer.last_error.is_some());
     }
 
     #[test]
