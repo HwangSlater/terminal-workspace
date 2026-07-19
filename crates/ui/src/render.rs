@@ -21,8 +21,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const MIN_WIDTH: u16 = 80;
 const MIN_HEIGHT: u16 = 24;
 const SIDEBAR_COLLAPSE_WIDTH: u16 = 120;
-const LEFT_DOCK_WIDTH: u16 = 24;
-const RIGHT_DOCK_WIDTH: u16 = 32;
 
 /// Entry point: draws the whole frame per `state`/`model`, or the
 /// too-small placeholder if the terminal is below `docs/01-product/screen-spec.md`'s
@@ -38,6 +36,8 @@ pub fn render(
     model: &DashboardReadModel,
     log_lines: &[String],
     pomodoro: &PomodoroSnapshot,
+    left_dock_width: u16,
+    right_dock_width: u16,
 ) {
     let area = frame.size();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -81,9 +81,9 @@ pub fn render(
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(LEFT_DOCK_WIDTH),
+                Constraint::Length(left_dock_width),
                 Constraint::Min(0),
-                Constraint::Length(RIGHT_DOCK_WIDTH),
+                Constraint::Length(right_dock_width),
             ])
             .split(rows[1]);
         render_team_panel(frame, body[0], state, model);
@@ -568,7 +568,11 @@ fn local_day_of(timestamp_ms: u64) -> Option<u32> {
 fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
     use chrono::Datelike;
 
-    let popup = centered_rect(70, 80, area);
+    // Enlarged from the original 70x80 (`step25.md`) after live use --
+    // still a floating popup over the dashboard (`step26.md` Decision 1),
+    // just claiming most of the screen instead of leaving a lot of the
+    // underlying dashboard visible around its edges.
+    let popup = centered_rect(92, 90, area);
     frame.render_widget(Clear, popup);
 
     let grid = &state.calendar_grid;
@@ -658,7 +662,7 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     } else {
         let lines: Vec<String> = day_events
             .iter()
-            .map(|i| format!("- {}", i.title))
+            .map(|i| format!("- {} {}", format_occurrence_clock(i.timestamp_ms), i.title))
             .collect();
         format!("{}일:\n{}", grid.cursor_day, lines.join("\n"))
     };
@@ -668,7 +672,7 @@ fn render_calendar_grid_overlay(frame: &mut Frame, area: Rect, state: &Workspace
     );
 
     frame.render_widget(
-        Paragraph::new("h/j/k/l: 날짜 이동  [/]: 이전/다음 달  Esc: 닫기")
+        Paragraph::new("방향키: 날짜 이동  [/]: 이전/다음 달  Esc: 닫기")
             .style(Style::default().fg(Color::DarkGray)),
         layout[4],
     );
@@ -780,11 +784,12 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
 
 /// Hard-wraps `text` to `width` terminal columns, honoring wide (e.g.
 /// Korean) characters via `unicode-width` rather than counting `char`s 1:1
-/// -- the Calendar panel's fixed `RIGHT_DOCK_WIDTH` clips long event titles
-/// with no way to see the rest otherwise. Breaks mid-word rather than at
-/// word boundaries: this panel is narrow enough (32 columns minus borders)
-/// that word-wrapping would frequently orphan a single word onto its own
-/// line for little readability gain, not worth the extra complexity.
+/// -- the Calendar panel's dock width clips long event titles with no way
+/// to see the rest otherwise. Breaks mid-word rather than at word
+/// boundaries: this panel is narrow enough (32 columns by default, minus
+/// borders) that word-wrapping would frequently orphan a single word onto
+/// its own line for little readability gain, not worth the extra
+/// complexity.
 fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -1186,6 +1191,20 @@ fn format_occurrence_time(timestamp_ms: u64) -> String {
     local.format("%-m/%-d %H:%M").to_string()
 }
 
+/// `"14:00"` in local time -- the grid overlay's per-day event list groups
+/// events under an already-visible day heading, so unlike
+/// `format_occurrence_time` the date portion would be redundant.
+fn format_occurrence_clock(timestamp_ms: u64) -> String {
+    let Some(utc) =
+        chrono::DateTime::from_timestamp_millis(i64::try_from(timestamp_ms).unwrap_or(i64::MAX))
+    else {
+        return "?".to_string();
+    };
+    utc.with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string()
+}
+
 /// Full scrollback view of the app's own `tracing` output (`Ctrl+4`,
 /// `step19.md`, superseding `step17.md`'s permanently-visible 1-line
 /// strip) -- a large centered overlay, the most recent lines that fit its
@@ -1369,8 +1388,38 @@ mod tests {
         panic!("'{needle}' not found in rendered buffer");
     }
 
+    /// `step26.md`'s configurable dock widths' pre-`step26.md` defaults --
+    /// what every test that doesn't care about custom widths should keep
+    /// exercising, so this pair stays the single source of truth for
+    /// "the ordinary, unconfigured layout" rather than each test call site
+    /// hardcoding `24`/`32` directly.
+    const DEFAULT_LEFT_DOCK_WIDTH: u16 = 24;
+    const DEFAULT_RIGHT_DOCK_WIDTH: u16 = 32;
+
     fn draw(width: u16, height: u16, state: &WorkspaceState, model: &DashboardReadModel) -> String {
         draw_with_logs(width, height, state, model, &[])
+    }
+
+    /// Like [`draw`], but with custom dock widths (`step26.md`) -- for
+    /// tests specifically about the configurable-layout feature.
+    fn draw_with_dock_widths(
+        width: u16,
+        height: u16,
+        state: &WorkspaceState,
+        model: &DashboardReadModel,
+        left_dock_width: u16,
+        right_dock_width: u16,
+    ) -> String {
+        buffer_text(&draw_terminal(
+            width,
+            height,
+            state,
+            model,
+            &[],
+            &PomodoroSnapshot::default(),
+            left_dock_width,
+            right_dock_width,
+        ))
     }
 
     /// Like [`draw`], but with real log panel content (`step17.md`) --
@@ -1406,7 +1455,14 @@ mod tests {
         pomodoro: &PomodoroSnapshot,
     ) -> String {
         buffer_text(&draw_terminal(
-            width, height, state, model, log_lines, pomodoro,
+            width,
+            height,
+            state,
+            model,
+            log_lines,
+            pomodoro,
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
         ))
     }
 
@@ -1414,6 +1470,7 @@ mod tests {
     /// itself rather than its flattened text -- for tests that need to
     /// inspect cell styles (`fg_color_of`), not just which characters
     /// rendered where (`step19.md`).
+    #[allow(clippy::too_many_arguments)]
     fn draw_terminal(
         width: u16,
         height: u16,
@@ -1421,11 +1478,23 @@ mod tests {
         model: &DashboardReadModel,
         log_lines: &[String],
         pomodoro: &PomodoroSnapshot,
+        left_dock_width: u16,
+        right_dock_width: u16,
     ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, state, model, log_lines, pomodoro))
+            .draw(|frame| {
+                render(
+                    frame,
+                    state,
+                    model,
+                    log_lines,
+                    pomodoro,
+                    left_dock_width,
+                    right_dock_width,
+                )
+            })
             .unwrap();
         terminal
     }
@@ -1810,6 +1879,8 @@ mod tests {
             &DashboardReadModel::default(),
             &log_lines,
             &PomodoroSnapshot::default(),
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
         );
         let info_color = fg_color_of(&terminal, "routine");
         let error_color = fg_color_of(&terminal, "something");
@@ -1833,6 +1904,79 @@ mod tests {
             );
             assert!(!text.trim().is_empty(), "blank frame at {width}x{height}");
         }
+    }
+
+    /// Real regression guard for `step26.md`'s configurable dock widths --
+    /// proves a custom width actually reaches the rendered buffer's column
+    /// boundaries, not just that `render()` accepts the parameters without
+    /// panicking. Checks exact cell positions (not text search) since the
+    /// thing under test *is* where a column boundary lands.
+    #[test]
+    fn configured_dock_widths_change_where_the_body_panels_split() {
+        let (left_dock_width, right_dock_width) = (15u16, 50u16);
+        let total_width = 140;
+        let terminal = draw_terminal(
+            total_width,
+            30,
+            &WorkspaceState::default(),
+            &DashboardReadModel::default(),
+            &[],
+            &PomodoroSnapshot::default(),
+            left_dock_width,
+            right_dock_width,
+        );
+        let buffer = terminal.backend().buffer();
+        // Header is `Constraint::Length(3)`, so the body's top border row
+        // (shared by all three panels) is row 3.
+        let body_top_row = 3;
+        let notification_corner = buffer.get(left_dock_width, body_top_row).symbol();
+        assert_eq!(
+            notification_corner, "┌",
+            "expected the Notification panel to start exactly at the configured \
+             left_dock_width ({left_dock_width}), found {notification_corner:?}"
+        );
+        let calendar_x = total_width - right_dock_width;
+        let calendar_corner = buffer.get(calendar_x, body_top_row).symbol();
+        assert_eq!(
+            calendar_corner, "┌",
+            "expected the Calendar panel to start exactly at \
+             total_width - right_dock_width ({calendar_x}), found {calendar_corner:?}"
+        );
+    }
+
+    /// A wider configured Calendar dock should mean less wrapping
+    /// (`wrap_to_width`'s regression fix from earlier this phase) -- ties
+    /// the two `step26.md`-adjacent fixes together: a title that needs two
+    /// lines at the default 32-column dock should fit on one at 60.
+    #[test]
+    fn a_wider_right_dock_width_wraps_long_titles_less() {
+        let title = "이것은 서른 칸보다 길고 예순 칸보다 짧음";
+        let model = DashboardReadModel {
+            unread_notifications: vec![sample_notification_for(IntegrationSource::Calendar, title)],
+            ..Default::default()
+        };
+        let narrow = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 24, 32);
+        let wide = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 10, 60);
+        // Scoped to the Calendar panel specifically via the time-prefixed
+        // compound needle (same reasoning as
+        // `calendar_panel_sorts_reminders_soonest_first`): the bare title
+        // alone also renders in the wider Notification panel, which never
+        // wraps at this length regardless of the Calendar dock's
+        // configured width, so it isn't a useful signal on its own.
+        let calendar_needle = format!("{}  {title}", format_occurrence_time(0));
+        // At the default 32-column dock this title wraps, splitting the
+        // tail onto a later row behind another panel's border character
+        // (the same `TestBackend` flattening quirk documented on the
+        // clipping-regression test above) -- so it does *not* appear
+        // contiguously. At 60 columns it fits on one line and does.
+        assert!(
+            !contains_ignoring_whitespace(&narrow, &calendar_needle),
+            "expected the title to still be wrapped (not contiguous) at the default width:\n{narrow}"
+        );
+        assert!(
+            contains_ignoring_whitespace(&wide, &calendar_needle),
+            "expected the title to fit on one line at the wider configured width:\n{wide}"
+        );
     }
 
     #[test]
@@ -1879,6 +2023,8 @@ mod tests {
             &model,
             &[],
             &PomodoroSnapshot::default(),
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
         );
         assert_eq!(fg_color_of(&terminal, "활동중"), Color::Green);
         assert_eq!(fg_color_of(&terminal, "오프라인"), Color::DarkGray);
@@ -1906,6 +2052,8 @@ mod tests {
             &model,
             &[],
             &PomodoroSnapshot::default(),
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
         );
         let high_color = fg_color_of(&terminal, "urgent");
         let low_color = fg_color_of(&terminal, "fyi");

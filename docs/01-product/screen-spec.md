@@ -7,8 +7,8 @@ This document defines the layout grids, ASCII mockups, and layout slots for the 
 ---
 
 ## 1. Docking Slot Layout Rules
-- **Left Dock**: Reserved for navigation/directories/presence trees. Fixed width (default: 24 columns).
-- **Right Dock**: Reserved for contextual information (Calendar monthly view, PR details). Fixed width (default: 32 columns).
+- **Left Dock**: Reserved for navigation/directories/presence trees. Width configurable via `config.toml`'s `[layout].left_dock_width` (default: 24 columns), read once at startup — see `docs/05-operations/configuration.md` §1, `step26.md`. Must be 10-60, and `left_dock_width + right_dock_width` must not exceed 60 (`crates/config`'s `AppConfig::validate()`).
+- **Right Dock**: Reserved for contextual information (Calendar monthly view, PR details). Width configurable via `[layout].right_dock_width` (default: 32 columns), same validation and startup-only scope as the Left Dock.
 - **Center Dock**: Fluid width container. Multi-pane layouts (split horizontally or vertically) displaying active content.
 - **Bottom Dock**: Fluid width container for logs, shells, and persistent inputs. **Amended `step19.md`**: the real implementation does not render this as a permanently-visible screen row at all — a 1-content-row strip (`step17.md`'s original shape) never showed enough of the log buffer to be useful. `Ctrl+4` instead opens a large on-demand overlay (`registry::UiDockSlot::Bottom` still exists as a type, but is no longer part of the visible dock layout or the `Tab`/`Shift+Tab` focus cycle).
 

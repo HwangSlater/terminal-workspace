@@ -19,6 +19,9 @@ pub struct AppConfig {
     /// `step14.md`).
     #[serde(default)]
     pub plugins: PluginsSettings,
+    /// Dashboard dock widths (`step26.md`).
+    #[serde(default)]
+    pub layout: LayoutSettings,
 }
 
 /// Core runtime configuration fields.
@@ -198,6 +201,41 @@ fn default_plugins_directory() -> PathBuf {
         .join("plugins")
 }
 
+/// `[layout]` settings (`step26.md`) — the main dashboard's Team (left)
+/// and Calendar (right) dock widths. The Center pane is always fluid, so
+/// it isn't a field here; it simply gets whatever's left.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutSettings {
+    /// Team dock width, in terminal columns.
+    #[serde(default = "default_left_dock_width")]
+    pub left_dock_width: u16,
+    /// Calendar dock width, in terminal columns.
+    #[serde(default = "default_right_dock_width")]
+    pub right_dock_width: u16,
+}
+
+impl Default for LayoutSettings {
+    fn default() -> Self {
+        Self {
+            left_dock_width: default_left_dock_width(),
+            right_dock_width: default_right_dock_width(),
+        }
+    }
+}
+
+/// Matches `crates/ui/src/render.rs`'s pre-`step26.md` `LEFT_DOCK_WIDTH`
+/// constant -- an existing `config.toml` with no `[layout]` table renders
+/// identically to before this phase.
+fn default_left_dock_width() -> u16 {
+    24
+}
+
+/// Matches `crates/ui/src/render.rs`'s pre-`step26.md` `RIGHT_DOCK_WIDTH`
+/// constant, same reasoning as `default_left_dock_width`.
+fn default_right_dock_width() -> u16 {
+    32
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -225,6 +263,7 @@ impl Default for AppConfig {
                 },
             },
             plugins: PluginsSettings::default(),
+            layout: LayoutSettings::default(),
         }
     }
 }
@@ -276,6 +315,27 @@ impl AppConfig {
         if self.core.refresh_rate_ms < 16 {
             return Err(WorkspaceError::Configuration(
                 "refresh_rate_ms cannot be below 16ms (60 FPS max)".into(),
+            ));
+        }
+        let left_dock_width = self.layout.left_dock_width;
+        let right_dock_width = self.layout.right_dock_width;
+        if !(10..=60).contains(&left_dock_width) {
+            return Err(WorkspaceError::Configuration(
+                "layout.left_dock_width must be between 10 and 60 columns".into(),
+            ));
+        }
+        if !(10..=60).contains(&right_dock_width) {
+            return Err(WorkspaceError::Configuration(
+                "layout.right_dock_width must be between 10 and 60 columns".into(),
+            ));
+        }
+        // `screen-spec.md`'s minimum supported terminal is 80 columns wide
+        // -- this bound leaves the fluid Center pane at least 20 of those,
+        // rather than letting two large docks squeeze it to near-nothing.
+        if left_dock_width + right_dock_width > 60 {
+            return Err(WorkspaceError::Configuration(
+                "layout.left_dock_width + layout.right_dock_width must not exceed 60 columns"
+                    .into(),
             ));
         }
         Ok(())
@@ -730,6 +790,83 @@ mod tests {
         assert!(config.integrations.calendar.enabled);
         assert_eq!(config.integrations.calendar.sync_interval_secs, 600);
         assert_eq!(config.integrations.calendar.lookahead_hours, 48);
+    }
+
+    #[test]
+    fn parses_real_layout_config() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [layout]
+            left_dock_width = 20
+            right_dock_width = 40
+        "#;
+        let config = AppConfig::parse(toml).expect("valid layout config must parse");
+        assert_eq!(config.layout.left_dock_width, 20);
+        assert_eq!(config.layout.right_dock_width, 40);
+    }
+
+    #[test]
+    fn a_pre_step26_config_toml_without_a_layout_table_still_parses() {
+        let old_toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+        "#;
+        let config =
+            AppConfig::parse(old_toml).expect("a pre-step26 config.toml must not crash startup");
+        assert_eq!(config.layout.left_dock_width, 24);
+        assert_eq!(config.layout.right_dock_width, 32);
+    }
+
+    #[test]
+    fn validate_rejects_a_left_dock_width_below_the_10_column_floor() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [layout]
+            left_dock_width = 5
+        "#;
+        assert!(AppConfig::parse(toml).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_a_right_dock_width_above_the_60_column_ceiling() {
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [layout]
+            right_dock_width = 61
+        "#;
+        assert!(AppConfig::parse(toml).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_dock_widths_that_would_leave_the_center_pane_too_narrow() {
+        // Each is individually in-bounds (10..=60), but their sum leaves
+        // less than 20 columns of Center pane on an 80-column minimum
+        // terminal (`screen-spec.md`'s `MIN_WIDTH`).
+        let toml = r#"
+            [core]
+            theme = "default-dark"
+            refresh_rate_ms = 100
+            log_level = "info"
+
+            [layout]
+            left_dock_width = 35
+            right_dock_width = 30
+        "#;
+        assert!(AppConfig::parse(toml).is_err());
     }
 
     #[test]

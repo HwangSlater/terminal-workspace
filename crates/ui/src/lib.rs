@@ -86,6 +86,13 @@ pub struct TuiRenderer {
     /// `None` when no Calendar adapter was constructed at all, same
     /// reasoning `slack_messenger`-style `Option` fields use elsewhere.
     calendar_manager: Option<Arc<dyn CalendarManager>>,
+    /// Team dock width (`[layout]` in `config.toml`, `step26.md`) --
+    /// resolved once in `crates/app/src/main.rs` from `AppConfig`, not a
+    /// raw config struct, matching every other already-resolved value this
+    /// struct holds (e.g. `initial_slack_status`).
+    left_dock_width: u16,
+    /// Calendar dock width, same sourcing as `left_dock_width`.
+    right_dock_width: u16,
 }
 
 impl TuiRenderer {
@@ -105,6 +112,8 @@ impl TuiRenderer {
         log_buffer: Arc<LogBuffer>,
         scheduler: Arc<AgendaScheduler>,
         calendar_manager: Option<Arc<dyn CalendarManager>>,
+        left_dock_width: u16,
+        right_dock_width: u16,
     ) -> Self {
         Self {
             ui_registry,
@@ -119,6 +128,8 @@ impl TuiRenderer {
             log_buffer,
             scheduler,
             calendar_manager,
+            left_dock_width,
+            right_dock_width,
         }
     }
 
@@ -575,7 +586,17 @@ impl TuiRenderer {
         )
         .map_err(io_err)?;
         terminal
-            .draw(|frame| render::render(frame, state, &model, &log_lines, &pomodoro))
+            .draw(|frame| {
+                render::render(
+                    frame,
+                    state,
+                    &model,
+                    &log_lines,
+                    &pomodoro,
+                    self.left_dock_width,
+                    self.right_dock_width,
+                )
+            })
             .map_err(io_err)?;
         Ok(())
     }

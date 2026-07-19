@@ -2,7 +2,7 @@
 
 The Terminal Workspace is configured via a single **TOML** file (`config.toml`) situated in the user's standard configuration directory. TOML was selected for its clean syntax, strong typing support, and seamless integration with Rust's `serde` framework.
 
-> **Implementation Status (Phase 2, amended Phase 6/10/12/14)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), a real nested `[integrations.github]` section (`enabled`, `sync_interval_secs`, `repositories` — see `docs/04-extensions/integrations/github.md`, Phase 10, replacing the flat `github_enabled` toggle from Phase 6-9), a real nested `[integrations.calendar]` section (`enabled`, `sync_interval_secs`, `lookahead_hours` — see `docs/04-extensions/integrations/calendar.md`, Phase 12; no `calendar_ids` list, since the secret-URL auth model only supports one calendar per connection — the aspirational multi-id sketch below was written before that constraint was known), and a real top-level `[plugins]` table (`enabled`, `directory`, `allowed_list` — see `docs/04-extensions/plugin-lifecycle.md`, Phase 14/`step14.md`/ADR-0017; `directory`'s default is resolved at runtime from the host's home directory, not the literal `~` shown in §1's aspirational sketch, since no Rust path API expands `~` on its own). Each was a breaking change to the on-disk schema — acceptable pre-v1.0 with no public users yet (`step6.md`, `step10.md`, `step12.md`, `step14.md`); a user with an old `config.toml` gets defaults for the new fields (parses without crashing, per each phase's `#[serde(default)]` lesson) rather than the old flat value carrying over. The richer schema shown in §1 beyond Slack/GitHub/Calendar/Plugins (`[keybindings]`, etc.) remains the target shape for later phases, not built yet.
+> **Implementation Status (Phase 2, amended Phase 6/10/12/14/26)**: `crates/config` implements `[core]`, a real nested `[integrations.slack]` section (`enabled`, `sync_interval_secs`, `channel_ids`, `watched_user_ids` — see `docs/04-extensions/integrations/slack.md`), a real nested `[integrations.github]` section (`enabled`, `sync_interval_secs`, `repositories` — see `docs/04-extensions/integrations/github.md`, Phase 10, replacing the flat `github_enabled` toggle from Phase 6-9), a real nested `[integrations.calendar]` section (`enabled`, `sync_interval_secs`, `lookahead_hours` — see `docs/04-extensions/integrations/calendar.md`, Phase 12; no `calendar_ids` list, since the secret-URL auth model only supports one calendar per connection — the aspirational multi-id sketch below was written before that constraint was known), a real top-level `[plugins]` table (`enabled`, `directory`, `allowed_list` — see `docs/04-extensions/plugin-lifecycle.md`, Phase 14/`step14.md`/ADR-0017; `directory`'s default is resolved at runtime from the host's home directory, not the literal `~` shown in §1's aspirational sketch, since no Rust path API expands `~` on its own), and a real top-level `[layout]` table (`left_dock_width`, `right_dock_width` — see `docs/01-product/screen-spec.md` §1, `step26.md`; read once at startup, no live in-app resize). Each was a breaking change to the on-disk schema — acceptable pre-v1.0 with no public users yet (`step6.md`, `step10.md`, `step12.md`, `step14.md`, `step26.md`); a user with an old `config.toml` gets defaults for the new fields (parses without crashing, per each phase's `#[serde(default)]` lesson) rather than the old flat value carrying over. The richer schema shown in §1 beyond Slack/GitHub/Calendar/Plugins/Layout (`[keybindings]`, etc.) remains the target shape for later phases, not built yet.
 
 ---
 
@@ -51,6 +51,15 @@ allowed_list = [
     "todo-tracker",
     "pomodoro-timer"
 ]
+
+# Dashboard dock widths (Phase 26) -- Team (left) and Calendar (right)
+# panel widths, in terminal columns. Center is always fluid. Read once at
+# startup; each must be 10-60, and their sum must not exceed 60 (leaves the
+# Center pane at least 20 columns on the 80-column minimum terminal). See
+# docs/01-product/screen-spec.md §1.
+[layout]
+left_dock_width = 24
+right_dock_width = 32
 
 # Custom Keybindings mapping overrides
 [keybindings]
