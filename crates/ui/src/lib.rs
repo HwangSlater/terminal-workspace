@@ -291,7 +291,7 @@ impl TuiRenderer {
             // filter render.rs uses so the two can't drift apart.
             registry::UiDockSlot::Right => render::calendar_notifications(&model).len(),
             // Unreachable in practice: Bottom never enters `focused_dock`
-            // (dropped from `DOCK_CYCLE` since step19.md, `Ctrl+4` opens
+            // (dropped from `DOCK_CYCLE` since step19.md, `Ctrl+c` opens
             // the Log Viewer overlay directly instead of focusing a dock),
             // and Left (Team) moved into the header in step32.md and is no
             // longer a focus-navigable body dock at all. Both arms kept

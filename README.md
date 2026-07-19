@@ -54,9 +54,8 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 
 | 키 | 동작 |
 | :--- | :--- |
-| `Tab` / `Shift+Tab` | 패널 포커스를 순서대로 이동 (알림 → 캘린더) |
-| `Ctrl+2` / `Ctrl+3` | 알림 / 캘린더 패널로 바로 이동 |
-| `Ctrl+4` | 로그 보기 오버레이 열기 |
+| `Tab` / `Shift+Tab` | 패널 포커스를 순서대로 이동 (알림 ↔ 캘린더, 패널이 둘뿐이라 이거면 충분합니다) |
+| `Ctrl+C` | 로그 보기 오버레이 열기 |
 | `↑`/`↓` | 포커스된 패널 안에서 위아래로 선택 이동 |
 | `Enter` | 선택한 알림/일정을 읽음 처리 |
 | `:` | 명령줄 입력 모드로 전환 |
@@ -66,6 +65,8 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 | `Ctrl+G` / `Ctrl+R` | GitHub 연결 설정 / 저장소 선택 |
 | `Ctrl+L` / `Ctrl+K` | Calendar 추가 / 연결된 캘린더 관리·제거 |
 | `Ctrl+Q` | 종료 |
+
+`Ctrl+C`가 로그를 여는 게 낯설 수 있는데, 이 앱은 터미널을 raw mode로 실행하기 때문에 `Ctrl+C`가 평소처럼 프로세스를 강제 종료하는 시그널로 전달되지 않습니다 — 종료는 항상 `Ctrl+Q`입니다.
 
 ### Slack
 
@@ -102,7 +103,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 
 ### 로그 보기
 
-`Ctrl+4`로 앱의 로그 기록(최근 200줄, 비밀값 자동 마스킹)을 오버레이로 확인할 수 있습니다. `ERROR`/`WARN` 줄은 색으로 구분됩니다. 같은 내용이 날짜별로 로테이션되는 파일(`app.log.<날짜>`, Windows는 `%LOCALAPPDATA%\terminal-workspace\logs`, macOS/Linux는 `~/.local/share/terminal-workspace/logs`)에도 남아서, 앱이 예기치 않게 종료돼 화면상의 기록이 사라진 뒤에도 원인을 확인할 수 있습니다.
+`Ctrl+C`로 앱의 로그 기록(최근 200줄, 비밀값 자동 마스킹)을 오버레이로 확인할 수 있습니다. `ERROR`/`WARN` 줄은 색으로 구분됩니다. 같은 내용이 날짜별로 로테이션되는 파일(`app.log.<날짜>`, Windows는 `%LOCALAPPDATA%\terminal-workspace\logs`, macOS/Linux는 `~/.local/share/terminal-workspace/logs`)에도 남아서, 앱이 예기치 않게 종료돼 화면상의 기록이 사라진 뒤에도 원인을 확인할 수 있습니다.
 
 ### 알림을 놓치지 않으려면
 

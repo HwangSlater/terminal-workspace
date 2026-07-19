@@ -59,8 +59,8 @@ pub enum OverlayKind {
     /// `lookahead_hours` window entirely (a whole month's events has
     /// nothing to do with what the near-term reminder mechanism surfaces).
     CalendarGrid,
-    /// Full scrollback view of the app's own log buffer (`Ctrl+4`,
-    /// `step19.md`) — opened directly, the same way `Ctrl+S`/`Ctrl+G`/
+    /// Full scrollback view of the app's own log buffer (`Ctrl+c`,
+    /// `step19.md`, `step38.md`) — opened directly, the same way `Ctrl+S`/`Ctrl+G`/
     /// `Ctrl+L` open their setup overlays, rather than a "focus a dock,
     /// then Enter" two-step. Replaced a permanently-visible 1-line-tall
     /// bottom dock row that never showed enough to be useful.

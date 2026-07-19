@@ -533,7 +533,7 @@ enum FetchOutcome {
 }
 
 /// `GET`s `connection.url` and parses the returned feed. Every failure
-/// path logs the real reason via `tracing::warn!` (visible in the `Ctrl+4`
+/// path logs the real reason via `tracing::warn!` (visible in the `Ctrl+c`
 /// log viewer) before returning -- the same diagnostic discipline a live
 /// "stuck on 연결 중..." bug established for the poll loop specifically;
 /// this fetch path serves both callers, so both get it.
@@ -561,7 +561,7 @@ async fn fetch_calendar_feed(
         // URL pasted in by mistake instead of Settings -> "Secret address
         // in iCal format") -- surfacing the actual status code is the
         // difference between a user staring at a silently-stuck "연결
-        // 중..." header and being able to self-diagnose via Ctrl+4.
+        // 중..." header and being able to self-diagnose via Ctrl+c.
         tracing::warn!(
             "Calendar fetch failed for '{}': HTTP {} from the configured iCal URL",
             connection.label,

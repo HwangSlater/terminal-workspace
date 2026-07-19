@@ -26,7 +26,7 @@ const SIDEBAR_COLLAPSE_WIDTH: u16 = 120;
 
 /// Entry point: draws the whole frame per `state`/`model`, or the
 /// too-small placeholder if the terminal is below `docs/01-product/screen-spec.md`'s
-/// minimum grid size. `log_lines` backs the Log Viewer overlay (`Ctrl+4`,
+/// minimum grid size. `log_lines` backs the Log Viewer overlay (`Ctrl+c`,
 /// `step19.md`) -- the most recent buffered lines, oldest first. There is
 /// no permanently-visible log dock anymore (`step17.md`'s 1-content-row
 /// bottom strip never showed enough to be useful); the body panels get
@@ -62,12 +62,12 @@ pub fn render(
     if collapse_sidebars {
         // Below the width where both body panels fit side by side, only
         // one is shown at a time -- which one follows `focused_dock`
-        // (already what `Tab`/`Shift+Tab`/`Ctrl+2~3` move).
+        // (already what `Tab`/`Shift+Tab` move).
         match state.focused_dock {
             UiDockSlot::Right => render_calendar_panel(frame, rows[1], state, model),
             // Left (Team) is no longer a body dock at all (step32.md --
             // it moved into the header); Bottom is unreachable in
-            // practice since step19.md (Log is a Ctrl+4 overlay, not a
+            // practice since step19.md (Log is a Ctrl+c overlay, not a
             // focusable dock). Both fall back to Notification, same as
             // Center itself.
             UiDockSlot::Left | UiDockSlot::Center | UiDockSlot::Bottom => {
@@ -157,15 +157,7 @@ const HELP_CATEGORIES: &[HelpCategory] = &[
         entries: &[
             HelpEntry {
                 key: "Tab / Shift+Tab",
-                description: "패널 포커스 순환",
-            },
-            HelpEntry {
-                key: "Ctrl+2~3",
-                description: "패널로 바로 이동 (알림/캘린더)",
-            },
-            HelpEntry {
-                key: "Ctrl+4",
-                description: "로그 보기 (최근 기록 전체, 오버레이)",
+                description: "패널 포커스 순환 (알림 ↔ 캘린더)",
             },
             HelpEntry {
                 key: "↑/↓",
@@ -227,6 +219,10 @@ const HELP_CATEGORIES: &[HelpCategory] = &[
         section: HelpSection::Shortcuts,
         title: "기타",
         entries: &[
+            HelpEntry {
+                key: "Ctrl+C",
+                description: "로그 보기 (최근 기록 전체, 오버레이)",
+            },
             HelpEntry {
                 key: "Esc",
                 description: "닫기 / Normal 모드로 복귀",
@@ -1529,7 +1525,7 @@ fn format_occurrence_clock(timestamp_ms: u64) -> String {
         .to_string()
 }
 
-/// Full scrollback view of the app's own `tracing` output (`Ctrl+4`,
+/// Full scrollback view of the app's own `tracing` output (`Ctrl+c`,
 /// `step19.md`, superseding `step17.md`'s permanently-visible 1-line
 /// strip) -- a large centered overlay, the most recent lines that fit its
 /// height, oldest at the top like a scrolling `tail -f`. Not scrollable yet
@@ -1608,10 +1604,8 @@ fn render_command_bar(frame: &mut Frame, area: Rect, state: &WorkspaceState) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(
-        "Tab:다음 패널  Ctrl+2~3:포커스 이동  Ctrl+4:로그 보기  ::명령줄  ?:도움말  Ctrl+Q:종료",
-    )
-    .style(Style::default().fg(theme::MUTED));
+    let footer = Paragraph::new("Tab:다음 패널  Ctrl+C:로그 보기  ::명령줄  ?:도움말  Ctrl+Q:종료")
+        .style(Style::default().fg(theme::MUTED));
     frame.render_widget(footer, area);
 }
 
@@ -1848,7 +1842,7 @@ mod tests {
     fn collapsed_panel_follows_focused_dock_instead_of_always_showing_notifications() {
         // Calendar was previously unreachable at all below 120 columns --
         // this is the actual bug fix, not just a rename of the test above.
-        // Tab/Shift+Tab/Ctrl+2~3 already move `focused_dock`; the collapsed
+        // Tab/Shift+Tab already move `focused_dock`; the collapsed
         // body now honors it instead of ignoring it. (Team has no
         // collapsed-body equivalent to test since `step32.md` -- it moved
         // into the header, which renders at every terminal width the same
@@ -1880,7 +1874,7 @@ mod tests {
     #[test]
     fn collapsed_bottom_focus_falls_back_to_notification_panel() {
         // Unreachable via real keyboard input since step19.md (Bottom
-        // dropped out of DOCK_CYCLE, Ctrl+4 opens the Log Viewer overlay
+        // dropped out of DOCK_CYCLE, Ctrl+c opens the Log Viewer overlay
         // directly) -- this proves the defensive fallback still holds if
         // `focused_dock` is ever `Bottom` regardless.
         let state = WorkspaceState {
@@ -2087,7 +2081,7 @@ mod tests {
     }
 
     /// Real content only ever shows inside the Log Viewer overlay
-    /// (`Ctrl+4`, `step19.md`) now -- there's no permanently-visible log
+    /// (`Ctrl+c`, `step19.md`) now -- there's no permanently-visible log
     /// dock anymore. This is the actual regression this redesign must
     /// guard against: the old placeholder text must NOT leak into a
     /// perfectly ordinary Normal-mode frame.
@@ -2487,9 +2481,11 @@ mod tests {
     }
 
     // "도움말" alone isn't a safe marker — the header/footer show "도움말"
-    // hints in every mode. "패널로 바로 이동" only appears inside the
-    // overlay body.
-    const OVERLAY_ONLY_TEXT: &str = "패널로 바로 이동";
+    // hints in every mode. "읽음 처리" (Enter's help-overlay description,
+    // `step36.md`) only appears inside the overlay body -- "패널로 바로
+    // 이동" was the previous marker but stopped existing anywhere once
+    // `step38.md` removed the Ctrl+2/Ctrl+3 entry it described.
+    const OVERLAY_ONLY_TEXT: &str = "읽음 처리";
 
     #[test]
     fn overlay_mode_renders_help_popup() {
@@ -2598,7 +2594,7 @@ mod tests {
         };
         let text = draw(140, 55, &state, &DashboardReadModel::default());
         assert!(contains_ignoring_whitespace(&text, "/pomodoro"));
-        assert!(contains_ignoring_whitespace(&text, "Ctrl+4"));
+        assert!(contains_ignoring_whitespace(&text, "Ctrl+C"));
     }
 
     #[test]

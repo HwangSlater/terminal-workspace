@@ -248,23 +248,22 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             Some(KeyOutcome::Handled)
         }
         // `Ctrl+1`/`t` used to focus Team; removed rather than renumbered
-        // in `step32.md` -- Team is no longer a focus-navigable body dock,
-        // and `Ctrl+2`/`Ctrl+3` keep their existing meanings so muscle
-        // memory for those two survives.
-        (KeyCode::Char('2' | 'n'), m) if m.contains(KeyModifiers::CONTROL) => {
-            set_focused_dock(state, UiDockSlot::Center);
-            Some(KeyOutcome::Handled)
-        }
-        (KeyCode::Char('3' | 'd'), m) if m.contains(KeyModifiers::CONTROL) => {
-            set_focused_dock(state, UiDockSlot::Right);
-            Some(KeyOutcome::Handled)
-        }
-        // Opens the Log Viewer overlay directly (`step19.md`) -- unlike
-        // Ctrl+1~3, this isn't a "focus a dock" shortcut anymore. The
-        // Bottom dock's persistent 1-line strip showed too little to be
-        // useful; a full scrollback overlay (mirroring Ctrl+S/Ctrl+G/
-        // Ctrl+L's "open directly" pattern) replaced it.
-        (KeyCode::Char('4' | 'c'), m) if m.contains(KeyModifiers::CONTROL) => {
+        // in `step32.md` -- Team is no longer a focus-navigable body dock.
+        // `Ctrl+2`/`n` and `Ctrl+3`/`d` (direct-jump to Notification/
+        // Calendar) were removed the same way in `step38.md`, requested
+        // directly -- with only two real body docks left after
+        // `step32.md`, `Tab`/`Shift+Tab` alone is enough to reach either
+        // one in at most one keystroke; a dedicated numeric shortcut per
+        // dock stopped earning its keep once cycling and jumping became
+        // (at most) the same cost.
+        //
+        // Opens the Log Viewer overlay directly (`step19.md`) -- an
+        // "open an overlay directly" shortcut, the same category as
+        // Ctrl+S/Ctrl+G/Ctrl+L, never a "focus a dock" one. The numeric
+        // `Ctrl+4` alias this used to also accept was dropped in
+        // `step38.md` for the same reason as Ctrl+2/Ctrl+3 above --
+        // `Ctrl+c` ("log Console") already covered the same action.
+        (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::LogViewer;
             Some(KeyOutcome::Handled)
@@ -994,16 +993,27 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_4_opens_the_log_viewer_overlay_directly_without_touching_focused_dock() {
-        // Not a "focus a dock" shortcut like Ctrl+2/Ctrl+3 -- step19.md
-        // replaced the old "focus Bottom dock" behavior with opening the
-        // overlay straight away, so `focused_dock` must be untouched.
+    fn ctrl_c_opens_the_log_viewer_overlay_directly_without_touching_focused_dock() {
+        // Not a "focus a dock" shortcut -- step19.md replaced the old
+        // "focus Bottom dock" behavior with opening the overlay straight
+        // away, so `focused_dock` must be untouched.
         let mut state = WorkspaceState::default();
-        let outcome = handle_key(&mut state, key(KeyCode::Char('4'), KeyModifiers::CONTROL));
+        let outcome = handle_key(&mut state, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(outcome, KeyOutcome::Handled);
         assert_eq!(state.focus_mode, FocusMode::Overlay);
         assert_eq!(state.active_overlay, OverlayKind::LogViewer);
         assert_eq!(state.focused_dock, UiDockSlot::Center);
+    }
+
+    #[test]
+    fn ctrl_4_no_longer_opens_the_log_viewer() {
+        // `step38.md`: the numeric alias was dropped -- only Ctrl+c
+        // (`c` for log Console) opens the Log Viewer now.
+        let mut state = WorkspaceState::default();
+        let outcome = handle_key(&mut state, key(KeyCode::Char('4'), KeyModifiers::CONTROL));
+        assert_eq!(outcome, KeyOutcome::Ignored);
+        assert_eq!(state.focus_mode, FocusMode::Normal);
+        assert_ne!(state.active_overlay, OverlayKind::LogViewer);
     }
 
     #[test]
@@ -1019,6 +1029,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_2_and_ctrl_3_no_longer_focus_a_dock_directly() {
+        // `step38.md`, requested directly: with only two real body docks
+        // left after `step32.md`, Tab/Shift+Tab alone reaches either one
+        // in at most one keystroke, so the dedicated direct-jump
+        // shortcuts (and their `n`/`d` letter aliases) were removed
+        // rather than kept as a redundant second way to do the same
+        // thing `tab_cycles_focus_through_both_docks_and_wraps` already
+        // covers.
+        let mut state = WorkspaceState::default();
+        let before = state.focused_dock;
+        for c in ['2', '3', 'n', 'd'] {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::CONTROL));
+            assert_eq!(state.focused_dock, before);
+        }
+    }
+
+    #[test]
     fn esc_closes_the_log_viewer_overlay_like_any_other_overlay() {
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
@@ -1027,13 +1054,6 @@ mod tests {
         };
         handle_key(&mut state, key(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(state.focus_mode, FocusMode::Normal);
-    }
-
-    #[test]
-    fn ctrl_2_focuses_notification_dock_directly() {
-        let mut state = WorkspaceState::default();
-        handle_key(&mut state, key(KeyCode::Char('2'), KeyModifiers::CONTROL));
-        assert_eq!(state.focused_dock, UiDockSlot::Center);
     }
 
     #[test]
