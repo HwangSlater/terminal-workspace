@@ -963,21 +963,41 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Shortens `text` to fit `width` terminal columns, appending `…` when it
+/// doesn't already fit -- the Team dock's alternative to `wrap_to_width`
+/// (`step31.md`): wrapping a *name* onto a second row read oddly for a
+/// list this narrow and this short (realistically a handful of
+/// teammates, not the Calendar panel's longer reminder titles), so a long
+/// name gets shortened in place instead. Unicode-width-aware for the same
+/// reason `wrap_to_width` is.
+fn truncate_with_ellipsis(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    // Reserve one column for the ellipsis itself.
+    let budget = width.saturating_sub(1);
+    let mut truncated = String::new();
+    let mut truncated_width = 0usize;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(1);
+        if truncated_width + ch_width > budget {
+            break;
+        }
+        truncated.push(ch);
+        truncated_width += ch_width;
+    }
+    truncated.push('…');
+    truncated
+}
+
 fn render_too_small(frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new("터미널 크기가 너무 작습니다. 화면을 넓혀주세요.")
         .style(Style::default().fg(theme::ERROR))
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
-}
-
-fn presence_status_label(status: PresenceStatus) -> &'static str {
-    match status {
-        PresenceStatus::Active => "활동중",
-        PresenceStatus::Away => "자리비움",
-        PresenceStatus::Offline => "오프라인",
-        PresenceStatus::Meeting => "회의중",
-        PresenceStatus::Lunch => "식사중",
-    }
 }
 
 /// Mirrors the semantic colors `connection_status_label` already
@@ -1207,22 +1227,34 @@ fn render_team_panel(
         return;
     }
 
+    // Width available for the name once the dot marker ("● ", 2 columns)
+    // and the block's borders are subtracted -- a long display name used
+    // to just get clipped by `List` (same class of bug `wrap_to_width`
+    // fixed for the Calendar panel), with no indication anything was cut
+    // off (`step31.md`).
+    let name_width = area.width.saturating_sub(2 + 2).max(1) as usize;
+
     let items: Vec<ListItem> = model
         .team_presence
         .iter()
         .enumerate()
         .map(|(i, member)| {
             let selected = state.focused_dock == UiDockSlot::Left && i == state.selected_index;
+            let name = truncate_with_ellipsis(&member.display_name, name_width);
             let line = Line::from(vec![
-                Span::raw(format!("{} [", member.display_name)),
-                // Colored regardless of selection -- REVERSED (swapped
-                // fg/bg) still reads the status color as the background,
-                // keeping the same at-a-glance signal either way.
+                // A colored dot instead of a bracketed status word
+                // (`step31.md`) -- shorter (so it rarely needs
+                // truncating at all), and the presence color alone
+                // already carries the same at-a-glance signal a text
+                // label did. Colored regardless of selection -- the
+                // selected-row background (`theme::selected_style`)
+                // doesn't touch a span's own `fg`, so the dot's color
+                // still reads the same either way.
                 Span::styled(
-                    presence_status_label(member.status),
+                    "● ",
                     Style::default().fg(presence_status_color(member.status)),
                 ),
-                Span::raw("]"),
+                Span::raw(name),
             ]);
             let style = if selected {
                 theme::selected_style()
@@ -1236,11 +1268,14 @@ fn render_team_panel(
 }
 
 /// How wide the Team dock actually needs to be for its real content
-/// (`step27.md`) -- the longest `"{display_name} [{status_label}]"` line
-/// (or the empty-state text), plus 2 for the block's borders. The caller
-/// still clamps this against the configured `left_dock_width` (a ceiling,
-/// not a target) and a floor, so this function itself doesn't need to
-/// know either bound.
+/// (`step27.md`) -- the longest `"● {display_name}"` line (or the
+/// empty-state text), plus 2 for the block's borders. The caller still
+/// clamps this against the configured `left_dock_width` (a ceiling, not a
+/// target) and a floor, so this function itself doesn't need to know
+/// either bound. Shrunk further in `step31.md`, when the bracketed status
+/// word became a 2-column dot -- most rosters now fit comfortably under
+/// even a small ceiling without any name needing `truncate_with_ellipsis`
+/// at all.
 fn team_panel_natural_width(model: &DashboardReadModel) -> u16 {
     let content_width = if model.team_presence.is_empty() {
         UnicodeWidthStr::width("(아직 팀원이 없습니다)")
@@ -1248,12 +1283,7 @@ fn team_panel_natural_width(model: &DashboardReadModel) -> u16 {
         model
             .team_presence
             .iter()
-            .map(|member| {
-                UnicodeWidthStr::width(member.display_name.as_str())
-                    + UnicodeWidthStr::width(presence_status_label(member.status))
-                    + " [".len()
-                    + "]".len()
-            })
+            .map(|member| UnicodeWidthStr::width(member.display_name.as_str()) + 2)
             .max()
             .unwrap_or(0)
     };
@@ -1850,6 +1880,29 @@ mod tests {
     }
 
     #[test]
+    fn truncate_with_ellipsis_leaves_short_text_untouched() {
+        assert_eq!(truncate_with_ellipsis("short", 30), "short");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_shortens_long_text_and_marks_it() {
+        let truncated = truncate_with_ellipsis("아주 아주 긴 이름입니다", 10);
+        assert!(
+            UnicodeWidthStr::width(truncated.as_str()) <= 10,
+            "truncated text {truncated:?} still exceeds the requested width"
+        );
+        assert!(
+            truncated.ends_with('…'),
+            "expected a truncation marker in {truncated:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_never_panics_at_zero_width() {
+        assert_eq!(truncate_with_ellipsis("anything", 0), "");
+    }
+
+    #[test]
     fn format_occurrence_time_renders_local_month_day_and_time() {
         // 2025-01-01T09:00:00Z -- checked against a fixed UTC instant
         // (not "now") so the test doesn't depend on the machine's local
@@ -2170,7 +2223,7 @@ mod tests {
             }],
             unread_notifications: Vec::new(),
         };
-        // "ab [활동중]" is far narrower than this configured ceiling.
+        // "● ab" is far narrower than this configured ceiling.
         let configured_left_dock_width = 40u16;
         let total_width = 140;
         let terminal = draw_terminal(
@@ -2185,9 +2238,10 @@ mod tests {
         );
         let buffer = terminal.backend().buffer();
         let body_top_row = 3;
-        // "ab" (width 2) + " [" (2) + "활동중" (width 6) + "]" (1) + 2
-        // border columns = 13 -- well short of the 40-column ceiling.
-        let expected_team_width = 13;
+        // "● " (width 2) + "ab" (width 2) + 2 border columns = 6, but
+        // `render()` also floors the Team dock at 10 columns -- still
+        // well short of the 40-column ceiling.
+        let expected_team_width = 10;
         let notification_corner = buffer.get(expected_team_width, body_top_row).symbol();
         assert_eq!(
             notification_corner, "┌",
@@ -2257,39 +2311,88 @@ mod tests {
         assert!(text.contains("Alice"));
     }
 
+    /// Real regression guard, reported via live use: a long display name
+    /// used to just get clipped by `List` (`step31.md`) -- no `wrap_to_width`
+    /// treatment ever existed for the Team panel the way the Calendar
+    /// panel got one. Requested directly that names shorten in place
+    /// rather than wrap onto a second row, so this checks for
+    /// `truncate_with_ellipsis`'s marker, not a wrapped continuation.
     #[test]
-    fn team_panel_colors_presence_status_like_the_header_does() {
+    fn team_panel_truncates_a_long_name_instead_of_clipping_it() {
+        let long_name = "이것은 팀 패널 폭보다 훨씬 긴 이름입니다";
         let model = DashboardReadModel {
-            team_presence: vec![
-                MemberPresence {
-                    user_id: UserId("u1".into()),
-                    display_name: "Alice".into(),
-                    status: PresenceStatus::Active,
-                    custom_status_text: None,
-                    last_updated_ms: 0,
-                },
-                MemberPresence {
-                    user_id: UserId("u2".into()),
-                    display_name: "Bob".into(),
-                    status: PresenceStatus::Offline,
-                    custom_status_text: None,
-                    last_updated_ms: 0,
-                },
-            ],
+            team_presence: vec![MemberPresence {
+                user_id: UserId("u1".into()),
+                display_name: long_name.into(),
+                status: PresenceStatus::Active,
+                custom_status_text: None,
+                last_updated_ms: 0,
+            }],
             unread_notifications: Vec::new(),
         };
-        let terminal = draw_terminal(
+        // A narrow configured ceiling, well short of the long name's real
+        // width, so truncation is forced rather than merely possible.
+        let text = draw_with_dock_widths(140, 30, &WorkspaceState::default(), &model, 15, 32);
+        assert!(
+            !contains_ignoring_whitespace(&text, long_name),
+            "expected the full name to be shortened, not rendered in full:\n{text}"
+        );
+        assert!(
+            text.contains('…'),
+            "expected a truncation marker somewhere in the Team panel:\n{text}"
+        );
+    }
+
+    /// `step31.md`: the bracketed status word became a colored dot, so
+    /// this can no longer scrape a status label's own color -- each
+    /// scenario is drawn in isolation (one member each) instead of two
+    /// members in the same frame, since `fg_color_of` returns only the
+    /// *first* matching glyph and every row's dot is the same character
+    /// regardless of which member it belongs to.
+    #[test]
+    fn team_panel_colors_the_presence_dot_like_the_header_does() {
+        let active_model = DashboardReadModel {
+            team_presence: vec![MemberPresence {
+                user_id: UserId("u1".into()),
+                display_name: "Alice".into(),
+                status: PresenceStatus::Active,
+                custom_status_text: None,
+                last_updated_ms: 0,
+            }],
+            unread_notifications: Vec::new(),
+        };
+        let offline_model = DashboardReadModel {
+            team_presence: vec![MemberPresence {
+                user_id: UserId("u2".into()),
+                display_name: "Bob".into(),
+                status: PresenceStatus::Offline,
+                custom_status_text: None,
+                last_updated_ms: 0,
+            }],
+            unread_notifications: Vec::new(),
+        };
+        let active_terminal = draw_terminal(
             140,
             30,
             &WorkspaceState::default(),
-            &model,
+            &active_model,
             &[],
             &PomodoroSnapshot::default(),
             DEFAULT_LEFT_DOCK_WIDTH,
             DEFAULT_RIGHT_DOCK_WIDTH,
         );
-        assert_eq!(fg_color_of(&terminal, "활동중"), theme::SUCCESS);
-        assert_eq!(fg_color_of(&terminal, "오프라인"), theme::MUTED);
+        let offline_terminal = draw_terminal(
+            140,
+            30,
+            &WorkspaceState::default(),
+            &offline_model,
+            &[],
+            &PomodoroSnapshot::default(),
+            DEFAULT_LEFT_DOCK_WIDTH,
+            DEFAULT_RIGHT_DOCK_WIDTH,
+        );
+        assert_eq!(fg_color_of(&active_terminal, "●"), theme::SUCCESS);
+        assert_eq!(fg_color_of(&offline_terminal, "●"), theme::MUTED);
     }
 
     #[test]
