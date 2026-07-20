@@ -39,6 +39,8 @@
 
   a { color: var(--accent); }
 
+  code { font-family: var(--mono); }
+
   ::selection { background: var(--accent); color: var(--bg); }
 
   .wrap {
@@ -393,6 +395,207 @@
   footer .flinks { display: flex; gap: 18px; font-size: 0.85rem; }
   footer .flinks a { color: var(--muted); text-decoration: none; }
   footer .flinks a:hover { color: var(--text-bright); }
+
+  /* ---- principles strip ---- */
+  .principles {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    max-width: 900px;
+    margin: 0 auto 96px;
+  }
+  .principle {
+    background: var(--bg-raised);
+    padding: 22px 20px;
+    text-align: center;
+  }
+  .principle .p-title {
+    font-family: var(--mono);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+  }
+  .principle p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+    line-height: 1.55;
+  }
+  @media (max-width: 700px) {
+    .principles { grid-template-columns: 1fr; }
+  }
+
+  /* ---- setup (integration walkthroughs) ---- */
+  .setup-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .setup-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-raised);
+    overflow: hidden;
+  }
+  .setup-card .setup-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .setup-card .setup-head .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    flex: none;
+  }
+  .setup-card.s-slack .setup-head .dot { background: var(--slack); }
+  .setup-card.s-github .setup-head .dot { background: var(--github); }
+  .setup-card.s-cal .setup-head .dot { background: var(--calendar); }
+  .setup-card h3 {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--text-bright);
+  }
+  .setup-card .setup-head .keys {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+  .step-list {
+    list-style: none;
+    margin: 0;
+    padding: 16px 18px 18px;
+    counter-reset: step;
+  }
+  .step-list li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 28px;
+    margin-bottom: 12px;
+    font-size: 0.86rem;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .step-list li:last-child { margin-bottom: 0; }
+  .step-list li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .step-list code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    background: var(--bg-panel);
+    color: var(--calendar);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .setup-doclink {
+    display: block;
+    padding: 0 18px 18px;
+    font-size: 0.8rem;
+  }
+  .setup-doclink a { text-decoration: none; }
+  .setup-doclink a:hover { text-decoration: underline; }
+
+  @media (max-width: 900px) {
+    .setup-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ---- shortcuts ---- */
+  .shortcuts-wrap {
+    max-width: 780px;
+    margin: 0 auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-raised);
+  }
+  table.shortcuts {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+  }
+  table.shortcuts tr:not(:last-child) td {
+    border-bottom: 1px solid var(--border);
+  }
+  table.shortcuts td {
+    padding: 11px 18px;
+    vertical-align: top;
+  }
+  table.shortcuts td.key {
+    font-family: var(--mono);
+    color: var(--accent);
+    white-space: nowrap;
+    width: 1%;
+  }
+  table.shortcuts td.desc {
+    color: var(--text);
+  }
+  table.shortcuts td.desc code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: var(--calendar);
+  }
+  .shortcuts-note {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 16px;
+  }
+
+  /* ---- help overlay mini mockup ---- */
+  .help-mock {
+    max-width: 620px;
+    margin: 28px auto 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .help-mock fieldset {
+    border: 1px solid var(--help);
+    border-radius: 2px;
+    margin: 0;
+    padding: 8px 12px 10px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+  }
+  .help-mock legend {
+    color: var(--help);
+    font-weight: 700;
+    padding: 0 6px;
+  }
+  .help-mock .h-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 2px 0;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .help-mock .h-row .k { color: var(--text); }
+  @media (max-width: 640px) {
+    .help-mock { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -402,6 +605,8 @@
     <div class="brand"><span class="caret">▍</span>Terminal Workspace</div>
     <div class="links">
       <a href="#features">기능</a>
+      <a href="#setup">연동 설정</a>
+      <a href="#shortcuts">단축키</a>
       <a href="#install">시작하기</a>
       <a href="https://github.com/HwangSlater/terminal-workspace">GitHub</a>
     </div>
@@ -460,6 +665,21 @@
       <div class="term-footer">Tab:다음 패널&nbsp;&nbsp;Ctrl+C:로그 보기&nbsp;&nbsp;::명령줄&nbsp;&nbsp;?:도움말&nbsp;&nbsp;Ctrl+Q:종료</div>
     </div>
   </div>
+
+  <div class="principles">
+    <div class="principle">
+      <div class="p-title">Local First</div>
+      <p>알림·일정·설정 모두 로컬 임베디드 저장소(redb)에 남습니다. 클라우드 계정이나 원격 서버가 필요 없습니다.</p>
+    </div>
+    <div class="principle">
+      <div class="p-title">Zero Configuration</div>
+      <p>설정 파일을 손으로 쓸 일이 없습니다. 처음 실행하면 <code>config.toml</code>과 데이터베이스가 자동으로 만들어집니다.</p>
+    </div>
+    <div class="principle">
+      <div class="p-title">Cross-Platform</div>
+      <p>Windows·macOS·Linux를 동등한 1순위로 지원합니다. 토큰은 각 OS 키체인에, 알림은 데스크톱 토스트로.</p>
+    </div>
+  </div>
 </div>
 
 <section id="features">
@@ -500,6 +720,112 @@
         <p>모든 데이터는 로컬 임베디드 저장소(redb)에 남습니다. 토큰은 OS 키체인에, 서버나 원격 계정은 필요 없습니다.</p>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="setup">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="kicker">SETUP</div>
+      <h2>연동 하나당 1분, OAuth 없이</h2>
+    </div>
+    <div class="setup-grid">
+
+      <div class="setup-card s-slack">
+        <div class="setup-head">
+          <span class="dot"></span>
+          <h3>Slack</h3>
+          <span class="keys">Ctrl+S / Ctrl+P</span>
+        </div>
+        <ol class="step-list">
+          <li>Slack App을 만들고 Bot Token 스코프(<code>channels:history</code>, <code>channels:read</code>, <code>users:read</code>, <code>chat:write</code> — 비공개 채널은 <code>groups:history</code>/<code>groups:read</code>도)로 설치해 Bot Token(<code>xoxb-...</code>)을 발급받으세요.</li>
+          <li><code>Ctrl+S</code>로 토큰을 입력하면 바로 연결됩니다 — OS 키체인에 저장되고 설정 파일엔 절대 남지 않습니다.</li>
+          <li>메시지를 받을 채널에 봇을 초대하세요 (<code>/invite @봇이름</code>).</li>
+          <li><code>Ctrl+P</code>로 채널/팀원을 선택하세요. 목록이 길면 <code>/</code>로 검색합니다.</li>
+          <li>명령줄에서 바로: <code>/send #채널 메시지</code>, <code>/away</code> 등 상태 변경, <code>/slack-watch #채널1 #채널2</code>로 목록 통째 교체.</li>
+        </ol>
+        <span class="setup-doclink"><a href="https://github.com/HwangSlater/terminal-workspace/blob/main/docs/04-extensions/integrations/slack.md" style="color:var(--slack)">자세히 보기 →</a></span>
+      </div>
+
+      <div class="setup-card s-github">
+        <div class="setup-head">
+          <span class="dot"></span>
+          <h3>GitHub</h3>
+          <span class="keys">Ctrl+G / Ctrl+R</span>
+        </div>
+        <ol class="step-list">
+          <li>GitHub → Settings → Developer settings → Personal access tokens에서 <code>repo</code> 스코프로 Classic PAT(<code>ghp_...</code>)를 발급받으세요.</li>
+          <li><code>Ctrl+G</code>로 토큰을 입력하면 바로 연결됩니다.</li>
+          <li><code>Ctrl+R</code>로 접근 가능한 저장소를 선택하면, 열린 PR이 알림 패널에 표시됩니다. <code>/</code>로 검색할 수 있습니다.</li>
+          <li>명령줄에서 <code>/repo-watch owner/repo owner/repo2</code>로 감시 목록을 통째로 교체할 수 있습니다.</li>
+        </ol>
+        <span class="setup-doclink"><a href="https://github.com/HwangSlater/terminal-workspace/blob/main/docs/04-extensions/integrations/github.md" style="color:var(--github)">자세히 보기 →</a></span>
+      </div>
+
+      <div class="setup-card s-cal">
+        <div class="setup-head">
+          <span class="dot"></span>
+          <h3>Calendar</h3>
+          <span class="keys">Ctrl+L / Ctrl+K / Ctrl+M</span>
+        </div>
+        <ol class="step-list">
+          <li>Google Calendar → 설정 → 캘린더 통합 → 비공개 iCal 형식 주소를 복사하세요. OAuth나 로그인 절차가 필요 없습니다.</li>
+          <li><code>Ctrl+L</code>로 이름(예: "회사")과 주소를 입력하면 바로 연결됩니다. 반복 일정도 인식합니다.</li>
+          <li>여러 캘린더를 동시에 연결할 수 있습니다 — <code>Ctrl+L</code>을 다시 눌러 하나씩 추가하세요.</li>
+          <li><code>Ctrl+K</code>로 관리·제거·이름 변경(<code>e</code>)을 하거나, 명령줄에서 <code>/calendar-rename</code>/<code>/calendar-remove</code>로도 가능합니다.</li>
+          <li><code>Ctrl+M</code>으로 월 단위 그리드 뷰를 볼 수 있습니다 (<code>[</code>/<code>]</code>로 이전/다음 달).</li>
+        </ol>
+        <span class="setup-doclink"><a href="https://github.com/HwangSlater/terminal-workspace/blob/main/docs/04-extensions/integrations/calendar.md" style="color:var(--calendar)">자세히 보기 →</a></span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="shortcuts">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="kicker">SHORTCUTS</div>
+      <h2>손을 홈 로우에서 떼지 않고</h2>
+    </div>
+
+    <div class="shortcuts-wrap">
+      <table class="shortcuts">
+        <tbody>
+          <tr><td class="key">Tab / Shift+Tab</td><td class="desc">패널 포커스를 순서대로 이동 (알림 ↔ 캘린더)</td></tr>
+          <tr><td class="key">↑ / ↓</td><td class="desc">포커스된 패널 안에서 위아래로 선택 이동</td></tr>
+          <tr><td class="key">Enter</td><td class="desc">선택한 알림/일정을 읽음 처리 — <code>/read-all</code>로 전체 처리</td></tr>
+          <tr><td class="key">:</td><td class="desc">명령줄 입력 모드로 전환</td></tr>
+          <tr><td class="key">?</td><td class="desc">도움말 팝업 열기 (단축키·커맨드 두 열)</td></tr>
+          <tr><td class="key">Esc</td><td class="desc">명령줄/도움말/오버레이 닫고 Normal 모드로 복귀</td></tr>
+          <tr><td class="key">Ctrl+S / Ctrl+P</td><td class="desc">Slack 연결 설정 / 채널·사용자 선택</td></tr>
+          <tr><td class="key">Ctrl+G / Ctrl+R</td><td class="desc">GitHub 연결 설정 / 저장소 선택</td></tr>
+          <tr><td class="key">Ctrl+L / Ctrl+K</td><td class="desc">Calendar 추가 / 연결된 캘린더 관리·제거</td></tr>
+          <tr><td class="key">Ctrl+M</td><td class="desc">월 단위 캘린더 그리드 뷰</td></tr>
+          <tr><td class="key">Ctrl+C</td><td class="desc">로그 보기 오버레이 열기 (raw mode라 <code>Ctrl+C</code>가 종료 시그널로 안 갑니다)</td></tr>
+          <tr><td class="key">Ctrl+Q</td><td class="desc">종료</td></tr>
+          <tr><td class="key">(명령줄) /sync</td><td class="desc">연결된 Slack/GitHub/Calendar를 지금 바로 한 번씩 동기화</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="help-mock">
+      <fieldset>
+        <legend>단축키</legend>
+        <div class="h-row"><span class="k">Tab / Shift+Tab</span><span>패널 이동</span></div>
+        <div class="h-row"><span class="k">Enter</span><span>읽음 처리</span></div>
+        <div class="h-row"><span class="k">Ctrl+P</span><span>채널/사용자 선택</span></div>
+        <div class="h-row"><span class="k">Ctrl+C</span><span>로그 보기</span></div>
+      </fieldset>
+      <fieldset>
+        <legend>커맨드</legend>
+        <div class="h-row"><span class="k">/send</span><span>메시지 보내기</span></div>
+        <div class="h-row"><span class="k">/slack-watch</span><span>채널 목록 교체</span></div>
+        <div class="h-row"><span class="k">/read-all</span><span>알림 전체 읽음</span></div>
+        <div class="h-row"><span class="k">/sync</span><span>지금 동기화</span></div>
+      </fieldset>
+    </div>
+    <p class="shortcuts-note">명령어 입력 중 <code>Tab</code>으로 채널·저장소·캘린더 이름까지 자동완성됩니다. 전체 목록은 앱 안에서 <code>?</code>로.</p>
   </div>
 </section>
 
