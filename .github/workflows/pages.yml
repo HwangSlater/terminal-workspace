@@ -1,0 +1,44 @@
+name: Deploy GitHub Pages
+
+# Publishes website/ as a static site whenever it changes on main, or on
+# demand. Uses the Actions-based Pages deployment (no Jekyll, no gh-pages
+# branch) -- the repo's Settings -> Pages -> Source must be set to
+# "GitHub Actions" once, by hand, before this workflow's deploy step can
+# actually publish anything (not something a workflow file can flip on
+# its own).
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

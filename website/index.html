@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terminal Workspace — 터미널을 벗어나지 않는 개발자 워크스페이스</title>
+<meta name="description" content="Slack, GitHub, Google Calendar를 한곳에서 확인하고 다루는 터미널 우선(Local First, Zero Configuration) 개발자 워크스페이스.">
+<style>
+  :root {
+    --bg: #2E3440;
+    --bg-raised: #333c4d;
+    --bg-panel: #3B4252;
+    --border: #4C566A;
+    --text: #E5E9F0;
+    --text-bright: #ECEFF4;
+    --muted: #8993a8;
+    --accent: #88C0D0;
+    --slack: #81A1C1;
+    --github: #ECEFF4;
+    --calendar: #A3BE8C;
+    --help: #B48EAD;
+    --log: #D08770;
+    --warning: #EBCB8B;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", "D2Coding", monospace;
+    --sans: -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body { overflow-x: hidden; }
+
+  a { color: var(--accent); }
+
+  ::selection { background: var(--accent); color: var(--bg); }
+
+  .wrap {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ---- nav ---- */
+  nav.top {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 0;
+  }
+  nav.top .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: 700;
+    color: var(--text-bright);
+    letter-spacing: -0.02em;
+  }
+  .brand .caret {
+    color: var(--calendar);
+  }
+  nav.top .links { display: flex; gap: 22px; font-size: 0.92rem; }
+  nav.top .links a { color: var(--muted); text-decoration: none; }
+  nav.top .links a:hover { color: var(--text-bright); }
+
+  /* ---- hero ---- */
+  header.hero {
+    padding: 72px 0 48px;
+    text-align: center;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: var(--calendar);
+    letter-spacing: 0.06em;
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-size: clamp(2rem, 5vw, 3.1rem);
+    line-height: 1.18;
+    letter-spacing: -0.02em;
+    color: var(--text-bright);
+    margin: 0 0 20px;
+    text-wrap: balance;
+  }
+  h1 .hl { color: var(--accent); }
+  .lede {
+    max-width: 620px;
+    margin: 0 auto 34px;
+    color: var(--muted);
+    font-size: 1.08rem;
+    line-height: 1.6;
+  }
+  .badges {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 34px;
+  }
+  .badge {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 14px;
+  }
+  .cta-row {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    padding: 11px 20px;
+    border-radius: 8px;
+    text-decoration: none;
+    border: 1px solid transparent;
+  }
+  .btn.primary {
+    background: var(--accent);
+    color: #1c2431;
+    font-weight: 600;
+  }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.ghost {
+    color: var(--text);
+    border-color: var(--border);
+  }
+  .btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- terminal mockup ---- */
+  .terminal-shell {
+    max-width: 900px;
+    margin: 0 auto 96px;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    box-shadow: 0 30px 80px -30px rgba(0,0,0,0.65);
+  }
+  .titlebar {
+    background: var(--bg-raised);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .titlebar .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .titlebar .dot.r { background: #BF616A; }
+  .titlebar .dot.y { background: #EBCB8B; }
+  .titlebar .dot.g { background: #A3BE8C; }
+  .titlebar .path {
+    margin: 0 auto;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  .term-body {
+    background: var(--bg);
+    padding: 18px 20px 14px;
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    line-height: 1.55;
+  }
+  .term-brand { color: var(--text-bright); font-weight: 700; }
+  .term-status { margin-top: 2px; }
+  .term-status .sep { color: var(--border); margin: 0 8px; }
+  .term-team { margin-top: 2px; color: var(--text); }
+  .term-team .dot { color: var(--calendar); }
+  .term-team .dot.away { color: var(--muted); }
+
+  .term-panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 16px 0 12px;
+  }
+  fieldset.term-panel {
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 8px 10px 10px;
+    margin: 0;
+    min-width: 0;
+  }
+  fieldset.term-panel legend {
+    padding: 0 6px;
+    font-weight: 700;
+    font-size: 0.82rem;
+  }
+  .term-panel .row {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text);
+    padding: 1px 0;
+  }
+  .term-panel .row .tag { font-weight: 600; }
+  .term-panel .row .muted { color: var(--muted); }
+  .term-panel .row.selected {
+    background: var(--bg-panel);
+    color: var(--text-bright);
+    margin: 0 -10px;
+    padding: 1px 10px;
+  }
+
+  .term-footer {
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    margin-top: 4px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow-x: auto;
+  }
+
+  @media (max-width: 640px) {
+    .term-panels { grid-template-columns: 1fr; }
+    .term-body { font-size: 0.76rem; }
+  }
+
+  /* ---- sections ---- */
+  section { padding: 0 0 88px; }
+  .section-head { text-align: center; margin-bottom: 40px; }
+  .section-head .kicker {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+  .section-head h2 {
+    font-size: 1.7rem;
+    color: var(--text-bright);
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+  }
+  .feature {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 20px;
+    background: var(--bg-raised);
+  }
+  .feature .icon {
+    font-family: var(--mono);
+    font-size: 1.1rem;
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    margin-bottom: 14px;
+    background: rgba(136,192,208,0.12);
+    color: var(--accent);
+  }
+  .feature.f-slack .icon { background: rgba(129,161,193,0.14); color: var(--slack); }
+  .feature.f-github .icon { background: rgba(236,239,244,0.1); color: var(--github); }
+  .feature.f-cal .icon { background: rgba(163,190,140,0.14); color: var(--calendar); }
+  .feature.f-cmd .icon { background: rgba(180,142,173,0.14); color: var(--help); }
+  .feature.f-pomo .icon { background: rgba(208,135,112,0.14); color: var(--log); }
+  .feature h3 {
+    font-size: 1rem;
+    color: var(--text-bright);
+    margin: 0 0 8px;
+  }
+  .feature p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 760px) {
+    .features { grid-template-columns: 1fr; }
+  }
+
+  /* ---- install ---- */
+  .install-tabs {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+  .tab-btn.active {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .code-block {
+    max-width: 720px;
+    margin: 0 auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: none;
+  }
+  .code-block.active { display: block; }
+  .code-block .cb-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .code-block .cb-head span {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+  }
+  .copy-btn {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .code-block pre {
+    margin: 0;
+    padding: 16px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    color: var(--calendar);
+    line-height: 1.6;
+  }
+  .install-note {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.88rem;
+    margin-top: 18px;
+  }
+  .install-note code {
+    font-family: var(--mono);
+    background: var(--bg-raised);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  /* ---- footer ---- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 32px 0 48px;
+  }
+  footer .wrap {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  footer .fmuted {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-family: var(--mono);
+  }
+  footer .flinks { display: flex; gap: 18px; font-size: 0.85rem; }
+  footer .flinks a { color: var(--muted); text-decoration: none; }
+  footer .flinks a:hover { color: var(--text-bright); }
+</style>
+</head>
+<body>
+
+<nav class="top">
+  <div class="wrap">
+    <div class="brand"><span class="caret">▍</span>Terminal Workspace</div>
+    <div class="links">
+      <a href="#features">기능</a>
+      <a href="#install">시작하기</a>
+      <a href="https://github.com/HwangSlater/terminal-workspace">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">v1.0.0 · Local First · Zero Configuration</div>
+    <h1>터미널을 벗어나지 않고<br><span class="hl">Slack · GitHub · Calendar</span>를 한곳에서</h1>
+    <p class="lede">
+      한 화면에서 팀 알림을 확인하고, 슬랙 메시지를 보내고, PR과 일정을 챙기는
+      터미널 우선 개발자 워크스페이스입니다. 설정 파일을 손으로 쓸 필요 없이,
+      처음 실행하는 순간부터 바로 씁니다.
+    </p>
+    <div class="badges">
+      <span class="badge">Windows</span>
+      <span class="badge">macOS</span>
+      <span class="badge">Linux</span>
+      <span class="badge">Rust · TUI</span>
+    </div>
+    <div class="cta-row">
+      <a class="btn primary" href="#install">지금 설치하기</a>
+      <a class="btn ghost" href="https://github.com/HwangSlater/terminal-workspace">소스 보기 →</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="terminal-shell">
+    <div class="titlebar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="path">app — 92×28</span>
+    </div>
+    <div class="term-body">
+      <div class="term-brand">Terminal Workspace</div>
+      <div class="term-status">
+        <span style="color:var(--slack)">Slack: 연결됨</span><span class="sep">|</span><span style="color:var(--github)">GitHub: 연결됨</span><span class="sep">|</span><span style="color:var(--calendar)">Calendar: 연결됨</span>
+      </div>
+      <div class="term-team">팀&nbsp; <span class="dot">●</span> 정서연&nbsp; <span class="dot">●</span> 김도윤&nbsp; <span class="dot away">●</span> 박지훈</div>
+
+      <div class="term-panels">
+        <fieldset class="term-panel" style="border-color:var(--accent)">
+          <legend style="color:var(--accent)">알림 (3)</legend>
+          <div class="row selected"><span class="tag" style="color:var(--slack)">[Slack]</span> 정서연: 스테이징 배포 끝났습니다 🎉</div>
+          <div class="row"><span class="tag" style="color:var(--github)">[GitHub]</span> terminal-workspace#128 릴리스 노트 자동화</div>
+          <div class="row"><span class="tag" style="color:var(--calendar)">[Calendar]</span> [개인] 치과 예약</div>
+        </fieldset>
+        <fieldset class="term-panel" style="border-color:var(--border)">
+          <legend>캘린더 (2)</legend>
+          <div class="row"><span class="muted">07/21 14:00</span>&nbsp; 주간 스탠드업</div>
+          <div class="row"><span class="muted">07/22 10:00</span>&nbsp; [회사] 디자인 리뷰</div>
+        </fieldset>
+      </div>
+
+      <div class="term-footer">Tab:다음 패널&nbsp;&nbsp;Ctrl+C:로그 보기&nbsp;&nbsp;::명령줄&nbsp;&nbsp;?:도움말&nbsp;&nbsp;Ctrl+Q:종료</div>
+    </div>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="kicker">FEATURES</div>
+      <h2>알림 확인부터 답장까지, 터미널 안에서</h2>
+    </div>
+    <div class="features">
+      <div class="feature f-slack">
+        <div class="icon">S</div>
+        <h3>Slack</h3>
+        <p>지켜볼 채널과 팀원만 골라 폴링합니다. <code>/send #채널 메시지</code>로 바로 답장하고, <code>/</code>로 채널을 검색합니다.</p>
+      </div>
+      <div class="feature f-github">
+        <div class="icon">G</div>
+        <h3>GitHub</h3>
+        <p>선택한 저장소의 열린 PR을 알림으로 받습니다. <code>/repo-watch owner/repo</code>로 감시 목록을 명령줄에서 통째로 교체합니다.</p>
+      </div>
+      <div class="feature f-cal">
+        <div class="icon">C</div>
+        <h3>Calendar</h3>
+        <p>여러 개의 비공개 iCal 주소를 연결해 다가오는 일정을 한 패널에서 봅니다. 월 그리드 뷰(<code>Ctrl+M</code>)도 있습니다.</p>
+      </div>
+      <div class="feature f-cmd">
+        <div class="icon">:</div>
+        <h3>명령줄 하나로 전부</h3>
+        <p>피커 오버레이 없이도 <code>:</code> 명령줄만으로 채널/저장소/캘린더 선택, 상태 변경, 알림 정리까지 조작할 수 있습니다. <code>Tab</code> 자동완성 지원.</p>
+      </div>
+      <div class="feature f-pomo">
+        <div class="icon">◷</div>
+        <h3>뽀모도로 타이머</h3>
+        <p>외부 앱 없이 <code>/pomodoro start</code> 한 줄로 집중/휴식 사이클을 헤더에 띄워둡니다.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">⌁</div>
+        <h3>Local First</h3>
+        <p>모든 데이터는 로컬 임베디드 저장소(redb)에 남습니다. 토큰은 OS 키체인에, 서버나 원격 계정은 필요 없습니다.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="kicker">INSTALL</div>
+      <h2>미리 빌드된 바이너리로 바로 시작</h2>
+    </div>
+
+    <div class="install-tabs">
+      <button class="tab-btn active" data-tab="unix">macOS / Linux</button>
+      <button class="tab-btn" data-tab="win">Windows (PowerShell)</button>
+    </div>
+
+    <div class="code-block active" id="cb-unix">
+      <div class="cb-head">
+        <span>curl | sh</span>
+        <button class="copy-btn" onclick="copyCode('code-unix', this)">복사</button>
+      </div>
+      <pre id="code-unix">curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HwangSlater/terminal-workspace/releases/latest/download/app-installer.sh | sh</pre>
+    </div>
+
+    <div class="code-block" id="cb-win">
+      <div class="cb-head">
+        <span>PowerShell</span>
+        <button class="copy-btn" onclick="copyCode('code-win', this)">복사</button>
+      </div>
+      <pre id="code-win">powershell -ExecutionPolicy Bypass -c "irm https://github.com/HwangSlater/terminal-workspace/releases/latest/download/app-installer.ps1 | iex"</pre>
+    </div>
+
+    <p class="install-note">
+      설치 후 새 터미널에서 <code>app</code>을 실행하세요. Windows용 <code>.msi</code> 인스톨러와 소스 빌드 안내는
+      <a href="https://github.com/HwangSlater/terminal-workspace#시작하기">README</a>에 있습니다.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="fmuted">MIT License · Rust</div>
+    <div class="flinks">
+      <a href="https://github.com/HwangSlater/terminal-workspace">GitHub</a>
+      <a href="https://github.com/HwangSlater/terminal-workspace/tree/main/docs">문서</a>
+      <a href="https://github.com/HwangSlater/terminal-workspace/releases">릴리스</a>
+      <a href="https://github.com/HwangSlater/terminal-workspace/blob/main/CHANGELOG.md">체인지로그</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('.tab-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
+      document.querySelectorAll('.code-block').forEach(function (c) { c.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('cb-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+
+  function copyCode(id, btn) {
+    var text = document.getElementById(id).innerText;
+    navigator.clipboard.writeText(text).then(function () {
+      var old = btn.textContent;
+      btn.textContent = '복사됨';
+      setTimeout(function () { btn.textContent = old; }, 1500);
+    });
+  }
+</script>
+
+</body>
+</html>
