@@ -85,6 +85,12 @@ pub struct CalendarAdapter {
     seen_occurrences: Arc<Mutex<HashSet<(Uuid, String, i64)>>>,
     poll_task: Mutex<Option<JoinHandle<()>>>,
     secret_writer: Arc<dyn SecretWriter>,
+    /// Serializes every `run_cycle` call against every other one on this
+    /// same adapter (background-loop iterations and `sync_now`'s one-off
+    /// cycles alike), so a manual `/sync` landing at the same moment as
+    /// the interval loop's own tick can't race it over `seen_occurrences`
+    /// (`step46.md`, mirrors `SlackAdapter::poll_lock`).
+    poll_lock: Arc<Mutex<()>>,
 }
 
 impl CalendarAdapter {
@@ -105,6 +111,20 @@ impl CalendarAdapter {
             seen_occurrences: Arc::new(Mutex::new(HashSet::new())),
             poll_task: Mutex::new(None),
             secret_writer,
+            poll_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Snapshots everything a poll cycle needs, sharing this adapter's
+    /// long-lived state via `Arc`/`Mutex` clones -- used both by `start()`
+    /// (the background loop) and `sync_now` (a single out-of-band cycle).
+    async fn make_poller(&self) -> CalendarPoller {
+        CalendarPoller {
+            http: self.http.clone(),
+            config: self.config.read().await.clone(),
+            state: Arc::clone(&self.state),
+            seen_occurrences: Arc::clone(&self.seen_occurrences),
+            poll_lock: Arc::clone(&self.poll_lock),
         }
     }
 
@@ -187,12 +207,7 @@ impl IntegrationAdapter for CalendarAdapter {
             return Ok(());
         }
 
-        let poller = CalendarPoller {
-            http: self.http.clone(),
-            config: self.config.read().await.clone(),
-            state: Arc::clone(&self.state),
-            seen_occurrences: Arc::clone(&self.seen_occurrences),
-        };
+        let poller = self.make_poller().await;
         let handle = tokio::spawn(poller.run_loop(event_bus, connections));
         *self.poll_task.lock().await = Some(handle);
         Ok(())
@@ -206,6 +221,20 @@ impl IntegrationAdapter for CalendarAdapter {
         if let Some(handle) = self.poll_task.lock().await.take() {
             handle.abort();
         }
+        Ok(())
+    }
+
+    async fn sync_now(&self, event_bus: Arc<dyn EventBus>) -> Result<()> {
+        let connections = self.state.read().await.connections.clone();
+        if connections.is_empty() {
+            return Ok(());
+        }
+        // Manual sync is never "first poll" -- see GitHubAdapter::sync_now's
+        // matching comment (`step46.md`).
+        self.make_poller()
+            .await
+            .run_cycle(&event_bus, &connections, false)
+            .await;
         Ok(())
     }
 }
@@ -362,6 +391,7 @@ struct CalendarPoller {
     config: CalendarConfig,
     state: Arc<RwLock<AdapterState>>,
     seen_occurrences: Arc<Mutex<HashSet<(Uuid, String, i64)>>>,
+    poll_lock: Arc<Mutex<()>>,
 }
 
 impl CalendarPoller {
@@ -476,48 +506,65 @@ impl CalendarPoller {
         }
     }
 
-    async fn run_loop(self, event_bus: Arc<dyn EventBus>, connections: Vec<CalendarConnection>) {
+    /// One poll cycle's worth of work -- everything `run_loop` used to do
+    /// inline except the trailing sleep, and everything `sync_now` needs to
+    /// run exactly once, out-of-band (`step46.md`, mirrors
+    /// `SlackPoller::run_cycle`). Returns how long the caller should wait
+    /// before the next cycle; `sync_now` ignores it. Serialized against
+    /// every other `run_cycle` call on this adapter via `poll_lock`, so a
+    /// manual sync landing mid-interval can't race the background loop's
+    /// own tick over `seen_occurrences`.
+    async fn run_cycle(
+        &self,
+        event_bus: &Arc<dyn EventBus>,
+        connections: &[CalendarConnection],
+        is_first_poll: bool,
+    ) -> Duration {
+        let _guard = self.poll_lock.lock().await;
         let base_interval = Duration::from_secs(self.config.sync_interval_secs.max(1));
-        let mut is_first_poll = true;
-        loop {
-            let (result, retry_after) = self
-                .poll_once(&event_bus, &connections, is_first_poll)
+        let (result, retry_after) = self.poll_once(event_bus, connections, is_first_poll).await;
+
+        let (status, prev_status) = {
+            let mut state = self.state.write().await;
+            let prev_status = state.status.clone();
+            let (failures, status) = next_status(&prev_status, state.consecutive_failures, result);
+            state.consecutive_failures = failures;
+            state.status = status.clone();
+            (status, prev_status)
+        };
+
+        if status != prev_status {
+            let _ = event_bus
+                .publish(Event::IntegrationStatusChanged {
+                    source: IntegrationSource::Calendar,
+                    status: to_event_status(&status),
+                })
                 .await;
-            is_first_poll = false;
+        }
 
-            let (status, prev_status) = {
-                let mut state = self.state.write().await;
-                let prev_status = state.status.clone();
-                let (failures, status) =
-                    next_status(&prev_status, state.consecutive_failures, result);
-                state.consecutive_failures = failures;
-                state.status = status.clone();
-                (status, prev_status)
-            };
-
-            if status != prev_status {
+        if let ConnectionStatus::Failed(reason) = &status {
+            if !matches!(prev_status, ConnectionStatus::Failed(_)) {
                 let _ = event_bus
-                    .publish(Event::IntegrationStatusChanged {
-                        source: IntegrationSource::Calendar,
-                        status: to_event_status(&status),
-                    })
+                    .publish(Event::SystemAlert(format!(
+                        "Calendar integration failed: {reason}"
+                    )))
                     .await;
             }
+        }
 
-            if let ConnectionStatus::Failed(reason) = &status {
-                if !matches!(prev_status, ConnectionStatus::Failed(_)) {
-                    let _ = event_bus
-                        .publish(Event::SystemAlert(format!(
-                            "Calendar integration failed: {reason}"
-                        )))
-                        .await;
-                }
-            }
+        match (result, retry_after) {
+            (PollResult::RateLimited, Some(secs)) => Duration::from_secs(secs),
+            _ => base_interval,
+        }
+    }
 
-            let wait = match (result, retry_after) {
-                (PollResult::RateLimited, Some(secs)) => Duration::from_secs(secs),
-                _ => base_interval,
-            };
+    async fn run_loop(self, event_bus: Arc<dyn EventBus>, connections: Vec<CalendarConnection>) {
+        let mut is_first_poll = true;
+        loop {
+            let wait = self
+                .run_cycle(&event_bus, &connections, is_first_poll)
+                .await;
+            is_first_poll = false;
             tokio::time::sleep(wait).await;
         }
     }
@@ -1030,6 +1077,16 @@ mod tests {
         let (adapter, _writer) = test_adapter();
         adapter.initialize(&NoneProvider).await.unwrap();
         assert!(adapter.start(event_bus).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sync_now_without_any_connection_is_a_harmless_no_op() {
+        // Same "not configured is not an error" reasoning as start()
+        // (`step46.md`).
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+        let (adapter, _writer) = test_adapter();
+        adapter.initialize(&NoneProvider).await.unwrap();
+        assert!(adapter.sync_now(event_bus).await.is_ok());
     }
 
     const NON_RECURRING_ICS: &str = "BEGIN:VCALENDAR\r\n\

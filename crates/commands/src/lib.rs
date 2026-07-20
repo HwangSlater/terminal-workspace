@@ -7,7 +7,7 @@ use domain::{
     PresenceRepository, PresenceStatus, UserId,
 };
 use events::{Event, EventBus, EventHandler};
-use integration::{CalendarManager, IntegrationConnector, SlackMessenger};
+use integration::{CalendarManager, IntegrationAdapter, IntegrationConnector, SlackMessenger};
 use logging::{spans::command_span, TraceContext};
 use scheduler::AgendaScheduler;
 use serde::{Deserialize, Serialize};
@@ -252,6 +252,13 @@ pub struct WorkspaceCommandHandler {
     /// and nothing else in the system needs to react to it the way the
     /// `Projector`'s other, integration-originated events do.
     read_model: SharedReadModel,
+    /// Every constructed integration adapter, keyed by source
+    /// (`step46.md`, backing `Command::SyncAllAdapters`) -- same keyed-
+    /// registry shape as `connectors`/`selection_appliers` above. Present
+    /// even for an adapter that's never been connected;
+    /// `IntegrationAdapter::sync_now` is a no-op in that case, the same
+    /// "not configured is not an error" rule `start()` already follows.
+    syncable_adapters: HashMap<IntegrationSource, Arc<dyn IntegrationAdapter>>,
 }
 
 /// Looks up `source` in a connector/applier registry, or returns the same
@@ -283,6 +290,7 @@ impl WorkspaceCommandHandler {
         scheduler: Arc<AgendaScheduler>,
         calendar_manager: Option<Arc<dyn CalendarManager>>,
         read_model: SharedReadModel,
+        syncable_adapters: HashMap<IntegrationSource, Arc<dyn IntegrationAdapter>>,
     ) -> Self {
         Self {
             presence_repo,
@@ -295,6 +303,7 @@ impl WorkspaceCommandHandler {
             scheduler,
             calendar_manager,
             read_model,
+            syncable_adapters,
         }
     }
 }
@@ -396,7 +405,19 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                 applier.apply(Arc::clone(&self.event_bus), items).await
             }
             Command::SyncAllAdapters => {
-                tracing::info!("SyncAllAdapters requested; no integration adapters registered yet");
+                // One adapter's sync failing must not stop the others --
+                // same "one bad calendar must not stop the others"
+                // reasoning `CalendarPoller::poll_one` already follows
+                // (`step46.md`). In practice `sync_now` never actually
+                // returns `Err` today (poll failures surface through the
+                // adapter's own status/health_check, not as a command
+                // error) -- this loop stays defensive against a future
+                // adapter that does.
+                for (source, adapter) in &self.syncable_adapters {
+                    if let Err(e) = adapter.sync_now(Arc::clone(&self.event_bus)).await {
+                        tracing::warn!("SyncAllAdapters: {source:?} sync failed: {e}");
+                    }
+                }
                 Ok(())
             }
             Command::StartPomodoro {
@@ -654,6 +675,7 @@ mod tests {
             AgendaScheduler::new(bus as Arc<dyn EventBus>),
             Some(calendar_manager),
             Arc::new(RwLock::new(DashboardReadModel::default())),
+            HashMap::new(),
         ))
     }
 
@@ -678,6 +700,7 @@ mod tests {
             AgendaScheduler::new(Arc::clone(&bus) as Arc<dyn EventBus>),
             None,
             Arc::clone(&read_model),
+            HashMap::new(),
         ));
         (handler, presence, notifications, bus, read_model)
     }
@@ -702,6 +725,7 @@ mod tests {
             Arc::clone(&scheduler),
             None,
             Arc::new(RwLock::new(DashboardReadModel::default())),
+            HashMap::new(),
         ));
         (handler, scheduler)
     }
@@ -907,6 +931,135 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
+    }
+
+    /// Records every `sync_now` call -- everything else `IntegrationAdapter`
+    /// requires is an unused stub, since `Command::SyncAllAdapters`'s
+    /// handler only ever calls `sync_now` (`step46.md`).
+    struct MockAdapter {
+        synced: Arc<Mutex<Vec<IntegrationSource>>>,
+        source: IntegrationSource,
+        should_fail: bool,
+    }
+
+    #[async_trait]
+    impl IntegrationAdapter for MockAdapter {
+        async fn initialize(&self, _secret_provider: &dyn secrets::SecretProvider) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&self, _event_bus: Arc<dyn EventBus>) -> Result<()> {
+            Ok(())
+        }
+        async fn health_check(&self) -> Result<integration::ConnectionStatus> {
+            Ok(integration::ConnectionStatus::Connected)
+        }
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn sync_now(&self, _event_bus: Arc<dyn EventBus>) -> Result<()> {
+            if self.should_fail {
+                return Err(common::WorkspaceError::Integration("boom".into()));
+            }
+            self.synced.lock().await.push(self.source);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_all_adapters_calls_sync_now_on_every_registered_adapter() {
+        let synced = Arc::new(Mutex::new(Vec::new()));
+        let mut syncable_adapters: HashMap<IntegrationSource, Arc<dyn IntegrationAdapter>> =
+            HashMap::new();
+        syncable_adapters.insert(
+            IntegrationSource::Slack,
+            Arc::new(MockAdapter {
+                synced: Arc::clone(&synced),
+                source: IntegrationSource::Slack,
+                should_fail: false,
+            }),
+        );
+        syncable_adapters.insert(
+            IntegrationSource::GitHub,
+            Arc::new(MockAdapter {
+                synced: Arc::clone(&synced),
+                source: IntegrationSource::GitHub,
+                should_fail: false,
+            }),
+        );
+
+        let presence = Arc::new(MockPresenceRepo::default());
+        let notifications = Arc::new(MockNotificationRepo::default());
+        let bus = Arc::new(InProcessEventBus::new(10));
+        let handler = WorkspaceCommandHandler::new(
+            presence as Arc<dyn PresenceRepository>,
+            notifications as Arc<dyn NotificationRepository>,
+            Arc::clone(&bus) as Arc<dyn EventBus>,
+            None,
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            AgendaScheduler::new(bus as Arc<dyn EventBus>),
+            None,
+            Arc::new(RwLock::new(DashboardReadModel::default())),
+            syncable_adapters,
+        );
+
+        handler.handle(Command::SyncAllAdapters).await.unwrap();
+
+        let mut synced = synced.lock().await.clone();
+        synced.sort_by_key(|s| format!("{s:?}"));
+        assert_eq!(
+            synced,
+            [IntegrationSource::GitHub, IntegrationSource::Slack]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_all_adapters_keeps_going_after_one_adapter_fails() {
+        let synced = Arc::new(Mutex::new(Vec::new()));
+        let mut syncable_adapters: HashMap<IntegrationSource, Arc<dyn IntegrationAdapter>> =
+            HashMap::new();
+        syncable_adapters.insert(
+            IntegrationSource::Slack,
+            Arc::new(MockAdapter {
+                synced: Arc::clone(&synced),
+                source: IntegrationSource::Slack,
+                should_fail: true,
+            }),
+        );
+        syncable_adapters.insert(
+            IntegrationSource::GitHub,
+            Arc::new(MockAdapter {
+                synced: Arc::clone(&synced),
+                source: IntegrationSource::GitHub,
+                should_fail: false,
+            }),
+        );
+
+        let presence = Arc::new(MockPresenceRepo::default());
+        let notifications = Arc::new(MockNotificationRepo::default());
+        let bus = Arc::new(InProcessEventBus::new(10));
+        let handler = WorkspaceCommandHandler::new(
+            presence as Arc<dyn PresenceRepository>,
+            notifications as Arc<dyn NotificationRepository>,
+            Arc::clone(&bus) as Arc<dyn EventBus>,
+            None,
+            None,
+            HashMap::new(),
+            HashMap::new(),
+            AgendaScheduler::new(bus as Arc<dyn EventBus>),
+            None,
+            Arc::new(RwLock::new(DashboardReadModel::default())),
+            syncable_adapters,
+        );
+
+        // The failing Slack adapter must not stop GitHub's sync_now from
+        // running, and the overall command still reports success -- a
+        // manual sync is best-effort across adapters, the same reasoning
+        // CalendarPoller::poll_one already applies within one adapter.
+        let result = handler.handle(Command::SyncAllAdapters).await;
+        assert!(result.is_ok());
+        assert_eq!(synced.lock().await.as_slice(), [IntegrationSource::GitHub]);
     }
 
     #[tokio::test]

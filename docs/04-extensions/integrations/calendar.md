@@ -24,7 +24,7 @@ One domain event flows out of this adapter into the Event Bus (`crates/events`),
 
 ## Receiving
 
-Polling loop (`tokio::time::interval`, period = `[integrations.calendar].sync_interval_secs`, default 900s — no point polling faster than Google's own feed cache refreshes) iterates **every** configured calendar each cycle, same shared interval for all (`step24.md` — nothing asks for a per-calendar interval):
+Polling loop (`tokio::time::interval`, period = `[integrations.calendar].sync_interval_secs`, default 900s — no point polling faster than Google's own feed cache refreshes) iterates **every** configured calendar each cycle, same shared interval for all (`step24.md` — nothing asks for a per-calendar interval). `/sync` (`step46.md`) forces one cycle immediately without waiting for the timer, the same way it does for Slack/GitHub:
 
 1. For each connection: `GET` its secret iCal URL, parse the returned `VCALENDAR` (`ical` crate).
 2. For each `VEVENT`, expand its occurrences via `RRuleSet` (`rrule` crate): the `DTSTART` (and `RRULE`/`EXDATE` if present) are reassembled into raw iCal property lines and parsed as an `RRuleSet`, which handles both the date/time format and any `TZID` timezone qualifier correctly — this is exactly the part not worth hand-rolling (see `step12.md`'s Context for why). A `VEVENT` with no `RRULE` gets its `DTSTART` injected as an explicit `RDATE` line first, since `RRuleSet`'s iterator only ever draws from `RRULE`/`RDATE` entries and yields nothing for a bare `DTSTART` on its own (a real bug caught during implementation — see `step12.md`'s Implementation Notes).

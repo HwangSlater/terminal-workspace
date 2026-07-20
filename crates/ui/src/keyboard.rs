@@ -38,6 +38,7 @@ const COMMAND_HEADS: &[&str] = &[
     "/calendar-rename",
     "/calendar-remove",
     "/read-all",
+    "/sync",
 ];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
@@ -1002,6 +1003,7 @@ fn parse_command(text: &str, state: &WorkspaceState) -> Result<Option<Command>, 
         "/calendar-rename" => parse_calendar_rename_command(rest, &state.calendar_picker),
         "/calendar-remove" => parse_calendar_remove_command(rest, &state.calendar_picker),
         "/read-all" => Ok(Some(Command::MarkAllNotificationsRead)),
+        "/sync" => Ok(Some(Command::SyncAllAdapters)),
         _ => Ok(None),
     }
 }
@@ -1785,6 +1787,16 @@ mod tests {
             outcome,
             KeyOutcome::SubmitCommand(Command::MarkAllNotificationsRead)
         );
+    }
+
+    #[test]
+    fn sync_parses_to_sync_all_adapters() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/sync");
+        assert_eq!(outcome, KeyOutcome::SubmitCommand(Command::SyncAllAdapters));
     }
 
     #[test]

@@ -278,6 +278,10 @@ const HELP_CATEGORIES: &[HelpCategory] = &[
                 description: "안 읽은 알림 전체 읽음 처리",
             },
             HelpEntry {
+                key: "/sync",
+                description: "연결된 모든 연동을 지금 바로 동기화",
+            },
+            HelpEntry {
                 key: "Tab",
                 description: "명령어/채널/저장소/캘린더 자동완성 (연속 Tab: 다음 후보)",
             },

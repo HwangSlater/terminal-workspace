@@ -74,6 +74,13 @@ pub struct SlackAdapter {
     channel_cursor: Arc<Mutex<HashMap<String, String>>>,
     poll_task: Mutex<Option<JoinHandle<()>>>,
     secret_writer: Arc<dyn SecretWriter>,
+    /// Serializes every `run_cycle` call (background-loop iterations and
+    /// `sync_now`'s one-off cycles alike) against each other, so a manual
+    /// `/sync` landing at the same moment as the interval loop's own tick
+    /// can't race it over `channel_cursor` -- both would otherwise be able
+    /// to read the same "oldest" cursor before either writes it back,
+    /// double-publishing the same messages (`step46.md`).
+    poll_lock: Arc<Mutex<()>>,
 }
 
 impl SlackAdapter {
@@ -95,6 +102,7 @@ impl SlackAdapter {
             channel_cursor: Arc::new(Mutex::new(HashMap::new())),
             poll_task: Mutex::new(None),
             secret_writer,
+            poll_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -126,13 +134,7 @@ impl IntegrationAdapter for SlackAdapter {
             return Ok(());
         };
 
-        let poller = SlackPoller {
-            http: self.http.clone(),
-            config: self.config.read().await.clone(),
-            state: Arc::clone(&self.state),
-            display_name_cache: Arc::clone(&self.display_name_cache),
-            channel_cursor: Arc::clone(&self.channel_cursor),
-        };
+        let poller = self.make_poller().await;
         let handle = tokio::spawn(poller.run_loop(event_bus, token));
         *self.poll_task.lock().await = Some(handle);
         Ok(())
@@ -147,6 +149,32 @@ impl IntegrationAdapter for SlackAdapter {
             handle.abort();
         }
         Ok(())
+    }
+
+    async fn sync_now(&self, event_bus: Arc<dyn EventBus>) -> Result<()> {
+        let Some(token) = self.state.read().await.token.clone() else {
+            return Ok(());
+        };
+        self.make_poller().await.run_cycle(&event_bus, &token).await;
+        Ok(())
+    }
+}
+
+impl SlackAdapter {
+    /// Snapshots everything a poll cycle needs, sharing this adapter's
+    /// long-lived state via `Arc`/`Mutex` clones rather than copying it --
+    /// used both by `start()` (the background loop) and `sync_now` (a
+    /// single out-of-band cycle), so both see and mutate the exact same
+    /// cursor/status state.
+    async fn make_poller(&self) -> SlackPoller {
+        SlackPoller {
+            http: self.http.clone(),
+            config: self.config.read().await.clone(),
+            state: Arc::clone(&self.state),
+            display_name_cache: Arc::clone(&self.display_name_cache),
+            channel_cursor: Arc::clone(&self.channel_cursor),
+            poll_lock: Arc::clone(&self.poll_lock),
+        }
     }
 }
 
@@ -281,6 +309,7 @@ struct SlackPoller {
     state: Arc<RwLock<AdapterState>>,
     display_name_cache: Arc<Mutex<HashMap<String, String>>>,
     channel_cursor: Arc<Mutex<HashMap<String, String>>>,
+    poll_lock: Arc<Mutex<()>>,
 }
 
 impl SlackPoller {
@@ -394,44 +423,57 @@ impl SlackPoller {
         (result, retry_after)
     }
 
-    async fn run_loop(self, event_bus: Arc<dyn EventBus>, token: String) {
+    /// One poll cycle's worth of work: `poll_once`, the consecutive-failure
+    /// state machine, and status-change event publishing -- everything
+    /// `run_loop` used to do inline except the trailing sleep, and
+    /// everything `sync_now` needs to run exactly once, out-of-band
+    /// (`step46.md`). Returns how long the caller should wait before the
+    /// next cycle; `sync_now` ignores it, since it isn't scheduling a next
+    /// cycle. Serialized against every other `run_cycle` call on this same
+    /// adapter via `poll_lock`, so a manual sync landing mid-interval can't
+    /// race the background loop's own tick over `channel_cursor`.
+    async fn run_cycle(&self, event_bus: &Arc<dyn EventBus>, token: &str) -> Duration {
+        let _guard = self.poll_lock.lock().await;
         let base_interval = Duration::from_secs(self.config.sync_interval_secs.max(1));
-        loop {
-            let (result, retry_after) = self.poll_once(&event_bus, &token).await;
+        let (result, retry_after) = self.poll_once(event_bus, token).await;
 
-            let (status, prev_status) = {
-                let mut state = self.state.write().await;
-                let prev_status = state.status.clone();
-                let (failures, status) =
-                    next_status(&prev_status, state.consecutive_failures, result);
-                state.consecutive_failures = failures;
-                state.status = status.clone();
-                (status, prev_status)
-            };
+        let (status, prev_status) = {
+            let mut state = self.state.write().await;
+            let prev_status = state.status.clone();
+            let (failures, status) = next_status(&prev_status, state.consecutive_failures, result);
+            state.consecutive_failures = failures;
+            state.status = status.clone();
+            (status, prev_status)
+        };
 
-            if status != prev_status {
+        if status != prev_status {
+            let _ = event_bus
+                .publish(Event::IntegrationStatusChanged {
+                    source: IntegrationSource::Slack,
+                    status: to_event_status(&status),
+                })
+                .await;
+        }
+
+        if let ConnectionStatus::Failed(reason) = &status {
+            if !matches!(prev_status, ConnectionStatus::Failed(_)) {
                 let _ = event_bus
-                    .publish(Event::IntegrationStatusChanged {
-                        source: IntegrationSource::Slack,
-                        status: to_event_status(&status),
-                    })
+                    .publish(Event::SystemAlert(format!(
+                        "Slack integration failed: {reason}"
+                    )))
                     .await;
             }
+        }
 
-            if let ConnectionStatus::Failed(reason) = &status {
-                if !matches!(prev_status, ConnectionStatus::Failed(_)) {
-                    let _ = event_bus
-                        .publish(Event::SystemAlert(format!(
-                            "Slack integration failed: {reason}"
-                        )))
-                        .await;
-                }
-            }
+        match (result, retry_after) {
+            (PollResult::RateLimited, Some(secs)) => Duration::from_secs(secs),
+            _ => base_interval,
+        }
+    }
 
-            let wait = match (result, retry_after) {
-                (PollResult::RateLimited, Some(secs)) => Duration::from_secs(secs),
-                _ => base_interval,
-            };
+    async fn run_loop(self, event_bus: Arc<dyn EventBus>, token: String) {
+        loop {
+            let wait = self.run_cycle(&event_bus, &token).await;
             tokio::time::sleep(wait).await;
         }
     }
@@ -1043,6 +1085,16 @@ mod tests {
         let (adapter, _writer) = test_adapter();
         adapter.initialize(&NoneProvider).await.unwrap();
         assert!(adapter.start(event_bus).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sync_now_without_credential_is_a_harmless_no_op() {
+        // Same "not configured is not an error" reasoning as start()
+        // (`step46.md`) -- no token means nothing to poll, not a failure.
+        let event_bus = Arc::new(events::InProcessEventBus::new(8)) as Arc<dyn EventBus>;
+        let (adapter, _writer) = test_adapter();
+        adapter.initialize(&NoneProvider).await.unwrap();
+        assert!(adapter.sync_now(event_bus).await.is_ok());
     }
 
     #[test]

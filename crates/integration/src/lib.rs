@@ -128,4 +128,18 @@ pub trait IntegrationAdapter: Send + Sync {
 
     /// Stops the sync loop and releases resources.
     async fn shutdown(&self) -> Result<()>;
+
+    /// Runs one poll cycle immediately, out-of-band from the interval
+    /// loop's own schedule (`step46.md`, backing `Command::SyncAllAdapters`
+    /// / `/sync`). A no-op returning `Ok(())` when the adapter has no
+    /// credential/connection to poll with — same "not configured is not an
+    /// error" reasoning `start()` already uses (`integration-contract.md`
+    /// §2.3), not something a manual sync should surface as a failure.
+    /// Each implementation serializes this against its own background
+    /// loop (a shared per-adapter lock) rather than restarting the loop —
+    /// restarting would reset GitHub's/Calendar's per-loop "is this the
+    /// first poll" tracking and wrongly mark anything a manual sync turns
+    /// up as already-read, suppressing the desktop toast a manual sync is
+    /// specifically for.
+    async fn sync_now(&self, event_bus: Arc<dyn EventBus>) -> Result<()>;
 }

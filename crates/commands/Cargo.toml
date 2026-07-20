@@ -21,3 +21,4 @@ tokio = { workspace = true, features = ["sync"] }
 tokio.workspace = true
 uuid.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+secrets = { path = "../secrets" }

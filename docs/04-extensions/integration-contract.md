@@ -45,8 +45,17 @@ pub trait IntegrationAdapter: Send + Sync {
 
     /// Stops the sync loop and releases any resources.
     async fn shutdown(&self) -> common::Result<()>;
+
+    /// Runs one poll cycle immediately, out-of-band from the interval
+    /// loop's own schedule (`step46.md`, backing `Command::SyncAllAdapters`
+    /// / `/sync`). A no-op returning `Ok(())` when there's nothing to poll
+    /// with (no credential/connection) — same "not configured is not an
+    /// error" rule §2.3 gives `start()`.
+    async fn sync_now(&self, event_bus: Arc<dyn EventBus>) -> common::Result<()>;
 }
 ```
+
+**`step46.md`**: every implementation serializes `sync_now` against its own background loop via a shared per-adapter lock, and reuses the exact same poll-cycle logic (`poll_once` + the §2.1 failure-count state machine + status-change events) rather than restarting the loop. Restarting would have been the simpler-looking option (`shutdown()` then `start()`, which every existing selection-update method — `SlackAdapter::update_selection`, `GitHubAdapter::update_selection`, `CalendarAdapter::keep_only` — already does), but it resets any per-loop "is this the very first poll" tracking a concrete adapter keeps (GitHub's and Calendar's do; Slack's doesn't, since its per-channel cursor already persists that signal). A restarted loop would then treat anything a manual sync turns up as if it predated this session and mark it already-read, silently suppressing the desktop toast a manual sync exists to produce.
 
 `common::Result` (i.e. `Result<T, WorkspaceError>`) is used here rather than a bespoke `AdapterError`, matching every other trait in this codebase (`NotificationRepository`, `SecretProvider`, etc.) — a per-adapter error type would be one more thing call sites need to convert, for no benefit `WorkspaceError::Integration(String)` doesn't already provide.
 

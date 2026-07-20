@@ -486,6 +486,7 @@ dependencies = [
  "integration",
  "logging",
  "scheduler",
+ "secrets",
  "serde",
  "tokio",
  "tracing",

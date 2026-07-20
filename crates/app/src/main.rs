@@ -465,6 +465,22 @@ async fn main() -> Result<()> {
             calendar_adapter: Arc::clone(&calendar_adapter),
         }),
     );
+    // `Command::SyncAllAdapters` / `/sync` (`step46.md`) target -- every
+    // constructed adapter, keyed the same way `connectors` is above.
+    let mut syncable_adapters: HashMap<IntegrationSource, Arc<dyn IntegrationAdapter>> =
+        HashMap::new();
+    syncable_adapters.insert(
+        IntegrationSource::Slack,
+        Arc::clone(&slack_adapter) as Arc<dyn IntegrationAdapter>,
+    );
+    syncable_adapters.insert(
+        IntegrationSource::GitHub,
+        Arc::clone(&github_adapter) as Arc<dyn IntegrationAdapter>,
+    );
+    syncable_adapters.insert(
+        IntegrationSource::Calendar,
+        Arc::clone(&calendar_adapter) as Arc<dyn IntegrationAdapter>,
+    );
 
     let event_bus = Arc::new(InProcessEventBus::new(256));
 
@@ -499,6 +515,7 @@ async fn main() -> Result<()> {
         Arc::clone(&scheduler),
         Some(Arc::clone(&calendar_adapter) as Arc<dyn CalendarManager>),
         Arc::clone(&read_model),
+        syncable_adapters,
     ));
     let dispatcher: Arc<dyn CommandDispatcher> = Arc::new(InMemoryCommandDispatcher::new(handler));
 

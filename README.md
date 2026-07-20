@@ -65,6 +65,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 | `Ctrl+G` / `Ctrl+R` | GitHub 연결 설정 / 저장소 선택 |
 | `Ctrl+L` / `Ctrl+K` | Calendar 추가 / 연결된 캘린더 관리·제거 |
 | `Ctrl+Q` | 종료 |
+| (명령줄) `/sync` | 연결된 Slack/GitHub/Calendar를 지금 바로 한 번씩 동기화 (평소엔 각자 정해진 주기마다 자동 폴링) |
 
 `Ctrl+C`가 로그를 여는 게 낯설 수 있는데, 이 앱은 터미널을 raw mode로 실행하기 때문에 `Ctrl+C`가 평소처럼 프로세스를 강제 종료하는 시그널로 전달되지 않습니다 — 종료는 항상 `Ctrl+Q`입니다.
 
