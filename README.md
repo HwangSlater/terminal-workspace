@@ -8,6 +8,26 @@ Local First. Zero Configuration. Windows·macOS·Linux를 동등하게 지원하
 
 ## 시작하기
 
+### 미리 빌드된 바이너리로 설치 (권장)
+
+v1.0.0부터 [GitHub Releases](https://github.com/HwangSlater/terminal-workspace/releases)에서 미리 빌드된 바이너리를 받을 수 있습니다 — Rust나 C 컴파일러 설치 없이 바로 씁니다.
+
+**macOS / Linux:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/HwangSlater/terminal-workspace/releases/latest/download/app-installer.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/HwangSlater/terminal-workspace/releases/latest/download/app-installer.ps1 | iex"
+```
+
+설치 스크립트가 `$HOME/.cargo/bin`에 넣고 PATH에 등록해줍니다 — 새 터미널을 열어 `app`을 실행하세요. Windows용 `.msi` 인스톨러도 Releases 페이지에 따로 있습니다. 설정 파일을 손으로 작성할 필요는 없습니다 — 처음 실행하면 `config.toml`과 로컬 데이터베이스가 자동으로 만들어집니다.
+
+### 소스에서 빌드 (컨트리뷰터용)
+
 **1. Rust 설치** (아직 없으시다면): <https://rustup.rs>. 데이터베이스는 순수 Rust 임베디드 저장소(redb)라 별도 서버가 필요 없습니다 — 다만 플러그인 런타임(WASM 샌드박스)이 빌드 시점에 C 컴파일러를 요구해서, Windows/Linux에서는 `cargo run -p app` 자체가 그 영향을 받습니다 (macOS는 원래 필요한 Xcode Command Line Tools가 이미 충족시켜 줍니다). 아래 OS별 안내를 확인하세요.
 
 **2. 실행:**
@@ -16,11 +36,9 @@ Local First. Zero Configuration. Windows·macOS·Linux를 동등하게 지원하
 cargo run -p app
 ```
 
-설정 파일을 손으로 작성할 필요가 없습니다 — 처음 실행하면 `config.toml`과 로컬 데이터베이스가 자동으로 만들어집니다.
-
 선택: `scripts/setup.ps1`(Windows) / `scripts/setup.sh`(Linux/macOS)로 환경을 한 번에 점검할 수 있습니다 — `rustup` 존재 여부 확인, 빠진 게 있으면 정확한 설치 명령어 안내, `cargo check --workspace`까지 한 번에 해줍니다.
 
-### Windows
+#### Windows
 
 대부분의 경우 위 두 단계로 끝입니다. 만약 아래 오류를 만나면(플러그인 런타임의 WASM 샌드박스를 빌드하는 데 C 컴파일러가 필요해서 나는 오류입니다):
 
@@ -30,11 +48,11 @@ error: error calling dlltool 'dlltool.exe': program not found
 
 GCC 기반 MinGW-w64를 설치하세요: `winget install BrechtSanders.WinLibs.POSIX.UCRT` (설치 프로그램 없이 압축 해제만 하는 방식이라 가볍습니다). **LLVM 기반 MinGW은 피하세요** — Rust가 기대하는 `libgcc`/`libgcc_eh`가 없어 링크가 실패합니다. 설치 후 `mingw64\bin` 폴더를 PATH에 추가하고 새 터미널에서 다시 시도하세요. (또는 Visual Studio Build Tools의 "Desktop development with C++" 워크로드 — 자세한 내용은 [`docs/06-development/platform-support.md`](docs/06-development/platform-support.md) §3.1 참고.)
 
-### macOS
+#### macOS
 
 Xcode Command Line Tools가 필요합니다 — 이미 있는지 `xcode-select -p`로 확인, 없으면 `xcode-select --install`. Slack 토큰은 macOS 키체인(Keychain Services)에 자동으로 저장됩니다.
 
-### Linux
+#### Linux
 
 HTTP 통신에 시스템 OpenSSL을 씁니다 (보통 데스크톱 배포판엔 이미 있습니다):
 
@@ -48,7 +66,7 @@ Slack 토큰은 데스크톱 환경(GNOME/KDE 등)이면 자동으로 키체인(
 
 ## 주요 기능
 
-앱을 실행하면(`cargo run -p app`) 터미널 전체 화면을 쓰는 대화형 UI가 뜹니다. 키보드로만 조작합니다 (Vim에서 영감을 받은 모달 입력 방식):
+앱을 실행하면(설치한 `app` 명령, 또는 소스에서라면 `cargo run -p app`) 터미널 전체 화면을 쓰는 대화형 UI가 뜹니다. 키보드로만 조작합니다 (Vim에서 영감을 받은 모달 입력 방식):
 
 팀 목록은 헤더에 항상 표시되고(`● 이름` 형태), 본문은 알림·캘린더 두 패널이 화면을 나눠 씁니다.
 
