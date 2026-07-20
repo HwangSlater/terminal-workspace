@@ -352,10 +352,35 @@ pub enum CalendarPickerStatus {
 pub struct CalendarPickerState {
     /// Currently connected calendars.
     pub calendars: Vec<PickerRow>,
-    /// Index into `calendars`.
+    /// Index into the *visible* (post-filter) `calendars` list, not the
+    /// raw one (`step43.md`, mirroring `step37.md`'s Slack/GitHub
+    /// treatment) -- `visible_indices` translates between the two.
     pub cursor: usize,
     /// Current fetch/apply outcome.
     pub status: CalendarPickerStatus,
+    /// Live search text, same convention as
+    /// [`GitHubPickerState::filter_query`] (`step43.md`). Connected
+    /// calendar lists are usually short, so this was deliberately deferred
+    /// in `step37.md`; added once the user asked for it directly.
+    pub filter_query: String,
+    /// Whether `/` was pressed and keystrokes are going into
+    /// `filter_query` instead of navigation, same convention as
+    /// [`GitHubPickerState::filtering`].
+    pub filtering: bool,
+}
+
+impl CalendarPickerState {
+    /// Indices into `calendars` whose row matches `filter_query`
+    /// (`step43.md`). See [`GitHubPickerState::visible_indices`] for the
+    /// identically-shaped single-list version this mirrors.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        self.calendars
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.matches_filter(&self.filter_query))
+            .map(|(i, _)| i)
+            .collect()
+    }
 }
 
 /// Outcome of the month grid's on-demand fetch (`step25.md`). Simpler than
@@ -473,6 +498,17 @@ pub struct CommandBufferState {
     pub autocomplete_suggestions: Vec<String>,
     /// Currently highlighted autocomplete candidate, if any.
     pub selected_suggestion_index: Option<usize>,
+    /// Byte offset `apply_next_suggestion` splices candidates in at,
+    /// pinned on the *first* `Tab` of a cycle and reused for every
+    /// subsequent press rather than recomputed from `word_start` each time
+    /// (`step45.md`). Needed once candidates could contain spaces
+    /// (calendar labels) -- recomputing `word_start` after a multi-word
+    /// candidate had already been spliced in would find the space *inside*
+    /// that candidate instead of the original word boundary, corrupting
+    /// the replacement on the second and later `Tab` presses of the same
+    /// cycle. Reset alongside `selected_suggestion_index` on every real
+    /// edit (`refresh_suggestions`).
+    pub suggestion_anchor: Option<usize>,
     /// Previously submitted command lines, most recent last.
     pub history: Vec<String>,
     /// Position while scrolling through `history`; `None` means "not browsing history".

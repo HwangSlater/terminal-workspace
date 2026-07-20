@@ -274,8 +274,12 @@ const HELP_CATEGORIES: &[HelpCategory] = &[
                 description: "연결된 캘린더 제거",
             },
             HelpEntry {
+                key: "/read-all",
+                description: "안 읽은 알림 전체 읽음 처리",
+            },
+            HelpEntry {
                 key: "Tab",
-                description: "명령어/채널 자동완성 (연속 Tab: 다음 후보)",
+                description: "명령어/채널/저장소/캘린더 자동완성 (연속 Tab: 다음 후보)",
             },
         ],
     },
@@ -655,18 +659,34 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
+    frame.render_widget(
+        Paragraph::new(search_line(&picker.filter_query, picker.filtering))
+            .style(Style::default().fg(theme::MUTED)),
+        layout[0],
+    );
+
+    // `picker.cursor` indexes the *visible* (post-filter, `step43.md`)
+    // list now, not `calendars` directly.
+    let visible = picker.visible_indices();
     let mut items: Vec<ListItem> = Vec::new();
     if picker.calendars.is_empty() {
         items.push(ListItem::new(
             "  (연결된 캘린더가 없습니다 — Ctrl+L로 추가하세요)",
         ));
+    } else if visible.is_empty() {
+        items.push(ListItem::new("  (검색 결과 없음)"));
     }
-    for (i, row) in picker.calendars.iter().enumerate() {
+    for (visible_pos, &real_index) in visible.iter().enumerate() {
+        let row = &picker.calendars[real_index];
         let checkbox = if row.selected { "[x]" } else { "[ ]" };
-        let style = if picker.cursor == i {
+        let style = if picker.cursor == visible_pos {
             theme::selected_style()
         } else {
             Style::default()
@@ -675,16 +695,17 @@ fn render_calendar_picker_overlay(frame: &mut Frame, area: Rect, state: &Workspa
     }
     // Same scrolling fix as the GitHub/Slack pickers (`step29.md`).
     let mut list_state = ListState::default().with_selected(Some(picker.cursor));
-    frame.render_stateful_widget(List::new(items), layout[0], &mut list_state);
+    frame.render_stateful_widget(List::new(items), layout[1], &mut list_state);
 
     let status_line = match &picker.status {
         CalendarPickerStatus::Saving => "저장 중...",
         CalendarPickerStatus::Saved => "저장됨!",
-        _ => "↑/↓: 이동  Space: 선택/해제  e: 이름 변경  Enter: 저장  Esc: 닫기",
+        _ if picker.filtering => "입력 중... Enter: 검색 완료  Backspace: 지우기",
+        _ => "↑/↓: 이동  Space: 선택/해제  /: 검색  e: 이름 변경  Enter: 저장  Esc: 닫기",
     };
     frame.render_widget(
         Paragraph::new(status_line).style(Style::default().fg(theme::MUTED)),
-        layout[1],
+        layout[2],
     );
 }
 

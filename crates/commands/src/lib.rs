@@ -84,6 +84,15 @@ pub enum Command {
         id: NotificationId,
     },
 
+    /// Mark every currently-unread notification as read in one shot
+    /// (`step44.md`, `/read-all`) -- the command-line equivalent of
+    /// pressing `Enter` on each row in the Notification panel individually.
+    /// No id list is carried on the command itself; the handler reads
+    /// whichever ids are unread *at the moment it runs* off the live read
+    /// model, so a notification that arrives between dispatch and handling
+    /// is left alone rather than raced.
+    MarkAllNotificationsRead,
+
     /// Force synchronization check on all active integration adapters.
     SyncAllAdapters,
 
@@ -192,6 +201,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::ApplySlackSelection { .. } => "ApplySlackSelection",
         Command::ApplySelection { .. } => "ApplySelection",
         Command::MarkNotificationRead { .. } => "MarkNotificationRead",
+        Command::MarkAllNotificationsRead => "MarkAllNotificationsRead",
         Command::SyncAllAdapters => "SyncAllAdapters",
         Command::StartPomodoro { .. } => "StartPomodoro",
         Command::PausePomodoro => "PausePomodoro",
@@ -330,6 +340,32 @@ impl CommandHandler<Command> for WorkspaceCommandHandler {
                     .await
                     .unread_notifications
                     .retain(|n| n.id != id);
+                Ok(())
+            }
+            Command::MarkAllNotificationsRead => {
+                // Snapshot the ids first, release the lock, then write each
+                // one through the repository -- same "repo write must
+                // succeed before the read model reflects it" ordering as
+                // the single-id case above, just looped. A notification
+                // that arrives mid-loop (after the snapshot) is simply not
+                // in `ids` and is left unread, rather than needing to hold
+                // the write lock for the whole loop.
+                let ids: Vec<NotificationId> = self
+                    .read_model
+                    .read()
+                    .await
+                    .unread_notifications
+                    .iter()
+                    .map(|n| n.id.clone())
+                    .collect();
+                for id in &ids {
+                    self.notification_repo.mark_read(id).await?;
+                }
+                self.read_model
+                    .write()
+                    .await
+                    .unread_notifications
+                    .retain(|n| !ids.contains(&n.id));
                 Ok(())
             }
             Command::SendSlackMessage { channel_id, text } => match &self.slack_messenger {
@@ -736,6 +772,39 @@ mod tests {
             .map(|n| n.id.clone())
             .collect();
         assert_eq!(ids, vec![keep.id]);
+    }
+
+    #[tokio::test]
+    async fn mark_all_notifications_read_clears_every_unread_row() {
+        let (handler, _presence, notifications, _bus, read_model) = make_handler();
+        let first = sample_notification("first", 1);
+        let second = sample_notification("second", 2);
+        read_model.write().await.unread_notifications = vec![first.clone(), second.clone()];
+
+        handler
+            .handle(Command::MarkAllNotificationsRead)
+            .await
+            .unwrap();
+
+        assert!(read_model.read().await.unread_notifications.is_empty());
+        let mut marked = notifications.marked_read.lock().await.clone();
+        marked.sort_by_key(|id| id.0);
+        let mut expected = [first.id, second.id];
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(marked, expected);
+    }
+
+    #[tokio::test]
+    async fn mark_all_notifications_read_is_a_no_op_when_nothing_is_unread() {
+        let (handler, _presence, notifications, _bus, read_model) = make_handler();
+
+        handler
+            .handle(Command::MarkAllNotificationsRead)
+            .await
+            .unwrap();
+
+        assert!(read_model.read().await.unread_notifications.is_empty());
+        assert!(notifications.marked_read.lock().await.is_empty());
     }
 
     #[tokio::test]

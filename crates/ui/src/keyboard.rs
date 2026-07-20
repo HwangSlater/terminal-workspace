@@ -37,6 +37,7 @@ const COMMAND_HEADS: &[&str] = &[
     "/repo-watch",
     "/calendar-rename",
     "/calendar-remove",
+    "/read-all",
 ];
 
 /// Fixed focus-cycle order for `Tab`/`Shift+Tab` (`keyboard.md`'s "Cycles
@@ -232,6 +233,10 @@ fn try_global_shortcut(state: &mut WorkspaceState, key: KeyEvent) -> Option<KeyO
             state.focus_mode = FocusMode::Overlay;
             state.active_overlay = OverlayKind::CalendarPicker;
             state.calendar_picker.status = CalendarPickerStatus::Loading;
+            // See the matching comment on Ctrl+P above -- same reasoning
+            // (`step43.md`).
+            state.calendar_picker.filter_query.clear();
+            state.calendar_picker.filtering = false;
             Some(KeyOutcome::OpenPicker(IntegrationSource::Calendar))
         }
         (KeyCode::Char('m'), m) if m.contains(KeyModifiers::CONTROL) => {
@@ -478,17 +483,45 @@ fn capture_calendar_setup_input(state: &mut WorkspaceState, key: KeyEvent) -> Ke
 }
 
 /// Navigation + selection for the Calendar picker overlay (`step24.md`).
-/// Mirrors `capture_github_picker_input` exactly -- one list, "checked"
-/// means "keep", `Enter` submits the kept set (unchecked entries get
-/// removed by `CalendarAdapter::keep_only`, the inverse of GitHub's
-/// "checked means watch this repo").
+/// Mirrors `capture_github_picker_input` -- one list, "checked" means
+/// "keep", `Enter` submits the kept set (unchecked entries get removed by
+/// `CalendarAdapter::keep_only`, the inverse of GitHub's "checked means
+/// watch this repo"). `step43.md`: also gained the same `/`-filter
+/// sub-mode Slack/GitHub already had, so `picker.cursor` indexes the
+/// *visible* (post-filter) list, not `calendars` directly -- every lookup
+/// below goes through `visible_indices()` and `real_index` first.
 fn capture_calendar_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> KeyOutcome {
     let picker = &mut state.calendar_picker;
-    let total = picker.calendars.len();
+    // See `capture_slack_picker_input`'s matching comment (`step37.md`) --
+    // identical filter-typing sub-mode, mirrored here for a single list.
+    if picker.filtering {
+        return match key.code {
+            KeyCode::Char(c) => {
+                picker.filter_query.push(c);
+                picker.cursor = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Backspace => {
+                picker.filter_query.pop();
+                picker.cursor = 0;
+                KeyOutcome::Handled
+            }
+            KeyCode::Enter => {
+                picker.filtering = false;
+                KeyOutcome::Handled
+            }
+            _ => KeyOutcome::Handled,
+        };
+    }
+    let visible = picker.visible_indices();
     match key.code {
+        KeyCode::Char('/') => {
+            picker.filtering = true;
+            KeyOutcome::Handled
+        }
         KeyCode::Char('j') | KeyCode::Down => {
-            if total > 0 {
-                picker.cursor = (picker.cursor + 1).min(total - 1);
+            if !visible.is_empty() {
+                picker.cursor = (picker.cursor + 1).min(visible.len() - 1);
             }
             KeyOutcome::Handled
         }
@@ -497,12 +530,17 @@ fn capture_calendar_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> K
             KeyOutcome::Handled
         }
         KeyCode::Char(' ') => {
-            if let Some(row) = picker.calendars.get_mut(picker.cursor) {
-                row.selected = !row.selected;
+            if let Some(&real_index) = visible.get(picker.cursor) {
+                if let Some(row) = picker.calendars.get_mut(real_index) {
+                    row.selected = !row.selected;
+                }
             }
             KeyOutcome::Handled
         }
         KeyCode::Enter => {
+            // Submits every *checked* row regardless of the current
+            // filter, same "search only narrows what's browsed" rule as
+            // Slack/GitHub's pickers.
             let keep_ids = picker
                 .calendars
                 .iter()
@@ -516,7 +554,10 @@ fn capture_calendar_picker_input(state: &mut WorkspaceState, key: KeyEvent) -> K
         // rename prompt with its current label so `e` is "edit this," not
         // "clear and retype from scratch."
         KeyCode::Char('e') => {
-            if let Some(row) = picker.calendars.get(picker.cursor) {
+            if let Some(row) = visible
+                .get(picker.cursor)
+                .and_then(|&real_index| picker.calendars.get(real_index))
+            {
                 state.calendar_rename = CalendarRenameState {
                     id: row.id.clone(),
                     label_input: row.label.clone(),
@@ -723,6 +764,7 @@ fn capture_command_text(state: &mut WorkspaceState, key: KeyEvent) -> Option<Com
             state.cmd_buffer.history_index = None;
             state.cmd_buffer.autocomplete_suggestions = Vec::new();
             state.cmd_buffer.selected_suggestion_index = None;
+            state.cmd_buffer.suggestion_anchor = None;
 
             let result = parse_command(&text, state);
             state.cmd_buffer.history.push(text);
@@ -759,22 +801,29 @@ fn refresh_suggestions(state: &mut WorkspaceState) {
     state.cmd_buffer.autocomplete_suggestions = compute_suggestions(
         &state.cmd_buffer.raw_text,
         state.cmd_buffer.cursor_position,
-        &state.slack_picker,
+        state,
     );
     state.cmd_buffer.selected_suggestion_index = None;
+    state.cmd_buffer.suggestion_anchor = None;
 }
 
 /// `Tab`: advances to the next candidate (wrapping) and splices it into
-/// `raw_text` at the current word's boundaries. Deliberately does **not**
-/// recompute `autocomplete_suggestions` from the post-splice text — once
-/// the word has been replaced with a full candidate (e.g. `/a` → `/active`),
-/// re-deriving candidates from `/active` would only ever match itself,
-/// silently breaking cycling to `/away`. The candidate list is frozen from
-/// the last real edit; only the cursor/replacement position is
-/// recalculated each press (`word_start` is safe to call against
-/// already-completed text, since none of the candidates contain spaces —
-/// the word boundary itself doesn't move just because the word's content
-/// changed).
+/// `raw_text` at the word boundary the cycle started from. Deliberately
+/// does **not** recompute `autocomplete_suggestions` from the post-splice
+/// text — once the word has been replaced with a full candidate (e.g.
+/// `/a` → `/active`), re-deriving candidates from `/active` would only
+/// ever match itself, silently breaking cycling to `/away`. The candidate
+/// list is frozen from the last real edit.
+///
+/// The replacement span itself (`suggestion_anchor..cursor_position`) is
+/// computed via `word_start` once, on the first `Tab` of a cycle, and
+/// pinned in `suggestion_anchor` for every later press in that same cycle
+/// (`step45.md`) — recomputing `word_start` fresh each press used to be
+/// safe only because no candidate ever contained a space; now that
+/// calendar-label candidates can (e.g. "개인 일정"), recomputing after a
+/// multi-word candidate was already spliced in would find the space
+/// *inside* that candidate instead of the real word boundary, and cycling
+/// to the next candidate would silently replace only its last word.
 fn apply_next_suggestion(state: &mut WorkspaceState) {
     let buf = &mut state.cmd_buffer;
     if buf.autocomplete_suggestions.is_empty() {
@@ -786,7 +835,14 @@ fn apply_next_suggestion(state: &mut WorkspaceState) {
     };
     buf.selected_suggestion_index = Some(next_index);
 
-    let start = word_start(&buf.raw_text, buf.cursor_position);
+    let start = match buf.suggestion_anchor {
+        Some(start) => start,
+        None => {
+            let start = word_start(&buf.raw_text, buf.cursor_position);
+            buf.suggestion_anchor = Some(start);
+            start
+        }
+    };
     let replacement = buf.autocomplete_suggestions[next_index].clone();
     buf.raw_text
         .replace_range(start..buf.cursor_position, &replacement);
@@ -794,42 +850,113 @@ fn apply_next_suggestion(state: &mut WorkspaceState) {
 }
 
 /// The byte offset where the word under/before `cursor` begins — the last
-/// space before `cursor`, or `0`. Pure and cheap enough to call on every
-/// `Tab` press rather than caching it (`step13.md`).
+/// space before `cursor`, or `0` (`step13.md`). Called once per
+/// autocomplete cycle, on the first `Tab` press, and pinned into
+/// `suggestion_anchor` for the rest of that cycle (`step45.md`) rather
+/// than recomputed on every later press.
 fn word_start(text: &str, cursor: usize) -> usize {
     text[..cursor].rfind(' ').map_or(0, |i| i + 1)
 }
 
 /// Completion candidates for the word ending at `cursor`, or `[]` if that
-/// word isn't in a completable position. Two modes (`step13.md` Decision
-/// 1): the first word (a command head, prefix-matched against
-/// `COMMAND_HEADS`) or `/send`'s second word (a channel name, prefix-
-/// matched case-insensitively against `picker.channels`, same case
-/// sensitivity `resolve_channel_id` already uses). Anything else — the
-/// free-text message body, presence custom-text, non-`/send` second
-/// words — has no finite candidate set and yields nothing.
-fn compute_suggestions(text: &str, cursor: usize, picker: &SlackPickerState) -> Vec<String> {
+/// word isn't in a completable position. `step13.md` Decision 1 established
+/// the first mode (the first word, a command head, prefix-matched against
+/// `COMMAND_HEADS`) and `/send`'s channel-argument mode; `step45.md`
+/// extends the same "known finite list, prefix-matched case-insensitively"
+/// treatment to the argument position(s) of every `step41.md` picker
+/// command (`/slack-watch`, `/repo-watch`, `/calendar-rename`,
+/// `/calendar-remove`) -- resolving those names by hand against whatever a
+/// picker last fetched was exactly the friction `/slack-watch` etc. were
+/// meant to remove, and autocomplete had been left pointing only at
+/// `/send` since `step37.md` added picker search. Anything else — the
+/// free-text message body, presence custom-text, `/calendar-rename`'s new-
+/// label argument (freeform, not a lookup) — has no finite candidate set
+/// and yields nothing. Takes the whole `WorkspaceState` (not just
+/// `slack_picker`, mirroring `parse_command`'s `step41.md` widening) since
+/// resolving GitHub/Calendar names needs their own pickers too.
+fn compute_suggestions(text: &str, cursor: usize, state: &WorkspaceState) -> Vec<String> {
     let up_to_cursor = &text[..cursor];
     let words: Vec<&str> = up_to_cursor.split(' ').collect();
     let current_word = words.last().copied().unwrap_or("");
+    let head = words[0];
 
-    match words.len() {
-        1 if current_word.starts_with('/') => COMMAND_HEADS
+    match (words.len(), head) {
+        (1, _) if current_word.starts_with('/') => COMMAND_HEADS
             .iter()
-            .filter(|head| head.starts_with(current_word))
-            .map(|head| (*head).to_string())
+            .filter(|candidate| candidate.starts_with(current_word))
+            .map(|candidate| (*candidate).to_string())
             .collect(),
-        2 if words[0] == "/send" && current_word.starts_with('#') => {
-            let prefix = &current_word[1..];
-            picker
-                .channels
-                .iter()
-                .filter(|c| c.label.to_lowercase().starts_with(&prefix.to_lowercase()))
-                .map(|c| format!("#{}", c.label))
-                .collect()
+        // `/send`'s remaining words are the free-text message body, so
+        // only the second word (the channel) ever completes -- unlike the
+        // "watch" commands below, which accept an open-ended list.
+        (2, "/send") if current_word.starts_with('#') => {
+            channel_suggestions(current_word, &state.slack_picker)
+        }
+        (n, "/slack-watch") if n >= 2 && current_word.starts_with('#') => {
+            channel_suggestions(current_word, &state.slack_picker)
+        }
+        (n, "/repo-watch") if n >= 2 => repo_suggestions(current_word, &state.github_picker),
+        // Only the first argument (the calendar being targeted) is a
+        // lookup -- `/calendar-rename`'s second argument is the new label
+        // being typed in, not something to complete against.
+        (2, "/calendar-rename" | "/calendar-remove") => {
+            calendar_suggestions(current_word, &state.calendar_picker)
         }
         _ => Vec::new(),
     }
+}
+
+/// `#channel` candidates for `/send`/`/slack-watch`'s channel argument(s),
+/// matched case-insensitively against `picker.channels` (same case
+/// sensitivity `resolve_channel_id` already uses).
+fn channel_suggestions(current_word: &str, picker: &SlackPickerState) -> Vec<String> {
+    let prefix = &current_word[1..];
+    picker
+        .channels
+        .iter()
+        .filter(|c| c.label.to_lowercase().starts_with(&prefix.to_lowercase()))
+        .map(|c| format!("#{}", c.label))
+        .collect()
+}
+
+/// `owner/repo` candidates for `/repo-watch`, matched case-insensitively
+/// against whatever `Ctrl+R` last fetched.
+fn repo_suggestions(current_word: &str, picker: &GitHubPickerState) -> Vec<String> {
+    picker
+        .repositories
+        .iter()
+        .filter(|r| {
+            r.label
+                .to_lowercase()
+                .starts_with(&current_word.to_lowercase())
+        })
+        .map(|r| r.label.clone())
+        .collect()
+}
+
+/// Calendar-label candidates for `/calendar-rename`/`/calendar-remove`,
+/// matched case-insensitively against connected calendars. Splicing a
+/// multi-word label (e.g. "개인 일정") back into `raw_text` on `Tab` works
+/// correctly even though completion only ever replaces one word's worth of
+/// span (`apply_next_suggestion`'s `suggestion_anchor..cursor_position`)
+/// -- the replacement string itself is free to contain spaces, and this
+/// only ever matches while the cursor is still in the label's first word,
+/// so the span being replaced is exactly right. Completing a label from
+/// partway through its second-or-later word isn't supported -- an
+/// accepted limitation, not a bug: the same one `split_calendar_label`'s
+/// longest-prefix parsing
+/// exists to route around at submit time.
+fn calendar_suggestions(current_word: &str, picker: &CalendarPickerState) -> Vec<String> {
+    picker
+        .calendars
+        .iter()
+        .filter(|c| {
+            c.label
+                .to_lowercase()
+                .starts_with(&current_word.to_lowercase())
+        })
+        .map(|c| c.label.clone())
+        .collect()
 }
 
 /// `Ok(None)`: plain text, not a recognized command prefix — no error, not
@@ -874,6 +1001,7 @@ fn parse_command(text: &str, state: &WorkspaceState) -> Result<Option<Command>, 
         "/repo-watch" => parse_repo_watch_command(rest, &state.github_picker),
         "/calendar-rename" => parse_calendar_rename_command(rest, &state.calendar_picker),
         "/calendar-remove" => parse_calendar_remove_command(rest, &state.calendar_picker),
+        "/read-all" => Ok(Some(Command::MarkAllNotificationsRead)),
         _ => Ok(None),
     }
 }
@@ -1647,6 +1775,19 @@ mod tests {
     }
 
     #[test]
+    fn read_all_parses_to_mark_all_notifications_read() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            ..Default::default()
+        };
+        let outcome = type_and_submit(&mut state, "/read-all");
+        assert_eq!(
+            outcome,
+            KeyOutcome::SubmitCommand(Command::MarkAllNotificationsRead)
+        );
+    }
+
+    #[test]
     fn pomodoro_with_no_subcommand_is_a_usage_error() {
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Input,
@@ -2244,6 +2385,60 @@ mod tests {
     }
 
     #[test]
+    fn slash_filters_the_calendar_picker_and_space_toggles_the_filtered_row() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarPicker,
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "개인".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE)); // stop filtering
+        assert!(!state.calendar_picker.filtering);
+        assert_eq!(state.calendar_picker.visible_indices(), vec![1]);
+        handle_key(&mut state, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(state.calendar_picker.calendars[0].selected);
+        assert!(!state.calendar_picker.calendars[1].selected);
+    }
+
+    #[test]
+    fn calendar_picker_e_opens_the_rename_prompt_for_the_filtered_row() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Overlay,
+            active_overlay: OverlayKind::CalendarPicker,
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "개인".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Enter, KeyModifiers::NONE)); // stop filtering
+        let outcome = handle_key(&mut state, key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::Handled);
+        assert_eq!(state.calendar_rename.id, "id-2");
+        assert_eq!(state.calendar_rename.label_input, "개인");
+    }
+
+    #[test]
+    fn ctrl_k_clears_a_filter_left_over_from_a_previous_session() {
+        let mut state = WorkspaceState {
+            calendar_picker: crate::state::CalendarPickerState {
+                filter_query: "stale".to_string(),
+                filtering: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        handle_key(&mut state, key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(state.calendar_picker.filter_query, "");
+        assert!(!state.calendar_picker.filtering);
+    }
+
+    #[test]
     fn calendar_rename_enter_submits_the_command_and_updates_the_picker_row_immediately() {
         let mut state = WorkspaceState {
             focus_mode: FocusMode::Overlay,
@@ -2559,24 +2754,32 @@ mod tests {
         }
     }
 
+    fn state_with_slack_picker(picker: SlackPickerState) -> WorkspaceState {
+        WorkspaceState {
+            slack_picker: picker,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn compute_suggestions_matches_command_heads_by_prefix() {
-        let picker = SlackPickerState::default();
-        let mut candidates = compute_suggestions("/a", 2, &picker);
+        let state = WorkspaceState::default();
+        let mut candidates = compute_suggestions("/a", 2, &state);
         candidates.sort();
         assert_eq!(candidates, vec!["/active".to_string(), "/away".to_string()]);
     }
 
     #[test]
     fn compute_suggestions_is_empty_for_a_full_word_that_matches_nothing() {
-        let picker = SlackPickerState::default();
-        assert!(compute_suggestions("/xyz", 4, &picker).is_empty());
+        let state = WorkspaceState::default();
+        assert!(compute_suggestions("/xyz", 4, &state).is_empty());
     }
 
     #[test]
     fn compute_suggestions_matches_send_channel_argument_by_prefix() {
-        let picker = picker_with_channels(&["general", "general-eng", "random"]);
-        let mut candidates = compute_suggestions("/send #gen", 10, &picker);
+        let state =
+            state_with_slack_picker(picker_with_channels(&["general", "general-eng", "random"]));
+        let mut candidates = compute_suggestions("/send #gen", 10, &state);
         candidates.sort();
         assert_eq!(
             candidates,
@@ -2586,23 +2789,97 @@ mod tests {
 
     #[test]
     fn compute_suggestions_channel_matching_is_case_insensitive() {
-        let picker = picker_with_channels(&["General"]);
-        let candidates = compute_suggestions("/send #gen", 10, &picker);
+        let state = state_with_slack_picker(picker_with_channels(&["General"]));
+        let candidates = compute_suggestions("/send #gen", 10, &state);
         assert_eq!(candidates, vec!["#General".to_string()]);
     }
 
     #[test]
     fn compute_suggestions_does_not_offer_channels_for_non_send_commands() {
-        let picker = picker_with_channels(&["general"]);
-        assert!(compute_suggestions("/away #gen", 10, &picker).is_empty());
+        let state = state_with_slack_picker(picker_with_channels(&["general"]));
+        assert!(compute_suggestions("/away #gen", 10, &state).is_empty());
     }
 
     #[test]
     fn compute_suggestions_does_not_offer_channels_past_the_argument_position() {
         // Third word (the free-text message body) is never completable.
-        let picker = picker_with_channels(&["general"]);
+        let state = state_with_slack_picker(picker_with_channels(&["general"]));
         let text = "/send #general #gen";
-        assert!(compute_suggestions(text, text.len(), &picker).is_empty());
+        assert!(compute_suggestions(text, text.len(), &state).is_empty());
+    }
+
+    #[test]
+    fn compute_suggestions_matches_slack_watch_channel_argument_by_prefix() {
+        let state = state_with_slack_picker(picker_with_channels(&["general", "random"]));
+        let text = "/slack-watch #gen";
+        let candidates = compute_suggestions(text, text.len(), &state);
+        assert_eq!(candidates, vec!["#general".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_offers_slack_watch_channels_past_the_first_argument() {
+        // Unlike `/send`, `/slack-watch` takes an open-ended channel list --
+        // the third word (and beyond) is still completable (`step45.md`).
+        let state = state_with_slack_picker(picker_with_channels(&["general", "random"]));
+        let text = "/slack-watch #general #ran";
+        let candidates = compute_suggestions(text, text.len(), &state);
+        assert_eq!(candidates, vec!["#random".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_matches_repo_watch_argument_by_prefix() {
+        let state = WorkspaceState {
+            github_picker: github_picker_state_with_two_repos(),
+            ..Default::default()
+        };
+        let text = "/repo-watch owner/repo-o";
+        let candidates = compute_suggestions(text, text.len(), &state);
+        assert_eq!(candidates, vec!["owner/repo-one".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_offers_repo_watch_repos_past_the_first_argument() {
+        let state = WorkspaceState {
+            github_picker: github_picker_state_with_two_repos(),
+            ..Default::default()
+        };
+        let text = "/repo-watch owner/repo-one owner/repo-t";
+        let candidates = compute_suggestions(text, text.len(), &state);
+        assert_eq!(candidates, vec!["owner/repo-two".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_matches_calendar_rename_argument_by_prefix() {
+        let state = WorkspaceState {
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        let text = "/calendar-rename 회";
+        let candidates = compute_suggestions(text, text.len(), &state);
+        assert_eq!(candidates, vec!["회사".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_matches_calendar_remove_argument_by_prefix() {
+        let state = WorkspaceState {
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        let text = "/calendar-remove 개";
+        let candidates = compute_suggestions(text, text.len(), &state);
+        assert_eq!(candidates, vec!["개인".to_string()]);
+    }
+
+    #[test]
+    fn compute_suggestions_does_not_offer_calendar_names_past_the_first_argument() {
+        // The second word is the freeform new label being typed in, not a
+        // lookup (`step45.md`).
+        let state = WorkspaceState {
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        let text = "/calendar-rename 회사 개";
+        assert!(compute_suggestions(text, text.len(), &state).is_empty());
     }
 
     #[test]
@@ -2694,6 +2971,56 @@ mod tests {
         }
         handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(state.cmd_buffer.raw_text, "/send #general");
+    }
+
+    #[test]
+    fn tab_completes_a_calendar_name_for_calendar_remove() {
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            calendar_picker: calendar_picker_state_with_two_calendars(),
+            ..Default::default()
+        };
+        for c in "/calendar-remove 회".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/calendar-remove 회사");
+    }
+
+    #[test]
+    fn cycling_past_a_multi_word_candidate_replaces_the_whole_original_word_not_just_its_tail() {
+        // step45.md: two calendars share the "회" prefix, and one of them
+        // ("회사 백업") is multi-word -- the second `Tab` press used to
+        // recompute `word_start` against the already-spliced text, find the
+        // space *inside* "회사 백업" instead of the real boundary before
+        // "회", and corrupt the replacement. `suggestion_anchor` pins the
+        // original boundary so cycling stays correct.
+        let mut state = WorkspaceState {
+            focus_mode: FocusMode::Input,
+            calendar_picker: crate::state::CalendarPickerState {
+                calendars: vec![
+                    PickerRow {
+                        id: "id-1".into(),
+                        label: "회사".into(),
+                        selected: true,
+                    },
+                    PickerRow {
+                        id: "id-2".into(),
+                        label: "회사 백업".into(),
+                        selected: true,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for c in "/calendar-remove 회".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/calendar-remove 회사");
+        handle_key(&mut state, key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(state.cmd_buffer.raw_text, "/calendar-remove 회사 백업");
     }
 
     #[test]
